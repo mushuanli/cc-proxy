@@ -1,0 +1,116 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+    --bg: #f7f6f3;
+    --bg-panel: #ffffff;
+    --bg-card: #eef0f4;
+    --text: #2c2c35;
+    --text-muted: #8a8a9a;
+    --accent: #c0606a;
+    --accent2: #4a90a4;
+    --success: #4a9e6f;
+    --warning: #b08030;
+    --error: #c05050;
+    --border: #dde0e8;
+    --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    /* Chart palette */
+    --chart-grid: #e8eaf0;
+    --chart-axis: #b0b4c0;
+}
+
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+/* ── Header ── */
+header { background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+header h1 { font-size: 1.1rem; font-weight: 700; color: var(--accent2); white-space: nowrap; }
+nav { display: flex; gap: 2px; }
+nav a { color: var(--text-muted); text-decoration: none; padding: 5px 12px; border-radius: 6px; font-size: 0.85rem; transition: all 0.15s; }
+nav a:hover { background: var(--bg-card); color: var(--text); }
+nav a.active { background: var(--accent2); color: white; }
+.status-bar { margin-left: auto; display: flex; gap: 16px; font-size: 0.8rem; color: var(--text-muted); }
+#connection-status.connected { color: var(--success); }
+#connection-status.connected.silent { color: var(--warning); }
+#connection-status.disconnected { color: var(--error); }
+
+/* ── Main / Views ── */
+main { padding: 14px 20px; }
+.view { display: none; }
+.view.active { display: block; }
+
+/* ── Toolbar ── */
+.toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.toolbar label { font-size: 0.82rem; color: var(--text-muted); }
+.toolbar .sep { color: var(--border); margin: 0 2px; }
+.filter-row { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 8px; }
+
+/* ── Inspector toolbar cost stats ── */
+.inspector-cost-stats { display: flex; gap: 6px; align-items: center; }
+.cost-stat { display: flex; align-items: center; gap: 4px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 5px; padding: 3px 8px; font-size: 0.78rem; white-space: nowrap; }
+.cost-stat-label { color: var(--text-muted); font-size: 0.72rem; }
+.cost-stat-value { font-family: var(--font-mono); color: var(--accent2); font-weight: 600; }
+
+.toolbar input[type="text"], .toolbar select, .toolbar input[type="datetime-local"] {
+    background: var(--bg-panel); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 10px; border-radius: 5px; font-size: 0.82rem; font-family: var(--font-mono);
+}
+.toolbar input[type="datetime-local"]::-webkit-calendar-picker-indicator { filter: invert(0.8); cursor: pointer; }
+
+/* ── Buttons ── */
+button { background: var(--bg-card); color: var(--text); border: 1px solid var(--border); padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 0.82rem; transition: all 0.15s; }
+button:hover { background: var(--accent2); border-color: var(--accent2); color: white; }
+button:active { transform: scale(0.97); }
+button.btn-primary { background: var(--accent2); border-color: var(--accent2); color: white; }
+button.btn-primary:hover { background: #3a7a8e; }
+button.btn-danger { background: transparent; border-color: var(--error); color: var(--error); }
+button.btn-danger:hover { background: var(--error); color: white; }
+button.btn-sm { padding: 3px 8px; font-size: 0.75rem; }
+button.recording { background: var(--error); border-color: var(--error); color: white; animation: pulse-rec 1.5s ease-in-out infinite; }
+button.recording:hover { background: #a83030; border-color: #a83030; }
+
+@keyframes pulse-rec {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+
+.rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--error); animation: blink-dot 1s step-end infinite; vertical-align: middle; margin-right: 2px; }
+
+@keyframes blink-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+.hidden { display: none !important; }
+
+/* ── Table ── */
+.table-container { overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); max-height: calc(100vh - 260px); }
+#view-inspector.detail-open .table-container { max-height: calc(50vh - 120px); }
+
+table { width: 100%; min-width: 640px; border-collapse: collapse; font-size: 0.78rem; }
+thead { background: var(--bg-card); position: sticky; top: 0; z-index: 1; }
+th { padding: 9px 10px; text-align: left; font-weight: 600; color: var(--text-muted); white-space: nowrap; border-bottom: 1px solid var(--border); }
+td { padding: 7px 10px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Fixed-width columns — min-width keeps them stable without table-layout:fixed */
+.col-chk   { width: 28px;  min-width: 28px;  padding: 4px !important; text-align: center; }
+.col-act   { width: 32px;  min-width: 32px; }
+
+tbody tr { cursor: pointer; transition: background 0.1s; }
+tbody tr:hover { background: var(--bg-card); }
+tbody tr.selected { background: var(--accent2); color: white; }
+td.status-200 { color: var(--success); }
+td.status-4xx { color: var(--warning); }
+td.status-5xx { color: var(--error); }
+
+.col-chk input[type="checkbox"] { cursor: pointer; accent-color: var(--accent2); }
+.btn-delete-row { background: transparent; border: none; color: var(--text-muted); font-size: 1rem; padding: 0 4px; cursor: pointer; border-radius: 3px; line-height: 1; }
+.btn-delete-row:hover { background: var(--error); color: white; }
+
+/* ── Pagination ── */
+.pagination { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 0; font-size: 0.8rem; color: var(--text-muted); }
+.pagination select { background: var(--bg-panel); border: 1px solid var(--border); color: var(--text); padding: 3px 6px; border-radius: 4px; font-size: 0.78rem; }
+.pagination button { padding: 3px 10px; font-size: 0.78rem; }
+.pagination button:disabled { opacity: 0.35; cursor: not-allowed; }
+.pagination button:disabled:hover { background: var(--bg-card); border-color: var(--border); color: var(--text); }
+
+/* ── Form shared ── */
+.form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }

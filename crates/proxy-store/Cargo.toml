@@ -1,0 +1,21 @@
+[package]
+name = "proxy-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+proxy-common = { path = "../proxy-common" }
+
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "rt", "sync", "macros"] }
+ulid = { version = "1", features = ["serde"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

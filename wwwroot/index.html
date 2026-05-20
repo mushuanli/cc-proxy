@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CC Proxy</title>
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/inspector.css">
+    <link rel="stylesheet" href="css/settings.css">
+    <link rel="stylesheet" href="css/cost.css">
+    <link rel="stylesheet" href="css/summary.css">
+    <link rel="stylesheet" href="css/archive.css">
+</head>
+<body>
+    <header>
+        <h1>CC Proxy</h1>
+        <nav>
+            <a href="#" data-view="inspector" class="active" data-i18n="nav.inspector">Inspector</a>
+            <a href="#" data-view="cost" data-i18n="nav.cost">Cost</a>
+            <a href="#" data-view="settings" data-i18n="nav.settings">Settings</a>
+            <a href="#" data-view="conversation" data-i18n="nav.conversation">Conversation</a>
+            <a href="#" data-view="mcp" data-i18n="nav.mcp">MCP Observer</a>
+            <a href="#" data-view="hooks" data-i18n="nav.hooks">Hooks</a>
+            <a href="#" data-view="archive" data-i18n="nav.archive">Archive</a>
+        </nav>
+        <div class="status-bar">
+            <span id="connection-status" class="disconnected" data-i18n="status.disconnected">Disconnected</span>
+            <span id="request-count" data-i18n="status.requests">0 requests</span>
+            <span id="capture-status"></span>
+        </div>
+    </header>
+
+    <main>
+        <!-- ── Inspector View ── -->
+        <section id="view-inspector" class="view active">
+            <div class="toolbar">
+                <button id="btn-toggle-capture" data-i18n="inspector.record" data-i18n-title="inspector.record" title="Toggle live traffic recording">Record</button>
+                <button id="btn-export-selected" class="hidden" data-i18n="inspector.export_selected">Export Selected</button>
+                <button id="btn-flush-selected" class="hidden" data-i18n="inspector.export_to_disk" data-i18n-title="inspector.export_to_disk" title="Export selected sessions to sessions/ directory as YAML files">Export to Disk</button>
+                <button id="btn-delete-selected" class="hidden" style="background:var(--error)">Delete Selected (<span id="selected-count">0</span>)</button>
+                <span class="sep">|</span>
+                <button id="btn-toggle-expand" data-i18n="inspector.expand_all" title="Expand/Collapse all sessions">+ All</button>
+                <span class="sep">|</span>
+                <label data-i18n="inspector.upstream">Upstream:</label>
+                <select id="upstream-select"></select>
+                <span class="sep">|</span>
+                <label data-i18n="inspector.effort">Effort:</label>
+                <select id="effort-select"></select>
+                <span class="sep">|</span>
+                <div id="inspector-cost-stats" class="inspector-cost-stats">
+                    <span class="cost-stat" data-i18n-title="inspector.today_tokens" title="Current upstream today tokens (in/out)"><span class="cost-stat-label" data-i18n="inspector.today_tokens">今日 Tokens</span><span id="stat-today-tokens" class="cost-stat-value">—</span></span>
+                    <span class="cost-stat" data-i18n-title="inspector.today_cost" title="Current upstream today cost"><span class="cost-stat-label" data-i18n="inspector.today_cost">今日费用</span><span id="stat-today-cost" class="cost-stat-value">—</span></span>
+                    <span class="cost-stat" data-i18n-title="inspector.month_tokens" title="Current upstream this month tokens (in/out)"><span class="cost-stat-label" data-i18n="inspector.month_tokens">本月 Tokens</span><span id="stat-month-tokens" class="cost-stat-value">—</span></span>
+                    <span class="cost-stat" data-i18n-title="inspector.month_cost" title="Current upstream this month cost"><span class="cost-stat-label" data-i18n="inspector.month_cost">本月费用</span><span id="stat-month-cost" class="cost-stat-value">—</span></span>
+                </div>
+            </div>
+            <div class="toolbar filter-row">
+                <label data-i18n="inspector.model_filter">Model:</label>
+                <select id="filter-model">
+                    <option value="" data-i18n="inspector.all_models">All Models</option>
+                </select>
+                <label data-i18n="inspector.from">From:</label>
+                <input type="datetime-local" id="filter-time-from" step="1">
+                <label data-i18n="inspector.to">To:</label>
+                <input type="datetime-local" id="filter-time-to" step="1">
+            </div>
+            <div class="table-container">
+                <table id="requests-table">
+                    <thead>
+                        <tr>
+                            <th class="col-chk"><input type="checkbox" id="select-all" data-i18n-title="inspector.select_all_title" title="Select all"></th>
+                            <th data-i18n="table.summary">Summary</th>
+                        </tr>
+                    </thead>
+                    <tbody id="requests-tbody"></tbody>
+                </table>
+            </div>
+            <div class="pagination" id="pagination">
+                <span id="page-info">0 requests</span>
+                <select id="page-size">
+                    <option value="20" data-i18n="pagination.per_page_20">20 / page</option>
+                    <option value="50" selected data-i18n="pagination.per_page_50">50 / page</option>
+                    <option value="100" data-i18n="pagination.per_page_100">100 / page</option>
+                    <option value="200" data-i18n="pagination.per_page_200">200 / page</option>
+                </select>
+                <button id="btn-page-prev" disabled data-i18n="pagination.prev">Prev</button>
+                <span id="page-num">Page 1</span>
+                <button id="btn-page-next" disabled data-i18n="pagination.next">Next</button>
+            </div>
+            <div id="request-detail" class="detail-panel hidden">
+                <div class="detail-header">
+                    <h3 id="detail-title" data-i18n="inspector.request_detail">Request Detail</h3>
+                    <div>
+                        <button id="btn-fullscreen-detail" data-i18n-title="inspector.fullscreen" title="Fullscreen">⛶</button>
+                        <button id="btn-close-detail" data-i18n-title="inspector.close" title="Close">×</button>
+                    </div>
+                </div>
+                <div class="detail-tabs">
+                    <button class="tab active" data-tab="request" data-i18n="inspector.request_tab">Request</button>
+                    <button class="tab" data-tab="response" data-i18n="inspector.response_tab">Response</button>
+                    <button class="tab" data-tab="sse" data-i18n="inspector.sse_tab">SSE Events</button>
+                </div>
+                <div id="detail-content" class="detail-body"></div>
+            </div>
+        </section>
+
+        <!-- ── Cost View ── -->
+        <section id="view-cost" class="view">
+            <div class="toolbar">
+                <button class="btn-cost-mode active" data-mode="day" data-i18n="cost.mode_day">按日</button>
+                <button class="btn-cost-mode" data-mode="week" data-i18n="cost.mode_week">按周</button>
+                <button class="btn-cost-mode" data-mode="month" data-i18n="cost.mode_month">按月</button>
+                <input type="month" id="cost-month-picker">
+                <span class="sep">|</span>
+                <button id="btn-cost-refresh" data-i18n="cost.refresh">Refresh</button>
+                <span id="cost-loading" class="hidden" data-i18n="cost.loading">Loading...</span>
+            </div>
+            <div class="cost-cards">
+                <div class="cost-card">
+                    <div class="cost-card-label" data-i18n="cost.total_cost">Total Cost</div>
+                    <div class="cost-card-value" id="cost-total">¥0.0000</div>
+                </div>
+                <div class="cost-card">
+                    <div class="cost-card-label" data-i18n="cost.input_tokens">Input Tokens</div>
+                    <div class="cost-card-value" id="cost-input-tokens">0</div>
+                </div>
+                <div class="cost-card">
+                    <div class="cost-card-label" data-i18n="cost.output_tokens">Output Tokens</div>
+                    <div class="cost-card-value" id="cost-output-tokens">0</div>
+                </div>
+                <div class="cost-card">
+                    <div class="cost-card-label" data-i18n="cost.requests">Requests</div>
+                    <div class="cost-card-value" id="cost-request-count">0</div>
+                </div>
+                <div class="cost-card">
+                    <div class="cost-card-label" data-i18n="cost.cache_tokens">Cache Creation</div>
+                    <div class="cost-card-value" id="cost-cache-tokens">0</div>
+                </div>
+            </div>
+
+            <!-- Daily cost bar chart -->
+            <div class="cost-chart-wrap">
+                <div class="cost-chart-header">
+                    <span class="cost-chart-title" id="cost-chart-title" data-i18n="cost.daily_chart_title">每日费用趋势</span>
+                    <div class="cost-chart-legend" id="cost-chart-legend"></div>
+                </div>
+                <div class="cost-chart-container">
+                    <canvas id="cost-daily-chart"></canvas>
+                    <div id="cost-chart-empty" class="cost-chart-empty hidden" data-i18n="cost.no_data">No data</div>
+                    <div id="cost-chart-tooltip" class="cost-chart-tooltip hidden"></div>
+                </div>
+            </div>
+
+            <!-- Drill-down detail (shown when a bar is clicked) -->
+            <div id="cost-drilldown" class="cost-drilldown hidden">
+                <div class="cost-drilldown-header">
+                    <span id="cost-drilldown-title" class="cost-drilldown-title"></span>
+                    <button id="btn-drilldown-close" class="btn-sm">✕</button>
+                </div>
+                <div class="cost-drilldown-grid">
+                    <div class="cost-panel">
+                        <h3 data-i18n="cost.by_session">By Session</h3>
+                        <table>
+                            <thead><tr><th style="width:9ch" data-i18n="cost.col_session">Session</th><th style="width:52px" data-i18n="cost.col_models">Models</th><th style="width:4ch" data-i18n="cost.col_reqs">Reqs</th><th style="width:80px" data-i18n="cost.col_in_out">In / Out</th><th style="width:70px" data-i18n="cost.col_cost">Cost</th></tr></thead>
+                            <tbody id="drill-by-session"></tbody>
+                        </table>
+                    </div>
+                    <div class="cost-panel">
+                        <h3 data-i18n="cost.by_model">By Model</h3>
+                        <table>
+                            <thead><tr><th data-i18n="cost.col_models">Model</th><th style="width:8ch" data-i18n="cost.col_reqs">Reqs</th><th data-i18n="cost.col_in_out">In / Out</th><th data-i18n="cost.col_cost">Cost</th></tr></thead>
+                            <tbody id="drill-by-model"></tbody>
+                        </table>
+                    </div>
+                    <div class="cost-panel">
+                        <h3 data-i18n="cost.by_provider">By Provider</h3>
+                        <table>
+                            <thead><tr><th data-i18n="cost.col_provider">Provider</th><th style="width:8ch" data-i18n="cost.col_in">In</th><th style="width:8ch" data-i18n="cost.col_out">Out</th><th data-i18n="cost.col_cost">Cost</th></tr></thead>
+                            <tbody id="drill-by-provider"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="cost-detail-grid">
+                <div class="cost-panel">
+                    <h3 data-i18n="cost.by_session">By Session</h3>
+                    <table>
+                        <thead><tr><th style="width:9ch" data-i18n="cost.col_session">Session</th><th style="width:52px" data-i18n="cost.col_models">Models</th><th style="width:4ch" data-i18n="cost.col_reqs">Reqs</th><th style="width:80px" data-i18n="cost.col_in_out">In / Out</th><th style="width:70px" data-i18n="cost.col_cost">Cost</th></tr></thead>
+                        <tbody id="cost-by-session"></tbody>
+                    </table>
+                </div>
+                <div class="cost-panel">
+                    <h3 data-i18n="cost.by_model">By Model</h3>
+                    <table>
+                        <thead><tr><th data-i18n="cost.col_models">Model</th><th style="width:8ch" data-i18n="cost.col_reqs">Reqs</th><th data-i18n="cost.col_in_out">In / Out</th><th data-i18n="cost.col_cost">Cost</th></tr></thead>
+                        <tbody id="cost-by-model"></tbody>
+                    </table>
+                </div>
+                <div class="cost-panel">
+                    <h3 data-i18n="cost.by_provider">By Provider</h3>
+                    <table>
+                        <thead><tr><th data-i18n="cost.col_provider">Provider</th><th style="width:8ch" data-i18n="cost.col_in">In</th><th style="width:8ch" data-i18n="cost.col_out">Out</th><th data-i18n="cost.col_cost">Cost</th></tr></thead>
+                        <tbody id="cost-by-provider"></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ── Settings View ── -->
+        <section id="view-settings" class="view">
+            <div class="settings-layout">
+
+                <!-- Model Matrix panel -->
+                <div class="settings-panel settings-panel-wide">
+                    <div class="settings-panel-header">
+                        <h2 data-i18n="settings.model_pricing_title">Model Pricing</h2>
+                        <div class="settings-panel-header-actions">
+                            <button id="btn-matrix-add-provider" class="btn-sm" data-i18n="settings.add_provider">+ Provider</button>
+                            <button id="btn-matrix-add-model" class="btn-sm btn-primary" data-i18n="settings.add_model">+ Model</button>
+                        </div>
+                    </div>
+                    <div class="settings-panel-hint" data-i18n="settings.model_matrix_hint">
+                        每行一个逻辑模型，每个 Provider 列填写该 Provider 使用的 model name（空=使用 model id，— 表示不支持）
+                    </div>
+                    <div class="matrix-scroll">
+                        <table id="model-matrix-table" class="model-matrix">
+                            <thead id="model-matrix-head"></thead>
+                            <tbody id="model-matrix-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Upstreams panel -->
+                    <div class="settings-panel">
+                        <div class="settings-panel-header">
+                            <h2 data-i18n="settings.upstreams_title">Upstreams</h2>
+                            <button id="btn-upstream-add" class="btn-sm btn-primary" data-i18n="settings.add">+ Add</button>
+                        </div>
+                        <div class="ut-scroll">
+                            <table id="upstream-table" class="upstream-table">
+                                <thead id="upstream-table-head"></thead>
+                                <tbody id="upstream-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                <!-- Data Retention panel -->
+                <div class="settings-panel">
+                    <div class="settings-panel-header">
+                        <h2 data-i18n="settings.data_retention">Data Retention</h2>
+                    </div>
+                    <div class="retention-form">
+                        <div class="form-group">
+                            <label data-i18n="settings.keep_all_hours">Keep all requests (hours)</label>
+                            <input type="number" id="ret-hours" min="0" value="72" style="width:80px">
+                            <span class="hint" data-i18n="settings.hours_hint">0=never clean</span>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="settings.max_sessions">Max sessions</label>
+                            <input type="number" id="ret-max-sessions" min="0" value="20" style="width:80px">
+                            <span class="hint" data-i18n="settings.sessions_hint">0=unlimited</span>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="settings.delete_after_days">Delete session records after (days)</label>
+                            <input type="number" id="ret-delete-days" min="0" value="0" style="width:80px">
+                            <span class="hint" data-i18n="settings.days_hint">0=keep forever</span>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="settings.last_cleanup">Last cleanup</label>
+                            <span id="ret-last-cleanup" class="hint">—</span>
+                        </div>
+                        <div class="form-actions">
+                            <button id="btn-retention-save" class="btn-primary" data-i18n="settings.save">Save</button>
+                            <button id="btn-cleanup-now" data-i18n="settings.clean_up_now">Clean Up Now</button>
+                            <button id="btn-flush-now" data-i18n="settings.export_all_now" title="Export all sessions to sessions/ directory">Export All Now</button>
+                        </div>
+                        <div id="ret-cleanup-result" class="cleanup-result hidden"></div>
+                    </div>
+                </div>
+
+                <!-- Global Proxy panel -->
+                <div class="settings-panel">
+                    <div class="settings-panel-header">
+                        <h2 data-i18n="settings.global_proxy">Global Proxy</h2>
+                    </div>
+                    <div class="retention-form">
+                        <div class="form-group">
+                            <label data-i18n="settings.global_proxy_label">HTTP Proxy URL</label>
+                            <input type="text" id="global-proxy-input" placeholder="http://proxy:8080" style="width:300px">
+                            <span class="hint" data-i18n="settings.global_proxy_hint">Blank = no global proxy</span>
+                        </div>
+                        <div class="form-actions">
+                            <button id="btn-global-proxy-save" class="btn-primary" data-i18n="settings.save">Save</button>
+                            <span id="global-proxy-status" class="hint" style="margin-left:8px"></span>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- ── Conversation View ── -->
+        <section id="view-conversation" class="view">
+            <div class="toolbar">
+                <select id="conv-filter">
+                    <option value="" data-i18n="inspector.all">All</option>
+                </select>
+                <button id="btn-fullscreen-conv" data-i18n-title="inspector.fullscreen" title="Fullscreen">⛶</button>
+            </div>
+            <div id="conversation-timeline" class="timeline"></div>
+        </section>
+
+        <!-- ── MCP Observer View ── -->
+        <section id="view-mcp" class="view">
+            <div class="toolbar">
+                <label data-i18n="mcp.destination">MCP Destination:</label>
+                <input type="text" id="mcp-destination" data-i18n-placeholder="mcp.destination_placeholder" placeholder="e.g. https://gitmcp.io/user/repo" size="50">
+                <button id="btn-set-mcp" data-i18n="mcp.set">Set</button>
+                <button id="btn-clear-mcp-view" data-i18n="mcp.clear">Clear</button>
+            </div>
+            <div class="table-container">
+                <table id="mcp-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.time">Time</th>
+                            <th data-i18n="table.method">Method</th>
+                            <th data-i18n="table.status">Status</th>
+                            <th data-i18n="table.request_body">Request Body</th>
+                            <th data-i18n="table.response_body">Response Body</th>
+                        </tr>
+                    </thead>
+                    <tbody id="mcp-tbody"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ── Hooks View ── -->
+        <section id="view-hooks" class="view">
+            <div class="toolbar">
+                <button id="btn-clear-hooks" data-i18n="hooks.clear_hooks">Clear Hooks</button>
+            </div>
+            <div class="table-container">
+                <table id="hooks-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.time">Time</th>
+                            <th data-i18n="table.event">Event</th>
+                            <th data-i18n="table.session">Session</th>
+                            <th data-i18n="table.cwd">CWD</th>
+                            <th data-i18n="table.exit_code">Exit Code</th>
+                        </tr>
+                    </thead>
+                    <tbody id="hooks-tbody"></tbody>
+                </table>
+            </div>
+        </section>
+        <!-- ── Archive View ── -->
+        <section id="view-archive" class="view">
+            <div class="toolbar">
+                <input type="search" id="archive-search-input" class="archive-search-input"
+                       data-i18n-placeholder="archive.search_placeholder"
+                       placeholder="Search archived sessions...">
+                <span id="archive-search-status" style="font-size:0.82rem;color:var(--text-muted)"></span>
+                <button id="btn-archive-refresh" data-i18n="archive.refresh">Refresh</button>
+            </div>
+            <div class="archive-layout">
+                <div id="archive-list-pane" class="archive-list-pane"></div>
+                <div id="archive-content-pane" class="archive-content-pane hidden">
+                    <div class="archive-content-header">
+                        <div class="archive-content-title-wrap">
+                            <span id="archive-content-name" class="archive-content-title"></span>
+                            <button id="btn-archive-rename" class="btn-sm" title="Rename">✎</button>
+                        </div>
+                        <button id="btn-archive-close-pane" class="btn-sm" title="Close">×</button>
+                    </div>
+                    <div id="archive-content-body" class="archive-content-body"></div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ── Summary Panel ── -->
+    <div id="summary-panel" class="summary-panel">
+        <div class="summary-tab-strip" id="summary-tab-strip" data-i18n-title="summary.expand_panel" title="Click to expand">
+            <span class="summary-tab-label" data-i18n="summary.title">Summary</span>
+        </div>
+        <div class="summary-inner">
+            <div class="summary-header">
+                <button id="btn-summary-toggle" class="summary-toggle-btn" data-i18n-title="summary.collapse_panel" title="Collapse panel">&#8250;</button>
+                <span id="summary-title" class="summary-title-text" data-i18n="summary.session_summary">Session Summary</span>
+                <div class="summary-header-actions">
+                    <button id="btn-summary-rename" class="btn-sm hidden" data-i18n-title="summary.rename" title="Rename session">Rename</button>
+                    <div class="summary-export-wrap">
+                        <button id="btn-summary-export" class="btn-sm hidden" data-i18n-title="summary.export" title="Export session">Export ▾</button>
+                        <div id="summary-export-menu" class="summary-export-menu hidden">
+                            <button id="btn-summary-export-json">JSON</button>
+                            <button id="btn-summary-export-yaml">YAML</button>
+                        </div>
+                    </div>
+                    <button id="btn-summary-delete" class="btn-sm btn-danger hidden" data-i18n-title="summary.delete" title="Delete session">Delete</button>
+                </div>
+            </div>
+            <div id="summary-content" class="summary-content">
+                <div class="summary-empty">
+                    <div class="summary-empty-icon">&#9776;</div>
+                    <div data-i18n="summary.click_view_summary">Click a session to view summary</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Fullscreen overlay ── -->
+    <div id="fullscreen-overlay" class="fullscreen-overlay hidden">
+        <div class="fullscreen-header">
+            <span id="fullscreen-title"></span>
+            <button id="btn-fullscreen-close" class="fullscreen-close">&#10005;</button>
+        </div>
+        <div id="fullscreen-content" class="fullscreen-content"></div>
+    </div>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>

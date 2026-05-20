@@ -1,0 +1,311 @@
+import { state } from './state.js';
+import { t } from './i18n.js';
+import { esc, shortSid } from './utils.js';
+import { renderPage, updateFilterOptions, updateRequestCount } from './inspector.js';
+
+// ── Summary panel controls ──
+
+export function toggleSummaryPanel() {
+    state.summaryCollapsed = !state.summaryCollapsed;
+    const panel = document.getElementById('summary-panel');
+    const inspector = document.getElementById('view-inspector');
+    panel.classList.toggle('collapsed', state.summaryCollapsed);
+    inspector.classList.toggle('summary-collapsed', state.summaryCollapsed);
+    // Arrow direction: › when collapsed (expand), ‹ when expanded (collapse)
+    document.getElementById('btn-summary-toggle').textContent = state.summaryCollapsed ? '\u203a' : '\u2039';
+}
+
+export function bindSummarySidebarActions(sid) {
+    const renameBtn = document.getElementById('btn-summary-rename');
+    const exportBtn = document.getElementById('btn-summary-export');
+    const exportJsonBtn = document.getElementById('btn-summary-export-json');
+    const exportYamlBtn = document.getElementById('btn-summary-export-yaml');
+    const deleteBtn = document.getElementById('btn-summary-delete');
+
+    [renameBtn, exportBtn, deleteBtn].forEach(b => b.classList.remove('hidden'));
+
+    renameBtn.onclick = () => {
+        const current = state.sessionCache[sid] || shortSid(sid);
+        const label = prompt('New name:', current);
+        if (!label || label.trim() === current) return;
+        fetch(`/api/session/${encodeURIComponent(sid)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: label.trim() }),
+        }).then(() => {
+            state.sessionCache[sid] = label.trim();
+            document.getElementById('summary-title').textContent = t('summary.summary_of', { label: label.trim().slice(-20) });
+            updateFilterOptions();
+            renderPage();
+        });
+    };
+
+    exportJsonBtn.onclick = () => {
+        window.open(`/api/session/${encodeURIComponent(sid)}/export?format=json`, '_blank');
+        document.getElementById('summary-export-menu').classList.add('hidden');
+    };
+    exportYamlBtn.onclick = () => {
+        window.open(`/api/session/${encodeURIComponent(sid)}/export?format=yaml`, '_blank');
+        document.getElementById('summary-export-menu').classList.add('hidden');
+    };
+
+    deleteBtn.onclick = () => {
+        const label = state.sessionCache[sid] || shortSid(sid);
+        if (!confirm(t('summary.confirm_delete_session', { label }))) return;
+        fetch(`/api/session/${encodeURIComponent(sid)}`, { method: 'DELETE' }).then(() => {
+            delete state.sessionMeta[sid];
+            delete state.sessionCache[sid];
+            if (state.currentSelectedSession === sid) {
+                state.currentSelectedSession = null;
+                document.getElementById('summary-title').textContent = t('summary.session_summary');
+                document.getElementById('summary-content').innerHTML = '<div class="summary-empty"><div class="summary-empty-icon">&#9776;</div><div>' + t('summary.click_view_summary') + '</div></div>';
+                [renameBtn, exportBtn, deleteBtn].forEach(b => b.classList.add('hidden'));
+            }
+            renderPage(); updateFilterOptions(); updateRequestCount();
+        });
+    };
+}
+
+export async function openRequestSummaryPanel(reqId, sid) {
+    const content = document.getElementById('summary-content');
+    document.getElementById('summary-title').textContent = t('summary.loading');
+    content.innerHTML = '<div class="summary-loading">' + t('summary.loading') + '</div>';
+    document.getElementById('summary-panel').classList.remove('hidden');
+    document.getElementById('view-inspector').classList.add('summary-open');
+    bindSummarySidebarActions(sid);
+    if (state.summaryCollapsed) toggleSummaryPanel();
+
+    try {
+        const resp = await fetch(`/api/request/${encodeURIComponent(reqId)}/summary`);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ error: resp.statusText }));
+            content.innerHTML = `<div class="summary-error">${esc(err.error || t('summary.failed_load_summary'))}</div>`;
+            document.getElementById('summary-title').textContent = t('summary.error');
+            return;
+        }
+        const data = await resp.json();
+        document.getElementById('summary-title').textContent =
+            t('summary.summary_of', { label: (state.sessionCache[sid] || sid).slice(-20) });
+        content.innerHTML = renderSummaryHTML(data);
+        bindSummaryEvents(content);
+    } catch (e) {
+        content.innerHTML = `<div class="summary-error">${esc(String(e))}</div>`;
+        document.getElementById('summary-title').textContent = 'Error';
+    }
+}
+
+export async function openSummaryPanel(sid) {
+    const content = document.getElementById('summary-content');
+    document.getElementById('summary-title').textContent = t('summary.loading');
+    content.innerHTML = '<div class="summary-loading">' + t('summary.loading') + '</div>';
+    document.getElementById('summary-panel').classList.remove('hidden');
+    document.getElementById('view-inspector').classList.add('summary-open');
+
+    // Show action buttons immediately
+    bindSummarySidebarActions(sid);
+
+    // If collapsed, auto-expand
+    if (state.summaryCollapsed) toggleSummaryPanel();
+
+    try {
+        const resp = await fetch(`/api/session/${encodeURIComponent(sid)}/summary`);
+        if (!resp.ok) {
+            // Archived session with no summary_json — offer link to Archive tab
+            const shortId = sid.slice(-8);
+            content.innerHTML = `<div class="summary-archived-notice">
+                <div class="summary-archived-icon">📦</div>
+                <div>${t('summary.archived_no_summary')}</div>
+                <button class="summary-archive-link btn-link" data-sid="${esc(sid)}">${t('summary.open_in_archive')}</button>
+            </div>`;
+            document.getElementById('summary-title').textContent = shortId;
+            // Wire up the link to switch to Archive tab and load the file
+            content.querySelector('.summary-archive-link').addEventListener('click', () => {
+                document.querySelector('[data-view="archive"]')?.click();
+                // Slight delay so the view switches before loading
+                setTimeout(() => {
+                    import('./archive.js').then(m => m.loadArchiveFile(`${sid}.yaml`));
+                }, 100);
+            });
+            return;
+        }
+        const data = await resp.json();
+        document.getElementById('summary-title').textContent =
+            t('summary.summary_of', { label: (state.sessionCache[sid] || sid).slice(-20) });
+        content.innerHTML = renderSummaryHTML(data);
+        bindSummaryEvents(content);
+    } catch (e) {
+        content.innerHTML = `<div class="summary-error">${esc(String(e))}</div>`;
+        document.getElementById('summary-title').textContent = 'Error';
+    }
+}
+
+export function renderSummaryHTML(d) {
+    const fmt = n => n != null ? n.toLocaleString() : '—';
+
+    // Meta row
+    const meta = `
+        <div class="summary-meta">
+            <span class="summary-meta-item"><strong>${esc(d.model || '—')}</strong></span>
+            <span class="summary-meta-item">${esc(d.started_at ? new Date(d.started_at).toLocaleString() : '—')}</span>
+            <span class="summary-meta-item">In: <strong>${fmt(d.input_tokens)}</strong> Out: <strong>${fmt(d.output_tokens)}</strong></span>
+            ${d.cache_read_tokens ? `<span class="summary-meta-item">Cache-hit: <strong>${fmt(d.cache_read_tokens)}</strong></span>` : ''}
+            <span class="summary-meta-item">Status: <strong>${d.status_code || '—'}</strong></span>
+            ${d.stop_reason ? `<span class="summary-meta-item">Stop: <strong>${esc(d.stop_reason)}</strong></span>` : ''}
+        </div>`;
+
+    // Tool icon mapping
+    const TOOL_ICONS = { Read: '📄', Edit: '✏️', Write: '💾', Bash: '▶', Agent: '🤖', Grep: '🔍', Glob: '📂', WebFetch: '🌐', WebSearch: '🌐' };
+    const toolIcon = name => TOOL_ICONS[name] || '⚙';
+
+    // Group actions by preceding user prompt using msg_index
+    const prompts = d.user_prompts || [];
+    const actions = d.assistant_actions || [];
+
+    // Build segments: each segment = { prompt, actions[] }
+    const segments = [];
+    for (let pi = 0; pi <= prompts.length; pi++) {
+        const prompt = pi > 0 ? prompts[pi - 1] : null;
+        const fromIdx = pi > 0 ? prompts[pi - 1].msg_index : -1;
+        const toIdx = pi < prompts.length ? prompts[pi].msg_index : Infinity;
+        const segActions = actions.filter(a => a.msg_index > fromIdx && a.msg_index < toIdx);
+        if (prompt || segActions.length > 0) {
+            segments.push({ prompt, actions: segActions });
+        }
+    }
+
+    // Render segments
+    const FOLD_AT = 5;
+    let conversationHtml = '<div class="summary-section-title">' + t('summary.conversation') + '</div>';
+    for (const seg of segments) {
+        conversationHtml += '<div class="summary-segment">';
+        if (seg.prompt) {
+            conversationHtml += `<div class="summary-prompt-header"><span class="summary-prompt-icon">💬</span><span class="summary-prompt-text">${esc(seg.prompt.text)}</span></div>`;
+        }
+        if (seg.actions.length > 0) {
+            conversationHtml += '<div class="summary-actions-group">';
+            const needFold = seg.actions.length > FOLD_AT + 2;
+            for (let i = 0; i < seg.actions.length; i++) {
+                const a = seg.actions[i];
+                const hidden = (needFold && i >= FOLD_AT) ? ' summary-action-hidden' : '';
+                let inner = '';
+                if (a.thought) {
+                    inner += `<div class="summary-action-thought">${esc(a.thought)}</div>`;
+                }
+                for (const tool of (a.tools || [])) {
+                    inner += `<div class="summary-tool-row">
+                        <span class="summary-tool-icon">${toolIcon(tool.name)}</span>
+                        <span class="summary-tool-name">${esc(tool.name)}</span>
+                        <span class="summary-tool-desc">${esc(tool.description)}</span>
+                    </div>`;
+                }
+                if (inner) {
+                    conversationHtml += `<div class="summary-action-item${hidden}">${inner}</div>`;
+                }
+            }
+            if (needFold) {
+                const hiddenCount = seg.actions.length - FOLD_AT;
+                conversationHtml += `<button class="summary-expand-btn summary-expand-seg">▼ ${t('summary.more_actions', { n: hiddenCount })}</button>`;
+            }
+            conversationHtml += '</div>';
+        }
+        conversationHtml += '</div>';
+    }
+    if (segments.length === 0) {
+        conversationHtml += '<div class="summary-loading">' + t('summary.no_conversation') + '</div>';
+    }
+    const actionsHtml = conversationHtml;
+
+    // Touched files
+    let filesHtml = '<div class="summary-section-title">' + t('summary.touched_files') + '</div>';
+    const files = d.touched_files || [];
+    if (files.length > 0) {
+        filesHtml += `<table class="summary-files-table">
+            <thead><tr><th>${t('summary.file')}</th><th>${t('summary.reads')}</th><th>${t('summary.writes')}</th><th>${t('summary.edits')}</th></tr></thead><tbody>`;
+        for (const f of files) {
+            filesHtml += `<tr>
+                <td>${esc(f.path)}</td>
+                <td class="ops">${f.reads || 0}</td>
+                <td class="ops">${f.writes || 0}</td>
+                <td class="ops">${f.edits || 0}</td>
+            </tr>`;
+        }
+        filesHtml += '</tbody></table>';
+    } else {
+        filesHtml += '<div class="summary-loading">' + t('summary.no_file_ops') + '</div>';
+    }
+
+    // Final response
+    const respText = d.final_response || '';
+    let responseHtml = '<div class="summary-section-title">' + t('summary.final_response') + '</div>';
+    if (respText) {
+        responseHtml += `<div class="summary-final-response" id="summary-final-resp">${esc(respText)}</div>
+            <div class="summary-response-toggle" id="summary-resp-toggle">${t('summary.expand')}</div>`;
+    } else {
+        responseHtml += '<div class="summary-loading">—</div>';
+    }
+
+    // Stats
+    const s = d.stats || {};
+    const byName = s.tool_call_by_name || {};
+    const toolBreakdown = Object.entries(byName)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${esc(k)}: ${v}`)
+        .join(', ');
+    const statsHtml = `
+        <div class="summary-section-title">${t('summary.stats')}</div>
+        <table class="summary-stats-table">
+            <tr><td>${t('summary.total_messages')}</td><td>${fmt(s.total_messages)}</td></tr>
+            <tr><td>${t('summary.user_prompts')}</td><td>${fmt(s.user_prompt_count)}</td></tr>
+            <tr><td>${t('summary.tool_calls')}</td><td>${fmt(s.tool_call_count)}</td></tr>
+            <tr><td>${t('summary.tool_results')}</td><td>${fmt(s.tool_result_count)}</td></tr>
+            <tr><td>${t('summary.thinking_blocks')}</td><td>${fmt(s.thinking_block_count)}</td></tr>
+            ${toolBreakdown ? `<tr><td>${t('summary.by_tool')}</td><td style="word-break:break-all;font-size:0.72rem">${toolBreakdown}</td></tr>` : ''}
+        </table>`;
+
+    return meta + actionsHtml + filesHtml + responseHtml + statsHtml;
+}
+
+export function bindSummaryEvents(container) {
+    // Per-segment expand buttons
+    container.querySelectorAll('.summary-expand-seg').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const group = btn.closest('.summary-actions-group');
+            group.querySelectorAll('.summary-action-hidden').forEach(el => el.classList.remove('summary-action-hidden'));
+            btn.remove();
+        });
+    });
+    // Toggle final response
+    const resp = container.querySelector('#summary-final-resp');
+    const toggle = container.querySelector('#summary-resp-toggle');
+    if (resp && toggle) {
+        toggle.addEventListener('click', () => {
+            const expanded = resp.classList.toggle('expanded');
+            toggle.textContent = expanded ? t('summary.collapse') : t('summary.expand');
+        });
+    }
+}
+
+export function normalizeRequestBody(item) {
+    if (typeof item.request_body === 'string' && item.request_body) {
+        try { item = { ...item, request_body: JSON.parse(item.request_body) }; } catch (e) { /* keep as string */ }
+    }
+    // Also normalize nested requests array (session export via API)
+    if (Array.isArray(item.requests)) {
+        item = { ...item, requests: item.requests.map(normalizeRequestBody) };
+    }
+    return item;
+}
+
+// ── Event listeners ──
+
+document.getElementById('btn-summary-toggle').addEventListener('click', toggleSummaryPanel);
+document.getElementById('summary-tab-strip').addEventListener('click', toggleSummaryPanel);
+
+// Export dropdown toggle
+document.getElementById('btn-summary-export').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('summary-export-menu').classList.toggle('hidden');
+});
+document.addEventListener('click', () => {
+    document.getElementById('summary-export-menu')?.classList.add('hidden');
+});

@@ -1,0 +1,188 @@
+use crate::config::AppConfig;
+use crate::error::ConfigResult;
+use crate::pricing::{BillingSnapshot, ResolvedRoute};
+use crate::upstream::UpstreamConfig;
+
+/// Resolve the route for a given request model.
+///
+/// Flow:
+/// 1. Find active upstream by name
+/// 2. Match tier rules: high → mid → low → default
+/// 3. Translate logical model → provider model via ModelPricing
+pub fn resolve_route(
+    config: &AppConfig,
+    request_model: &str,
+) -> ConfigResult<ResolvedRoute> {
+    let upstream = config
+        .proxy
+        .upstreams
+        .iter()
+        .find(|u| u.name == config.proxy.active_upstream)
+        .ok_or_else(|| {
+            crate::error::ConfigError::NotFound(format!(
+                "active upstream '{}' not found",
+                config.proxy.active_upstream
+            ))
+        })?;
+
+    let (provider_name, configured_model) = resolve_tier(upstream, request_model);
+
+    if provider_name.is_empty() {
+        return Err(crate::error::ConfigError::NotFound(format!(
+            "no route for model '{}' in upstream '{}'",
+            request_model, upstream.name
+        )));
+    }
+
+    // Translate logical model to provider-specific model name
+    let resolved_model = translate_model(&config.model_pricing, &provider_name, &configured_model);
+
+    Ok(ResolvedRoute {
+        upstream: upstream.name.clone(),
+        provider: provider_name,
+        configured_model,
+        resolved_model,
+        effort: upstream.effort.clone(),
+    })
+}
+
+/// Match the tier rules for a request model.
+fn resolve_tier(upstream: &UpstreamConfig, request_model: &str) -> (String, String) {
+    let lower = request_model.to_lowercase();
+
+    for rule in [&upstream.high, &upstream.mid, &upstream.low]
+        .into_iter()
+        .flatten()
+    {
+        if rule.matches(&lower) {
+            return (rule.provider.clone(), rule.model.clone());
+        }
+    }
+
+    if let Some(ref d) = upstream.default {
+        return (d.provider.clone(), d.model.clone());
+    }
+
+    (String::new(), String::new())
+}
+
+/// Translate a logical model id to a provider-specific model name.
+fn translate_model(
+    model_pricing: &[crate::pricing::ModelPricing],
+    provider: &str,
+    model: &str,
+) -> String {
+    if model.is_empty() {
+        return model.to_string();
+    }
+
+    // If model is a known logical id, use its provider mapping
+    if let Some(mp) = model_pricing.iter().find(|mp| mp.id == model) {
+        if let Some(name) = mp.model_name_for_provider(provider) {
+            return name;
+        }
+    }
+
+    // Pass-through: use the model string as-is
+    model.to_string()
+}
+
+/// Resolve billing snapshot for a given provider and model.
+pub fn resolve_billing(
+    config: &AppConfig,
+    provider: &str,
+    model: &str,
+) -> ConfigResult<BillingSnapshot> {
+    // Find matching ModelPricing by model name (logical id or provider model name)
+    let mp = config
+        .model_pricing
+        .iter()
+        .find(|mp| mp.matches_name(model))
+        .ok_or_else(|| {
+            crate::error::ConfigError::NotFound(format!(
+                "no pricing found for model '{}' (provider: '{}')",
+                model, provider
+            ))
+        })?;
+
+    let rates = mp.to_price_rates();
+
+    Ok(BillingSnapshot {
+        pricing_model_id: mp.id.clone(),
+        provider: provider.to_string(),
+        resolved_model: translate_model(&config.model_pricing, provider, model),
+        rates,
+        currency: "USD".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config() -> AppConfig {
+        let mut config = AppConfig::default();
+
+        config.proxy.providers.push(crate::provider::Provider {
+            name: "anthropic".into(),
+            url: "https://api.anthropic.com".into(),
+            token: Some("sk-test".into()),
+            proxy: None,
+        });
+
+        config.proxy.upstreams.push(UpstreamConfig {
+            name: "default".into(),
+            high: Some(crate::upstream::TierRule {
+                keywords: vec!["opus".into()],
+                provider: "anthropic".into(),
+                model: "claude-opus".into(),
+            }),
+            mid: None,
+            low: None,
+            default: Some(crate::upstream::TierRule {
+                keywords: vec![],
+                provider: "anthropic".into(),
+                model: "claude-sonnet".into(),
+            }),
+            effort: None,
+        });
+
+        config.proxy.active_upstream = "default".into();
+
+        let mut providers = std::collections::HashMap::new();
+        providers.insert("anthropic".into(), vec!["claude-sonnet-4-6".into()]);
+        config.model_pricing.push(crate::pricing::ModelPricing {
+            id: "claude-sonnet".into(),
+            price: vec![3.0, 15.0],
+            providers,
+        });
+
+        config
+    }
+
+    #[test]
+    fn resolve_route_high_tier() {
+        let config = make_config();
+        let route = resolve_route(&config, "claude-opus-4-6").unwrap();
+        assert_eq!(route.provider, "anthropic");
+        assert_eq!(route.configured_model, "claude-opus");
+    }
+
+    #[test]
+    fn resolve_route_default_tier() {
+        let config = make_config();
+        let route = resolve_route(&config, "claude-haiku").unwrap();
+        assert_eq!(route.provider, "anthropic");
+        assert_eq!(route.configured_model, "claude-sonnet");
+        assert_eq!(route.resolved_model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn resolve_billing_works() {
+        let config = make_config();
+        let billing = resolve_billing(&config, "anthropic", "claude-sonnet-4-6").unwrap();
+        assert_eq!(billing.pricing_model_id, "claude-sonnet");
+        assert_eq!(billing.rates.input_microusd, 3_000_000);
+        assert_eq!(billing.rates.output_microusd, 15_000_000);
+    }
+}

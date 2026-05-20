@@ -1,0 +1,229 @@
+/* ── Cost view ── */
+.cost-cards { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.cost-card {
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 20px; min-width: 140px; flex: 1;
+}
+.cost-card-label { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; }
+.cost-card-value { font-size: 1.3rem; font-weight: 700; font-family: var(--font-mono); color: var(--text); white-space: pre; }
+.cost-detail-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+.cost-panel { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.cost-panel h3 { padding: 10px 14px; font-size: 0.85rem; background: var(--bg-card); border-bottom: 1px solid var(--border); margin: 0; }
+.cost-panel table { font-size: 0.78rem; width: 100%; table-layout: fixed; min-width: 0; }
+.cost-panel td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* By Session — session col fixed at 9ch (12-char tail + link padding); cost/tokens right-aligned */
+#cost-by-session td:nth-child(1),
+#drill-by-session td:nth-child(1) { width: 9ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cost-by-session td:nth-child(2),
+#drill-by-session td:nth-child(2) { width: 52px; direction: rtl; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cost-by-session td:nth-child(3),
+#drill-by-session td:nth-child(3) { width: 4ch; font-family: var(--font-mono); }
+#cost-by-session td:nth-child(4),
+#drill-by-session td:nth-child(4) { width: 80px; }
+#cost-by-session td:nth-child(5),
+#drill-by-session td:nth-child(5) { width: 70px; white-space: nowrap; }
+/* By Model — model name truncates from left (right/tail prioritized); reqs fixed at 8ch */
+#cost-by-model td:nth-child(1), #drill-by-model td:nth-child(1) { direction: rtl; text-align: left; }
+#cost-by-model td:nth-child(2), #drill-by-model td:nth-child(2) { width: 8ch; font-family: var(--font-mono); }
+#cost-by-model td:nth-child(3), #drill-by-model td:nth-child(3) { width: 90px; }
+#cost-by-model td:nth-child(4), #drill-by-model td:nth-child(4) { width: 70px; }
+/* By Provider — provider name truncates from left; in/out fixed at 8ch */
+#cost-by-provider td:nth-child(1), #drill-by-provider td:nth-child(1) { direction: rtl; text-align: left; }
+#cost-by-provider td:nth-child(2), #drill-by-provider td:nth-child(2) { width: 8ch; font-family: var(--font-mono); }
+#cost-by-provider td:nth-child(3), #drill-by-provider td:nth-child(3) { width: 8ch; font-family: var(--font-mono); }
+#cost-by-provider td:nth-child(4), #drill-by-provider td:nth-child(4) { width: 70px; }
+.btn-cost-preset { padding: 3px 10px; font-size: 0.78rem; }
+.btn-cost-preset.active { background: var(--accent2); border-color: var(--accent2); color: white; }
+#effort-select { font-size: 0.8rem; }
+
+/* ── Cost mode toggle buttons ── */
+.btn-cost-mode { padding: 3px 10px; font-size: 0.78rem; }
+.btn-cost-mode.active { background: var(--accent2); border-color: var(--accent2); color: white; }
+#cost-month-picker { font-size: 0.8rem; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-panel); color: var(--text); }
+
+/* ── Cost Chart ── */
+.cost-chart-wrap {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+.cost-chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.cost-chart-title {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.03em;
+}
+.cost-chart-legend {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+}
+.cost-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+.cost-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+.cost-chart-container {
+    position: relative;
+    height: 180px;
+}
+#cost-daily-chart {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: pointer;
+}
+.cost-chart-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+}
+.cost-chart-tooltip {
+    position: absolute;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 0.75rem;
+    color: var(--text);
+    pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+    white-space: nowrap;
+    z-index: 10;
+    line-height: 1.7;
+}
+.cost-chart-tooltip .tt-date {
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 4px;
+    font-size: 0.78rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+}
+.cost-chart-tooltip .tt-provider {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-top: 4px;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+.cost-chart-tooltip .tt-prov-cost { color: var(--text); }
+.cost-chart-tooltip .tt-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+.cost-chart-tooltip .tt-model-row {
+    padding-left: 4px;
+}
+.cost-chart-tooltip .tt-model-id {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+.cost-chart-tooltip .tt-model-cost {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text);
+}
+.cost-chart-tooltip .tt-model-tokens {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    margin-right: 4px;
+}
+.cost-chart-tooltip .tt-prov-tokens {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+.cost-chart-tooltip .tt-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+.cost-chart-tooltip .tt-total {
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    padding-top: 4px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    justify-content: space-between;
+}
+.cost-chart-tooltip .tt-hint {
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    padding-top: 4px;
+    font-size: 0.68rem;
+    color: var(--accent2);
+    text-align: center;
+}
+
+/* Dynamic legend */
+.cost-legend-provider {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-right: 4px;
+}
+.cost-legend-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+}
+
+/* ── Cost chart cursor ── */
+#cost-daily-chart { cursor: pointer; }
+
+/* ── Drill-down panel ── */
+.cost-drilldown {
+    background: var(--bg-panel);
+    border: 1.5px solid var(--accent2);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+}
+.cost-drilldown-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+.cost-drilldown-title {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--accent2);
+    font-family: var(--font-mono);
+}
+.cost-drilldown-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+}

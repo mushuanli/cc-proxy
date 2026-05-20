@@ -1,0 +1,50 @@
+{
+  "env": {
+    "ANTHROPIC_CUSTOM_HEADERS": "anthropic-beta: context-1m-2025-08-07",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+    "DISABLE_TELEMETRY": "1",
+    ".ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+    "ANTHROPIC_BASE_URL": "http://localhost:8888",
+    "ANTHROPIC_AUTH_TOKEN": "sk-fakekey",
+    "ANTHROPIC_MODEL": "claude-sonnet-pro[1m]",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-flash[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-pro[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-flash[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-flash[1m]",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-pro[1m]",
+    "DISABLE_COST_WARNINGS": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_DISABLE_THINKING": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Bash(*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)",
+      "Bash(sudo *)",
+      "Bash(chmod 777 *)",
+      "Bash(curl * | bash)",
+      "Bash(wget * | bash)",
+      "Bash(shutdown *)",
+      "Bash(reboot *)",
+      "Bash(mkfs *)",
+      "Bash(dd if=*)"
+    ]
+  },
+  "model": "opus[1m]",
+  "statusLine": {
+    "type": "command",
+    "command": "bash $HOME/.claude/statbar.sh"
+  },
+  "preferences": {
+    "language": "zh-CN",
+    "theme": "dark"
+  }
+}

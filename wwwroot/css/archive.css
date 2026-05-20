@@ -1,0 +1,93 @@
+/* ── Archive View ── */
+.archive-search-input {
+    flex: 1; max-width: 400px;
+    background: var(--bg-panel); border: 1px solid var(--border);
+    color: var(--text); border-radius: 5px; padding: 5px 10px; font-size: 0.85rem;
+}
+.archive-layout {
+    display: flex; gap: 12px; height: calc(100vh - 138px);
+}
+.archive-list-pane {
+    flex: 0 0 360px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 6px; padding-right: 4px;
+}
+.archive-content-pane {
+    flex: 1; background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; min-width: 0;
+}
+.archive-content-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.archive-content-title-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.archive-content-title {
+    font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent2);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.archive-content-body {
+    flex: 1; overflow: auto; padding: 12px; font-family: var(--font-mono);
+    font-size: 0.76rem; color: var(--text); margin: 0; line-height: 1.5;
+}
+.archive-card {
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 14px; cursor: pointer; transition: border-color 0.15s;
+}
+.archive-card:hover { border-color: var(--accent2); }
+.archive-card.active { border-color: var(--accent2); background: var(--bg-card); }
+.archive-card-header { display: flex; align-items: baseline; gap: 8px; }
+.archive-card-name {
+    font-size: 0.85rem; font-weight: 600; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.archive-card-name.unnamed { color: var(--text-muted); font-style: italic; }
+.archive-card-sid { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); flex-shrink: 0; }
+.archive-card-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 3px; }
+.archive-card-matches {
+    display: inline-block; background: rgba(176,128,48,0.1);
+    color: var(--warning); border-radius: 4px; padding: 1px 7px;
+    font-size: 0.72rem; margin-top: 5px;
+}
+.archive-snippet {
+    font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted);
+    border-left: 2px solid var(--border); padding-left: 8px; margin-top: 6px;
+    white-space: pre-wrap; overflow: hidden;
+}
+.archive-snippet mark {
+    background: rgba(74,144,164,0.15); color: var(--accent2);
+    border-radius: 2px; padding: 0 1px;
+}
+.snippet-role {
+    display: inline-block; font-size: 0.62rem; font-weight: 600;
+    padding: 1px 5px; border-radius: 3px; margin-right: 5px; vertical-align: middle;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.snippet-role--user { background: rgba(74,144,164,0.12); color: var(--accent2); }
+.snippet-role--assistant { background: rgba(132,190,128,0.12); color: var(--success); }
+.archive-filter-tag {
+    font-size: 0.72rem; color: var(--accent2);
+    background: rgba(74,144,164,0.1); border-radius: 4px; padding: 1px 6px; margin-left: 6px;
+}
+.archive-empty {
+    padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 0.88rem;
+}
+.archive-rename-input {
+    background: var(--bg-card); border: 1px solid var(--accent2); color: var(--text);
+    border-radius: 4px; padding: 2px 6px; font-size: 0.82rem; font-family: var(--font-mono);
+    width: 200px;
+}
+
+/* ── YAML foldable tree ── */
+.yf-row {
+    display: flex; align-items: baseline; min-height: 1.5em;
+    border-radius: 3px;
+}
+.yf-head { cursor: pointer; }
+.yf-head:hover { background: rgba(0,0,0,0.03); }
+.yf-toggle {
+    flex: 0 0 1.2em; font-size: 0.62rem; color: var(--accent2);
+    user-select: none; text-align: center; padding-top: 0.1em;
+}
+.yf-toggle-gap { color: transparent; pointer-events: none; }
+.yf-text { white-space: pre-wrap; word-break: break-all; flex: 1; }
+.yf-children { border-left: 1px solid var(--border); margin-left: 0.6em; }
+.yf-hidden { display: none; }

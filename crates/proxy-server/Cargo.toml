@@ -1,0 +1,29 @@
+[package]
+name = "proxy-server"
+default-run = "proxy-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+proxy-common = { path = "../proxy-common" }
+proxy-relay = { path = "../proxy-relay" }
+proxy-store = { path = "../proxy-store" }
+
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "rustls-tls-webpki-roots", "json"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-compression = { version = "0.4", features = ["tokio", "gzip", "brotli", "deflate"] }
+rust-embed = "8"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+mime_guess = "2"
+tokio-stream = "0.1"
+anyhow = "1"
