@@ -98,6 +98,7 @@ td.col-req { padding: 6px 10px; white-space: normal; overflow: visible; }
 .rq-meta-model { color: var(--text); max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rq-meta-inout { color: var(--text-muted); }
 .rq-meta-cost { color: var(--warning); }
+.rq-meta-cost.unpriced, .unpriced-badge { color: var(--error); }
 .rq-delete { margin-left: auto; background: transparent; border: none; color: var(--text-muted); font-size: 1rem; padding: 0 4px; cursor: pointer; border-radius: 3px; line-height: 1; flex-shrink: 0; }
 .rq-delete:hover { background: var(--error); color: white; }
 

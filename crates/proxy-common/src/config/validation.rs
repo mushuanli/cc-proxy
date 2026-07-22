@@ -18,6 +18,19 @@ impl AppConfig {
                 self.proxy.active_upstream
             ));
         }
+        if !self.proxy.active_proxy_upstream.is_empty()
+            && self.proxy.active_proxy_upstream != "__auto__"
+            && !self
+                .proxy
+                .upstreams
+                .iter()
+                .any(|u| u.name == self.proxy.active_proxy_upstream)
+        {
+            errors.push(format!(
+                "active_proxy_upstream '{}' not found in upstreams",
+                self.proxy.active_proxy_upstream
+            ));
+        }
 
         // 2. Validate each upstream's tier rules
         for upstream in &self.proxy.upstreams {

@@ -185,7 +185,10 @@ pub fn list_sessions(
 ) -> StoreResult<Vec<SessionListItem>> {
     let mut sql = String::from(
         "SELECT id, client_type, client_session_id, name, cwd, project_key,
-         created_at, last_activity_at, task_count, total_cost_microusd, archive_dirty
+         created_at, last_activity_at, task_count,
+         total_input_tokens, total_output_tokens,
+         total_cache_creation_tokens, total_cache_read_tokens,
+         total_cost_microusd, archive_dirty
          FROM sessions WHERE 1=1",
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -306,6 +309,10 @@ fn row_to_session_list_item(row: &rusqlite::Row) -> rusqlite::Result<SessionList
         created_at: row.get("created_at")?,
         last_activity_at: row.get("last_activity_at")?,
         task_count: row.get::<_, i64>("task_count")? as u64,
+        total_input_tokens: row.get::<_, i64>("total_input_tokens")? as u64,
+        total_output_tokens: row.get::<_, i64>("total_output_tokens")? as u64,
+        total_cache_creation_tokens: row.get::<_, i64>("total_cache_creation_tokens")? as u64,
+        total_cache_read_tokens: row.get::<_, i64>("total_cache_read_tokens")? as u64,
         total_cost_microusd: row.get("total_cost_microusd")?,
         archive_dirty: archive_dirty != 0,
     })

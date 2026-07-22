@@ -95,6 +95,9 @@ pub struct Task {
     pub summary_created_at: Option<i64>,
 
     pub metadata: serde_json::Value,
+
+    /// Number of messages in the request body (for display in list views).
+    pub messages_count: u32,
 }
 
 /// Input to write a new task.
@@ -175,6 +178,10 @@ pub struct SessionListItem {
     pub created_at: i64,
     pub last_activity_at: i64,
     pub task_count: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cache_creation_tokens: u64,
+    pub total_cache_read_tokens: u64,
     pub total_cost_microusd: i64,
     pub archive_dirty: bool,
 }
@@ -194,6 +201,7 @@ pub struct TaskListItem {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_microusd: i64,
+    pub priced: bool,
     pub duration_ms: Option<i64>,
     pub ttft_ms: Option<i64>,
     pub summary_json: Option<String>,

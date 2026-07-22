@@ -19,9 +19,17 @@ fn session_to_json(s: &proxy_store::SessionListItem) -> serde_json::Value {
         "cwd": s.cwd,
         "project_key": s.project_key,
         "created_at": s.created_at,
+        "started_at": s.created_at,           // alias: frontend uses started_at for sort
         "last_activity_at": s.last_activity_at,
+        "ended_at": s.last_activity_at,       // alias: frontend uses ended_at
         "task_count": s.task_count,
+        "request_count": s.task_count,        // alias: frontend uses request_count
+        "total_input_tokens": s.total_input_tokens,
+        "total_output_tokens": s.total_output_tokens,
+        "total_cache_creation_tokens": s.total_cache_creation_tokens,
+        "total_cache_read_tokens": s.total_cache_read_tokens,
         "total_cost_microusd": s.total_cost_microusd,
+        "total_cost": s.total_cost_microusd as f64 / 1_000_000.0,
         "archive_dirty": s.archive_dirty,
     })
 }

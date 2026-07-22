@@ -78,6 +78,10 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
     let mut tbl = toml_edit::Table::new();
 
     tbl.insert("active_upstream", toml_edit::value(proxy.active_upstream.as_str()));
+    tbl.insert(
+        "active_proxy_upstream",
+        toml_edit::value(proxy.active_proxy_upstream.as_str()),
+    );
     tbl.insert("active_effort", toml_edit::value(proxy.active_effort.as_str()));
     if let Some(ref hp) = proxy.http_proxy {
         tbl.insert("http_proxy", toml_edit::value(hp.as_str()));

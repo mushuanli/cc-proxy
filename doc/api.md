@@ -48,6 +48,7 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/upstreams` | 列表（含 active_upstream + providers + model_pricing） |
+| POST | `/api/upstreams/:name/activate-proxy` | 将 upstream 设为透明 proxy 当前 upstream（与 relay 独立） |
 | POST | `/api/upstreams` | 新增 → persist_config |
 | PUT | `/api/upstreams/:name` | 更新 → persist_config |
 | DELETE | `/api/upstreams/:name` | 删除（最后一条不可删） → persist_config |

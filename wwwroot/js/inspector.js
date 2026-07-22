@@ -67,23 +67,33 @@ export function lookupProviderPrice(model) {
 }
 
 export function formatCost(req) {
+    if (req.priced === false) return t('inspector.unpriced');
+    // Prefer pre-computed cost from backend
+    if (req.cost != null && req.cost > 0) {
+        const total = req.cost;
+        if (total < 0.001) return `¥${total.toFixed(5)}`;
+        return `¥${total.toFixed(4)}`;
+    }
+    if (req.cost === 0) return '¥0.00';
+    // Fallback: compute from pricing table
     const price = lookupProviderPrice(req.model);
     if (!price) return '—';
     const inTok  = req.input_tokens ?? 0;
     const outTok = req.output_tokens ?? 0;
     const ccTok  = req.cache_creation_input_tokens ?? 0;
     const crTok  = req.cache_read_input_tokens ?? 0;
-    const inCost        = inTok  * price.in  / 1_000_000;
-    const outCost       = outTok * price.out / 1_000_000;
-    const cacheCreCost  = ccTok  * price.cacheWrite  / 1_000_000;
-    const cacheReadCost = crTok  * price.cacheRead  / 1_000_000;
-    const total = inCost + outCost + cacheCreCost + cacheReadCost;
+    const total = inTok  * price.in  / 1_000_000
+                + outTok * price.out / 1_000_000
+                + ccTok  * price.cacheWrite  / 1_000_000
+                + crTok  * price.cacheRead  / 1_000_000;
     if (total === 0) return '¥0.00';
     if (total < 0.001) return `¥${total.toFixed(5)}`;
     return `¥${total.toFixed(4)}`;
 }
 
 export function formatCostNum(req) {
+    if (req.priced === false) return 0;
+    if (req.cost != null) return req.cost;
     const price = lookupProviderPrice(req.model);
     if (!price) return 0;
     const inTok   = req.input_tokens ?? 0;
@@ -125,6 +135,7 @@ export function getSessionGroups() {
                 label: state.sessionCache[sid] || shortSid(sid),
                 requests: [],
                 totalIn: 0, totalOut: 0, totalCost: 0,
+                unpricedCount: 0,
                 firstTime: req.timestamp, lastTime: req.timestamp,
                 models: new Set(),
                 archived: false,
@@ -149,6 +160,7 @@ export function getSessionGroups() {
                 totalIn: meta.total_input_tokens || 0,
                 totalOut: meta.total_output_tokens || 0,
                 totalCost: meta.total_cost || 0,
+                unpricedCount: 0,
                 firstTime: meta.started_at,
                 lastTime: meta.ended_at || meta.started_at,
                 models: [],
@@ -172,6 +184,7 @@ export function getSessionGroups() {
             g.totalIn = g.requests.reduce((s, r) => s + (r.input_tokens || 0), 0);
             g.totalOut = g.requests.reduce((s, r) => s + (r.output_tokens || 0), 0);
             g.totalCost = g.requests.reduce((s, r) => s + formatCostNum(r), 0);
+            g.unpricedCount = g.requests.filter(r => r.priced === false).length;
             g.models = Array.from(g.models);
             g.request_count = Math.max(g.requests.length, g._metaRequestCount || 0);
         }
@@ -212,6 +225,9 @@ export function buildSessionHeaderHTML(group, isExpanded) {
     const timeRange = formatTime(group.lastTime);
     const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${group.totalIn}/${group.totalOut}` : '—';
     const cost = group.totalCost > 0 ? `¥${group.totalCost.toFixed(4)}` : '—';
+    const pricingHint = group.unpricedCount > 0
+        ? `<span class="session-summary-item unpriced-badge">${group.unpricedCount} ${t('inspector.unpriced')}</span>`
+        : '';
     const models = group.models.join(', ');
     const checked = state.selectedSessionIds.has(group.session_id) ? 'checked' : '';
     return `
@@ -227,6 +243,7 @@ export function buildSessionHeaderHTML(group, isExpanded) {
                     <span class="session-summary-item">${timeRange}</span>
                     <span class="session-summary-item">${tokens}t</span>
                     <span class="session-summary-item cost">${cost}</span>
+                    ${pricingHint}
                 </span>
             </div>
         </td>`;
@@ -360,7 +377,7 @@ function buildRequestSummary(req) {
     const msgCount = req.messages_count
         ?? (bodyJson && Array.isArray(bodyJson.messages) ? bodyJson.messages.length : null);
 
-    const countChip = msgCount != null
+    const countChip = (msgCount != null && msgCount > 0)
         ? `<span class="req-msg-count">[${msgCount}]</span> `
         : '';
 
@@ -368,6 +385,11 @@ function buildRequestSummary(req) {
     if (req.last_msg_summary && !bodyJson) {
         const s = tryParseJson(req.last_msg_summary);
         if (s) {
+            // New format: TaskSummary { user_request, assistant_result }
+            if (s.user_request) {
+                return `${countChip}<span class="req-summary-text">${esc(truncate(s.user_request, 80))}</span>`;
+            }
+            // Legacy format: { t: 'text', v } or { t: 'tools', tools }
             if (s.t === 'text' && s.v) {
                 return `${countChip}<span class="req-summary-text">${esc(s.v)}</span>`;
             }
@@ -433,8 +455,9 @@ function buildRequestSummary(req) {
     }
 
     // Fallback: count + tokens
-    const tokStr = req.input_tokens != null
-        ? `<span class="req-summary-tokens">${req.input_tokens}t</span>`
+    const inTok = req.input_tokens;
+    const tokStr = (inTok != null && inTok > 0)
+        ? `<span class="req-summary-tokens">${inTok}t</span>`
         : '';
     if (countChip || tokStr) return `${countChip}${tokStr}`;
 
@@ -466,7 +489,7 @@ export function buildRequestRowHTML(req, hideSession) {
         `<span class="rq-meta-status ${statusClass}">${req.status_code || '—'}</span>`,
         `<span class="rq-meta-model" title="${esc(req.model || '')}">${esc(req.model || '—')}</span>`,
         `<span class="rq-meta-inout">${inOut}t</span>`,
-        `<span class="rq-meta-cost">${costStr}</span>`,
+        `<span class="rq-meta-cost${req.priced === false ? ' unpriced' : ''}">${costStr}</span>`,
         `<span class="rq-meta-dur">${dur}</span>`,
         `<span class="rq-meta-ttft">${ttft}</span>`,
     ].join('<span class="rq-meta-sep">·</span>');
@@ -601,18 +624,15 @@ export function updatePagination(total, totalPages) {
 
 export function upsertRequestRow(req) {
     const isNew = !state.requestRows.has(req.id);
-    state.requestRows.set(req.id, req);
-    // Always re-render when session folding is on — new requests may affect group layout
-    if (isNew || req.id === state.selectedRequestId) {
-        if (!state._renderPageTimer) {
-            state._renderPageTimer = setTimeout(() => {
-                renderPage();
-                state._renderPageTimer = null;
-            }, 200);
-        }
-    } else {
-        const row = document.getElementById(`req-${req.id}`);
-        if (row) row.innerHTML = buildRequestRowHTML(req);
+    const existing = state.requestRows.get(req.id);
+    state.requestRows.set(req.id, { ...(existing || {}), ...req });
+    // Every task update can change session totals, ordering, model filters and
+    // folding layout. Re-render the group (debounced), not just the task row.
+    if (!state._renderPageTimer) {
+        state._renderPageTimer = setTimeout(() => {
+            renderPage();
+            state._renderPageTimer = null;
+        }, isNew ? 0 : 100);
     }
     // Debounce filter updates — streaming can fire 10-20x/sec
     clearTimeout(state._updateFilterTimer);
@@ -647,7 +667,8 @@ export async function showRequestDetail(req) {
         if (resp.ok) {
             const fullReq = await resp.json();
             // Write back to state so the summary column reflects the full body
-            state.requestRows.set(fullReq.id, fullReq);
+            const existing = state.requestRows.get(fullReq.id);
+            state.requestRows.set(fullReq.id, { ...(existing || {}), ...fullReq });
             const row = document.getElementById(`req-${fullReq.id}`);
             if (row) row.innerHTML = buildRequestRowHTML(fullReq, row.classList.contains('session-child'));
             updateDetailView(fullReq);
@@ -683,9 +704,12 @@ export function renderDetailBody(headers, body) {
         const lines = headers.split('\n');
         parts.push(`<details class="foldable-section"><summary>Headers (${lines.length} lines)</summary><pre class="detail-headers">${esc(headers)}</pre></details>`);
     }
-    if (body) {
-        const parsed = tryParseJson(body);
-        if (parsed) parts.push(`<div class="json-tree">${jsonTreeHTML(parsed, 0)}</div>`);
+    if (body !== undefined && body !== null && body !== '') {
+        // Full task responses are NormalizedResponse objects. Passing an object
+        // through esc() stringifies it as "[object Object]", so render structured
+        // values directly and only parse when the payload is a string.
+        const parsed = typeof body === 'object' ? body : tryParseJson(body);
+        if (parsed !== null) parts.push(`<div class="json-tree">${jsonTreeHTML(parsed, 0)}</div>`);
         else parts.push(`<pre class="detail-plain">${esc(body)}</pre>`);
     }
     return parts.join('');
@@ -693,6 +717,39 @@ export function renderDetailBody(headers, body) {
 
 export function formatSseContent(req) {
     const parts = [];
+
+    // New architecture: response_body is a NormalizedResponse object
+    const body = typeof req.response_body === 'object' && req.response_body !== null
+        ? req.response_body : null;
+
+    if (body) {
+        if (body.thinking && body.thinking.length > 0) {
+            parts.push('=== Thinking ===');
+            body.thinking.forEach(t => parts.push(t));
+            parts.push('');
+        }
+        if (body.text && body.text.length > 0) {
+            parts.push('=== Response ===');
+            body.text.forEach(t => parts.push(t));
+            parts.push('');
+        }
+        if (body.tool_calls && body.tool_calls.length > 0) {
+            parts.push('=== Tool Calls ===');
+            body.tool_calls.forEach(tc => {
+                parts.push(`[${tc.name}] ${JSON.stringify(tc.input, null, 2)}`);
+            });
+            parts.push('');
+        }
+        if (body.tool_results && body.tool_results.length > 0) {
+            parts.push('=== Tool Results ===');
+            body.tool_results.forEach(tr => {
+                parts.push(`[${tr.tool_use_id}] ${tr.content}`);
+            });
+        }
+        if (parts.length > 0) return parts.join('\n');
+    }
+
+    // Legacy: content_text + sse_events
     if (req.content_text) {
         parts.push('=== Response Content ===');
         parts.push(req.content_text);

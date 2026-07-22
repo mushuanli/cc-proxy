@@ -13,15 +13,24 @@ pub fn resolve_route(
     config: &AppConfig,
     request_model: &str,
 ) -> ConfigResult<ResolvedRoute> {
+    resolve_route_for(config, &config.proxy.active_upstream, request_model)
+}
+
+/// Resolve a route using an explicitly selected upstream.
+pub fn resolve_route_for(
+    config: &AppConfig,
+    upstream_name: &str,
+    request_model: &str,
+) -> ConfigResult<ResolvedRoute> {
     let upstream = config
         .proxy
         .upstreams
         .iter()
-        .find(|u| u.name == config.proxy.active_upstream)
+        .find(|u| u.name == upstream_name)
         .ok_or_else(|| {
             crate::error::ConfigError::NotFound(format!(
-                "active upstream '{}' not found",
-                config.proxy.active_upstream
+                "upstream '{}' not found",
+                upstream_name
             ))
         })?;
 
@@ -175,6 +184,47 @@ mod tests {
         assert_eq!(route.provider, "anthropic");
         assert_eq!(route.configured_model, "claude-sonnet");
         assert_eq!(route.resolved_model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn resolve_route_for_explicit_upstream() {
+        let mut config = make_config();
+        config.proxy.upstreams.push(UpstreamConfig {
+            name: "transparent".into(),
+            high: None,
+            mid: None,
+            low: None,
+            default: Some(crate::upstream::TierRule {
+                keywords: vec![],
+                provider: "anthropic".into(),
+                model: "raw-model".into(),
+            }),
+            effort: None,
+        });
+        let route = resolve_route_for(&config, "transparent", "client-model").unwrap();
+        assert_eq!(route.upstream, "transparent");
+        assert_eq!(route.provider, "anthropic");
+        assert_eq!(route.resolved_model, "raw-model");
+    }
+
+    #[test]
+    fn transparent_upstream_can_route_without_configured_model() {
+        let mut config = make_config();
+        config.proxy.upstreams.push(UpstreamConfig {
+            name: "transparent".into(),
+            high: None,
+            mid: None,
+            low: None,
+            default: Some(crate::upstream::TierRule {
+                keywords: vec![],
+                provider: "anthropic".into(),
+                model: String::new(),
+            }),
+            effort: None,
+        });
+        let route = resolve_route_for(&config, "transparent", "wire-model").unwrap();
+        assert_eq!(route.provider, "anthropic");
+        assert!(route.resolved_model.is_empty());
     }
 
     #[test]

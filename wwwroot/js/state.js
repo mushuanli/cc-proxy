@@ -31,6 +31,7 @@ export const state = {
     upstreamList: [],
     modelPricingList: [],
     activeUpstream: '',
+    activeProxyUpstream: '',
     activeEffort: 'auto',
     EFFORT_LEVELS: ['auto', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
 
@@ -38,6 +39,7 @@ export const state = {
     sessionCache: {},
     sessionMeta: {},
     pendingSessionFetches: new Set(),
+    queuedSessionFetches: new Set(),
     _updateFilterTimer: null,
     _renderPageTimer: null,
 
@@ -51,6 +53,7 @@ export const state = {
 
     // Settings edit modes
     upstreamEditMode: null,
+    upstreamCreateKind: null,
     upstreamAccordionName: null,
     providerEditMode: null,
     providerAccordionName: null,

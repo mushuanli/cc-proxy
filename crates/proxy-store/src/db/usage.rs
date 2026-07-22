@@ -1,6 +1,8 @@
 use proxy_common::SessionId;
 use rusqlite::{params, Connection};
 
+use chrono::Datelike;
+
 use crate::error::StoreResult;
 
 /// Upsert daily usage for a task write.
@@ -119,7 +121,48 @@ pub fn get_session_daily_usage(
     Ok(result)
 }
 
-/// Query daily usage for a date range (inclusive).
+/// Query aggregated cost stats for today and current month.
+pub fn query_cost_stats(conn: &Connection) -> StoreResult<proxy_common::models::CostStats> {
+    let now = chrono::Utc::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let month_first = format!("{}-{:02}-01", now.year(), now.month());
+
+    let (today_in, today_out, today_cw, today_cr, today_cost) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cost_microusd), 0)
+             FROM session_daily_usage WHERE usage_date = ?1",
+            params![today],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+
+    let month_cost = conn.query_row(
+        "SELECT COALESCE(SUM(cost_microusd), 0)
+         FROM session_daily_usage WHERE usage_date >= ?1 AND usage_date <= ?2",
+        params![month_first, today],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    Ok(proxy_common::models::CostStats {
+        today_input_tokens: today_in,
+        today_output_tokens: today_out,
+        today_cache_creation_tokens: today_cw,
+        today_cache_read_tokens: today_cr,
+        today_cost_microusd: today_cost,
+        month_cost_microusd: month_cost,
+    })
+}
 pub fn query_range(
     conn: &Connection,
     from: &str,

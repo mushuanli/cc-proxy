@@ -322,6 +322,15 @@
 .ut-tier-val { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); }
 .ut-tier-val.has-val { color: var(--text); }
 .ut-active-check { color: var(--accent2); font-weight: 700; display: block; text-align: center; }
+/* Transparent Proxy column — clickable radio-style cells */
+.ut-proxy-th { cursor: pointer; user-select: none; text-align: center; }
+.ut-proxy-th:hover { background: rgba(74,144,164,0.12); }
+.ut-proxy-th-auto { color: var(--accent2); }
+.ut-proxy-th-active { display: block; font-size: 0.62rem; font-weight: 400; color: var(--accent2); margin-top: 1px; }
+.ut-proxy-cell { cursor: pointer; user-select: none; text-align: center; }
+.ut-proxy-cell:hover { background: rgba(74,144,164,0.12); }
+.ut-proxy-off { color: var(--text-muted); opacity: 0.4; font-size: 0.85rem; }
+.ut-proxy-on  { color: var(--accent2); font-size: 0.85rem; }
 /* Edit row */
 .ut-edit-td {
     padding: 10px 14px;

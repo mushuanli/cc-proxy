@@ -265,6 +265,9 @@ pub struct ProxiedRequest {
     /// Computed cost in USD (set after response, used to increment session total).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
+    /// Whether a configured pricing rule matched this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priced: Option<bool>,
 }
 
 impl ProxiedRequest {
@@ -419,6 +422,7 @@ pub struct TierRuleInfo {
 pub struct UpstreamInfo {
     pub name: String,
     pub active: bool,
+    pub proxy_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub high: Option<TierRuleInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -446,10 +450,12 @@ pub enum WsMessage {
     McpConfigChanged { destination_url: Option<String> },
     UpstreamChanged {
         active_upstream: String,
+        active_proxy_upstream: String,
         upstreams: Vec<UpstreamInfo>,
         providers: Vec<ProviderInfo>,
         active_effort: String,
         model_pricing: Vec<crate::config::ModelPricing>,
+        http_proxy: Option<String>,
     },
     History { requests: Vec<ProxiedRequest> },
     HookHistory { events: Vec<HookEvent> },
@@ -458,6 +464,10 @@ pub enum WsMessage {
     SessionStopped(Session),
     SessionUpdated { request_id: String },
     TeeStatusChanged { enabled: bool },
+    /// Real-time cost stats pushed after each task write.
+    /// Frontend uses this to update the inspector toolbar cost display
+    /// without making a separate GET /api/costs call.
+    CostUpdated(CostStats),
     /// Sent when the server-side broadcast buffer overflowed for this client
     /// (messages were dropped). The client should re-fetch state via REST
     /// (GET /api/requests etc.) to resynchronize instead of trusting the stream.
@@ -465,6 +475,18 @@ pub enum WsMessage {
 }
 
 // ── Cost aggregation data structures ──
+
+/// Real-time cost statistics for the inspector toolbar.
+/// Pre-aggregated from session_daily_usage, pushed via WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostStats {
+    pub today_input_tokens: i64,
+    pub today_output_tokens: i64,
+    pub today_cache_creation_tokens: i64,
+    pub today_cache_read_tokens: i64,
+    pub today_cost_microusd: i64,
+    pub month_cost_microusd: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCost {

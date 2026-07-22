@@ -39,16 +39,27 @@ pub(crate) fn task_to_json(
         "output_tokens": task.output_tokens,
         "cost_microusd": task.cost_microusd,
         "cost": task.cost_microusd as f64 / 1_000_000.0,
+        "priced": task.priced,
         "duration_ms": task.duration_ms,
         "time_to_first_token_ms": task.ttft_ms,
         "ttft_ms": task.ttft_ms,
-        "summary_json": task.summary_json,
+        "last_msg_summary": task.summary_json,
         "messages_count": task.messages_count,
     })
 }
 
 /// Transform full Task to ProxiedRequest-compatible JSON for detail view.
 fn task_to_full_json(task: &proxy_store::Task) -> Value {
+    let raw_response = task.metadata.get("raw_response_body").and_then(|v| v.as_str());
+    let inspected_response = raw_response
+        .and_then(|body| serde_json::from_str::<Value>(body).ok())
+        .unwrap_or_else(|| json!(task.response_body));
+    let sse_events = task.metadata.get("sse_events").cloned().unwrap_or_else(|| json!([]));
+    let content_text = task
+        .response_body
+        .as_ref()
+        .map(|body| body.text.join(""))
+        .filter(|body| !body.is_empty());
     // Forward request_headers / response_headers as raw JSON objects
     // so formatHeaders() in frontend (Object.entries) works.
     json!({
@@ -74,6 +85,7 @@ fn task_to_full_json(task: &proxy_store::Task) -> Value {
         "cache_read_input_tokens": task.cache_read_tokens,
         "cost_microusd": task.cost_microusd,
         "cost": task.cost_microusd as f64 / 1_000_000.0,
+        "priced": task.pricing_model_id.as_deref().is_some_and(|id| id != "unknown"),
         "duration_ms": task.duration_ms,
         "time_to_first_token_ms": task.ttft_ms,
         "ttft_ms": task.ttft_ms,
@@ -87,12 +99,13 @@ fn task_to_full_json(task: &proxy_store::Task) -> Value {
         "request_body": task.request_body,
         "response_headers": task.response_headers,
         // response_body is NormalizedResponse — serialize as-is; frontend jsonTreeHTML handles objects
-        "response_body": task.response_body,
-        // Fields not stored in Task but needed by frontend — set to defaults
-        "content_text": None::<String>,
-        "sse_events": json!([]),
-        "messages_count": null,
-        "last_msg_summary": null
+        "response_body": inspected_response,
+        "normalized_response": task.response_body,
+        "content_text": content_text,
+        "sse_events": sse_events,
+        "request_type": task.metadata.get("protocol").and_then(|v| v.as_str()).unwrap_or("anthropic"),
+        "messages_count": task.messages_count,
+        "last_msg_summary": task.summary_json
     })
 }
 

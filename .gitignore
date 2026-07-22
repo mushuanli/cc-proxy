@@ -1,4 +1,6 @@
 data.db*
+data/
+proxy-server
 config.toml
 *.o
 sessions/

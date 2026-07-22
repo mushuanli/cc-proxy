@@ -47,6 +47,8 @@ export function connect() {
         clearInterval(state._silentTimer);
         clearTimeout(state._updateFilterTimer);
         clearTimeout(state._renderPageTimer);
+        state._updateFilterTimer = null;
+        state._renderPageTimer = null;
         const el = document.getElementById('connection-status');
         el.className = 'disconnected';
         const label = ev.code === 1000 ? t('status.disconnected')
@@ -84,10 +86,7 @@ function handleMessage(msg) {
             updateRequestCount();
             if (msg.payload.session_id) {
                 const sid = msg.payload.session_id;
-                const meta = state.sessionMeta[sid];
-                if (!meta || meta.ended_at) {
-                    fetchSessionMeta(sid);
-                }
+                fetchSessionMeta(sid);
             }
             break;
         case 'SseEvent':
@@ -118,11 +117,14 @@ function handleMessage(msg) {
             if (msg.payload.destination_url) document.getElementById('mcp-destination').value = msg.payload.destination_url;
             break;
         case 'UpstreamChanged':
-            applyUpstreamState(msg.payload.active_upstream, msg.payload.upstreams, msg.payload.providers, msg.payload.active_effort, msg.payload.model_pricing, msg.payload.http_proxy);
+            applyUpstreamState(msg.payload.active_upstream, msg.payload.active_proxy_upstream, msg.payload.upstreams, msg.payload.providers, msg.payload.active_effort, msg.payload.model_pricing, msg.payload.http_proxy);
             break;
         case 'TeeStatusChanged':
             state.captureEnabled = msg.payload.enabled;
             updateCaptureButton();
+            break;
+        case 'CostUpdated':
+            if (typeof window._applyCostStats === 'function') window._applyCostStats(msg.payload);
             break;
         case 'Resync':
             // The server dropped some messages (broadcast buffer overflow).
@@ -133,7 +135,7 @@ function handleMessage(msg) {
                 .then(requests => {
                     state.requestRows.clear();
                     requests.forEach(req => state.requestRows.set(req.id, req));
-                    renderPage(); updateRequestCount();
+                    renderPage(); updateRequestCount(); updateFilterOptions();
                 })
                 .catch(() => {});
             break;
@@ -143,7 +145,11 @@ function handleMessage(msg) {
 // ── Session metadata fetch ──
 
 export function fetchSessionMeta(sid) {
-    if (state.pendingSessionFetches.has(sid)) return;
+    if (state.pendingSessionFetches.has(sid)) {
+        // Do not lose a newer task event while an older metadata request is in flight.
+        state.queuedSessionFetches.add(sid);
+        return;
+    }
     state.pendingSessionFetches.add(sid);
     fetch(`/api/session/${encodeURIComponent(sid)}`)
         .then(r => r.ok ? r.json() : null)
@@ -152,11 +158,25 @@ export function fetchSessionMeta(sid) {
                 const s = data.session;
                 state.sessionMeta[s.id] = s;
                 state.sessionCache[s.id] = s.label || shortSid(s.id);
+                // Sync all tasks from this session into requestRows
+                if (Array.isArray(data.requests)) {
+                    data.requests.forEach(req => {
+                        const existing = state.requestRows.get(req.id);
+                        // REST list rows are intentionally lightweight. Merge them with
+                        // the richer event payload instead of choosing one source and
+                        // dropping fields from the other.
+                        state.requestRows.set(req.id, { ...(existing || {}), ...req });
+                    });
+                }
                 renderPage();
+                updateRequestCount();
             }
         })
         .catch(() => {})
-        .finally(() => state.pendingSessionFetches.delete(sid));
+        .finally(() => {
+            state.pendingSessionFetches.delete(sid);
+            if (state.queuedSessionFetches.delete(sid)) fetchSessionMeta(sid);
+        });
 }
 
 function shortSid(sid) {
@@ -271,7 +291,7 @@ Object.assign(window, {
 
     fetch('/api/upstreams')
         .then(r => r.json())
-        .then(data => applyUpstreamState(data.active_upstream, data.upstreams, data.providers, data.active_effort, data.model_pricing, data.http_proxy));
+        .then(data => applyUpstreamState(data.active_upstream, data.active_proxy_upstream, data.upstreams, data.providers, data.active_effort, data.model_pricing, data.http_proxy));
 
     // Pre-fill session cache and metadata in one call
     fetch('/api/sessions')
@@ -281,6 +301,10 @@ Object.assign(window, {
                 state.sessionMeta[s.id] = s;
                 state.sessionCache[s.id] = s.label || shortSid(s.id);
             });
+            // Session and task snapshots load concurrently. Render again when
+            // metadata arrives so labels, archived rows and aggregate totals
+            // do not depend on which request happened to finish first.
+            renderPage();
         })
         .catch(() => {});
 
@@ -288,8 +312,10 @@ Object.assign(window, {
         .then(r => r.json())
         .then(requests => {
             if (requests.length > 0) {
-                state.requestRows.clear();
-                requests.forEach(req => state.requestRows.set(req.id, req));
+                requests.forEach(req => {
+                    const existing = state.requestRows.get(req.id);
+                    state.requestRows.set(req.id, { ...(existing || {}), ...req });
+                });
                 // Expand latest session only on initial load
                 const groups = getSessionGroups();
                 if (groups.length > 0) state.expandedSessions.add(groups[0].session_id);

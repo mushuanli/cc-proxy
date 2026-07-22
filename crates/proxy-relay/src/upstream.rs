@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::{HeaderMap, HeaderValue, Method};
 use bytes::Bytes;
-use proxy_common::models::SseEvent;
+use proxy_common::models::{NormalizedResponse, SseEvent, ToolCallRecord};
 use crate::sse::SseParser;
 
 // ── Header constants ──
@@ -60,8 +60,6 @@ pub fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>)
         }
         fwd.insert(k.clone(), v.clone());
     }
-    fwd.insert("accept-encoding", HeaderValue::from_static("identity"));
-
     if let Some(token) = override_token {
         if token.starts_with("sk-") {
             fwd.insert(
@@ -72,7 +70,34 @@ pub fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>)
             fwd.insert("x-api-key", HeaderValue::from_str(token).unwrap());
         }
     }
+    // Tell upstream to send uncompressed data so SSE parsing doesn't need to
+    // handle compressed streams.
+    fwd.insert("accept-encoding", HeaderValue::from_static("identity"));
     fwd
+}
+
+/// API payload family used for session tracking and response inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiProtocol {
+    Anthropic,
+    Codex,
+}
+
+impl ApiProtocol {
+    pub fn request_type(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+pub fn detect_protocol(path: &str, body: &serde_json::Value) -> ApiProtocol {
+    if path.contains("/responses") || (body.get("input").is_some() && body.get("messages").is_none()) {
+        ApiProtocol::Codex
+    } else {
+        ApiProtocol::Anthropic
+    }
 }
 
 // ── Session ID extraction ──
@@ -93,6 +118,39 @@ pub fn extract_session_id(body_json: &serde_json::Value) -> Option<String> {
         })
 }
 
+pub fn extract_request_session_id(
+    protocol: ApiProtocol,
+    headers: &HeaderMap,
+    body: &serde_json::Value,
+) -> Option<String> {
+    for name in ["session_id", "x-session-id", "x-codex-session-id"] {
+        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty()) {
+            return Some(value.to_string());
+        }
+    }
+    if protocol == ApiProtocol::Anthropic {
+        return extract_session_id(body);
+    }
+    body.pointer("/metadata/session_id")
+        .or_else(|| body.get("session_id"))
+        .or_else(|| body.get("conversation_id"))
+        .or_else(|| body.get("prompt_cache_key"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .map(String::from)
+}
+
+pub fn message_count(protocol: ApiProtocol, body: &serde_json::Value) -> u32 {
+    let field = match protocol {
+        ApiProtocol::Anthropic => "messages",
+        ApiProtocol::Codex => "input",
+    };
+    body.get(field).and_then(|v| v.as_array()).map_or_else(
+        || u32::from(body.get(field).is_some()),
+        |items| items.len() as u32,
+    )
+}
+
 // ── Response from upstream dispatch ──
 
 /// Result of dispatching a request upstream.
@@ -100,6 +158,8 @@ pub struct UpstreamResponse {
     pub status_code: u16,
     pub response_headers: HeaderMap,
     pub content_text: Option<String>,
+    pub raw_body: Bytes,
+    pub normalized: NormalizedResponse,
     pub sse_events: Vec<SseEvent>,
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -118,6 +178,7 @@ pub struct UpstreamResponse {
 /// Execute an upstream request with retry logic.
 pub async fn dispatch_upstream(
     client: &reqwest::Client,
+    method: Method,
     url: &str,
     headers: HeaderMap,
     body: Bytes,
@@ -133,7 +194,7 @@ pub async fn dispatch_upstream(
         }
 
         let req = match client
-            .post(url)
+            .request(method.clone(), url)
             .headers(headers.clone())
             .body(body.clone())
             .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
@@ -141,7 +202,7 @@ pub async fn dispatch_upstream(
         {
             Ok(r) => r,
             Err(e) => {
-                last_err = e.to_string();
+                last_err = format!("build error: {:?}", e);
                 continue;
             }
         };
@@ -149,7 +210,7 @@ pub async fn dispatch_upstream(
         match client.execute(req).await {
             Ok(resp) => return Ok(resp),
             Err(e) => {
-                last_err = e.to_string();
+                last_err = format!("{:?}", e);
                 // Only retry on connect/timeout errors
                 if !e.is_connect() && !e.is_timeout() {
                     return Err(last_err);
@@ -165,11 +226,52 @@ pub async fn dispatch_upstream(
 pub async fn handle_streaming_response(
     response: reqwest::Response,
     start: Instant,
+    protocol: ApiProtocol,
 ) -> UpstreamResponse {
     use futures::StreamExt;
 
     let status_code = response.status().as_u16();
     let response_headers = response.headers().clone();
+
+    // Non-2xx responses are not SSE — read the body as text/JSON for error detail
+    if status_code >= 300 {
+        let body_bytes = response.bytes().await.unwrap_or_default();
+        let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+        // Try to extract error message from JSON body
+        let error_msg = serde_json::from_str::<serde_json::Value>(&body_text)
+            .ok()
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(|e| e.get("message").or_else(|| e.get("type")))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| body_text.trim().to_string());
+
+        return UpstreamResponse {
+            status_code,
+            response_headers,
+            content_text: if body_text.is_empty() { None } else { Some(body_text) },
+            raw_body: body_bytes,
+            normalized: NormalizedResponse::default(),
+            sse_events: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            stop_reason: None,
+            message_id: None,
+            model: None,
+            duration_ms: start.elapsed().as_millis() as u64,
+            ttft_ms: None,
+            error: if error_msg.is_empty() {
+                Some(format!("HTTP {} (no body)", status_code))
+            } else {
+                Some(error_msg)
+            },
+        };
+    }
+
     let mut sse_events = Vec::new();
     let mut content_text = String::new();
     let mut input_tokens: u32 = 0;
@@ -181,6 +283,8 @@ pub async fn handle_streaming_response(
     let mut model: Option<String> = None;
     let mut ttft_ms: Option<u64> = None;
     let mut error: Option<String> = None;
+    let mut raw_body = Vec::new();
+    let mut normalized = NormalizedResponse::default();
 
     let mut parser = SseParser::new();
     let mut byte_stream = response.bytes_stream();
@@ -188,6 +292,7 @@ pub async fn handle_streaming_response(
     loop {
         match byte_stream.next().await {
             Some(Ok(chunk)) => {
+                raw_body.extend_from_slice(&chunk);
                 if ttft_ms.is_none() {
                     ttft_ms = Some(start.elapsed().as_millis() as u64);
                 }
@@ -198,60 +303,45 @@ pub async fn handle_streaming_response(
 
                     if let Some(data_str) = &ev.data {
                         if let Some(parsed) = parser.parse_message_data(data_str) {
+                            if protocol == ApiProtocol::Codex {
+                                parse_codex_stream_event(
+                                    &parsed,
+                                    &mut normalized,
+                                    &mut input_tokens,
+                                    &mut output_tokens,
+                                    &mut cache_read_tokens,
+                                    &mut message_id,
+                                    &mut model,
+                                );
+                            }
                             match parser.event_kind(&parsed) {
                                 Some("message_start") => {
-                                    if let Some(msg) = parsed.get("message") {
-                                        if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
-                                            model = Some(m.to_string());
-                                        }
-                                        if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
-                                            message_id = Some(id.to_string());
-                                        }
-                                        if let Some(usage) = msg.get("usage") {
-                                            input_tokens = usage
-                                                .get("input_tokens")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0) as u32;
-                                            cache_creation_tokens = usage
-                                                .get("cache_creation_input_tokens")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0) as u32;
-                                            cache_read_tokens = usage
-                                                .get("cache_read_input_tokens")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0) as u32;
-                                        }
-                                    }
+                                    model = parser.model_from_start(&parsed).map(String::from);
+                                    message_id = parser.message_id(&parsed).map(String::from);
+                                    input_tokens = parser
+                                        .input_tokens_from_start(&parsed)
+                                        .unwrap_or(input_tokens);
+                                    cache_creation_tokens = parser
+                                        .cache_creation_tokens_from_start(&parsed)
+                                        .unwrap_or(cache_creation_tokens);
+                                    cache_read_tokens = parser
+                                        .cache_read_tokens_from_start(&parsed)
+                                        .unwrap_or(cache_read_tokens);
                                 }
                                 Some("message_delta") => {
-                                    if let Some(usage) = parsed
-                                        .get("delta")
-                                        .and_then(|d| d.get("usage"))
-                                    {
-                                        output_tokens = usage
-                                            .get("output_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0) as u32;
+                                    // Anthropic puts usage next to delta, not inside it.
+                                    // output_tokens is cumulative, so keep the latest value.
+                                    if let Some(value) = parser.output_tokens_from_delta(&parsed) {
+                                        output_tokens = value;
                                     }
-                                    if let Some(delta) = parsed.get("delta") {
-                                        if let Some(reason) =
-                                            delta.get("stop_reason").and_then(|v| v.as_str())
-                                        {
-                                            stop_reason = Some(reason.to_string());
-                                        }
+                                    if let Some(reason) = parser.stop_reason(&parsed) {
+                                        stop_reason = Some(reason.to_string());
                                     }
                                 }
                                 Some("content_block_delta") => {
-                                    if let Some(delta) = parsed.get("delta") {
-                                        if let Some(text) =
-                                            delta.get("text").and_then(|v| v.as_str())
-                                        {
-                                            content_text.push_str(text);
-                                        } else if let Some(thinking) =
-                                            delta.get("thinking").and_then(|v| v.as_str())
-                                        {
-                                            content_text.push_str(thinking);
-                                        }
+                                    if let Some(text) = parser.delta_text(&parsed) {
+                                        content_text.push_str(text);
+                                        normalized.text.push(text.to_string());
                                     }
                                 }
                                 Some("error") => {
@@ -277,10 +367,13 @@ pub async fn handle_streaming_response(
         status_code,
         response_headers,
         content_text: if content_text.is_empty() {
-            None
+            let text = normalized.text.join("");
+            (!text.is_empty()).then_some(text)
         } else {
             Some(content_text)
         },
+        raw_body: Bytes::from(raw_body),
+        normalized,
         sse_events,
         input_tokens,
         output_tokens,
@@ -299,6 +392,7 @@ pub async fn handle_streaming_response(
 pub async fn handle_non_streaming_response(
     response: reqwest::Response,
     start: Instant,
+    protocol: ApiProtocol,
 ) -> UpstreamResponse {
     let status_code = response.status().as_u16();
     let response_headers = response.headers().clone();
@@ -310,6 +404,8 @@ pub async fn handle_non_streaming_response(
                 status_code,
                 response_headers,
                 content_text: None,
+                raw_body: Bytes::new(),
+                normalized: NormalizedResponse::default(),
                 sse_events: vec![],
                 input_tokens: 0,
                 output_tokens: 0,
@@ -334,6 +430,8 @@ pub async fn handle_non_streaming_response(
                 status_code,
                 response_headers,
                 content_text: Some(body_text.clone()),
+                raw_body: body_bytes,
+                normalized: NormalizedResponse::default(),
                 sse_events: vec![],
                 input_tokens: 0,
                 output_tokens: 0,
@@ -353,17 +451,7 @@ pub async fn handle_non_streaming_response(
         }
     };
 
-    let input_tokens = body_json
-        .get("usage")
-        .and_then(|u| u.get("input_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-
-    let output_tokens = body_json
-        .get("usage")
-        .and_then(|u| u.get("output_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    let (input_tokens, output_tokens, codex_cached) = usage_from_json(&body_json);
 
     let cache_creation_tokens = body_json
         .get("usage")
@@ -375,7 +463,7 @@ pub async fn handle_non_streaming_response(
         .get("usage")
         .and_then(|u| u.get("cache_read_input_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(codex_cached as u64) as u32;
 
     let model = body_json
         .get("model")
@@ -392,7 +480,7 @@ pub async fn handle_non_streaming_response(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let content_text = body_json
+    let anthropic_text = body_json
         .get("content")
         .and_then(|c| c.as_array())
         .map(|blocks| {
@@ -409,6 +497,11 @@ pub async fn handle_non_streaming_response(
                 .collect::<Vec<_>>()
                 .join("")
         });
+    let normalized = normalize_response_body(protocol, &body_json);
+    let content_text = anthropic_text.filter(|s| !s.is_empty()).or_else(|| {
+        let text = normalized.text.join("");
+        (!text.is_empty()).then_some(text)
+    });
 
     let error = body_json
         .get("error")
@@ -432,6 +525,8 @@ pub async fn handle_non_streaming_response(
         } else {
             content_text
         },
+        raw_body: body_bytes,
+        normalized,
         sse_events: vec![],
         input_tokens,
         output_tokens,
@@ -444,6 +539,104 @@ pub async fn handle_non_streaming_response(
         ttft_ms: None,
         error,
     }
+}
+
+fn usage_from_json(body: &serde_json::Value) -> (u32, u32, u32) {
+    let usage = body.get("usage").unwrap_or(&serde_json::Value::Null);
+    let input = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let output = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cached = usage
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    (input, output, cached)
+}
+
+fn normalize_response_body(
+    protocol: ApiProtocol,
+    body: &serde_json::Value,
+) -> NormalizedResponse {
+    let mut normalized = NormalizedResponse::default();
+    if protocol == ApiProtocol::Anthropic {
+        for block in body.get("content").and_then(|v| v.as_array()).into_iter().flatten() {
+            match block.get("type").and_then(|v| v.as_str()) {
+                Some("text") => push_string(block.get("text"), &mut normalized.text),
+                Some("thinking") => push_string(block.get("thinking"), &mut normalized.thinking),
+                Some("tool_use") => normalized.tool_calls.push(ToolCallRecord {
+                    id: string_field(block, "id"),
+                    name: string_field(block, "name"),
+                    input: block.get("input").cloned().unwrap_or_default(),
+                }),
+                _ => {}
+            }
+        }
+        return normalized;
+    }
+
+    for item in body.get("output").and_then(|v| v.as_array()).into_iter().flatten() {
+        match item.get("type").and_then(|v| v.as_str()) {
+            Some("message") => {
+                for content in item.get("content").and_then(|v| v.as_array()).into_iter().flatten() {
+                    push_string(content.get("text"), &mut normalized.text);
+                }
+            }
+            Some("reasoning") => {
+                for summary in item.get("summary").and_then(|v| v.as_array()).into_iter().flatten() {
+                    push_string(summary.get("text"), &mut normalized.thinking);
+                }
+            }
+            Some("function_call") => normalized.tool_calls.push(ToolCallRecord {
+                id: string_field(item, "call_id"),
+                name: string_field(item, "name"),
+                input: item.get("arguments").cloned().unwrap_or_default(),
+            }),
+            _ => {}
+        }
+    }
+    normalized
+}
+
+fn parse_codex_stream_event(
+    event: &serde_json::Value,
+    normalized: &mut NormalizedResponse,
+    input_tokens: &mut u32,
+    output_tokens: &mut u32,
+    cache_read_tokens: &mut u32,
+    message_id: &mut Option<String>,
+    model: &mut Option<String>,
+) {
+    match event.get("type").and_then(|v| v.as_str()) {
+        Some("response.output_text.delta") => push_string(event.get("delta"), &mut normalized.text),
+        Some("response.reasoning_summary_text.delta") => {
+            push_string(event.get("delta"), &mut normalized.thinking)
+        }
+        Some("response.completed") | Some("response.created") => {
+            let response = event.get("response").unwrap_or(event);
+            let (input, output, cached) = usage_from_json(response);
+            *input_tokens = input.max(*input_tokens);
+            *output_tokens = output.max(*output_tokens);
+            *cache_read_tokens = cached.max(*cache_read_tokens);
+            *message_id = response.get("id").and_then(|v| v.as_str()).map(String::from);
+            *model = response.get("model").and_then(|v| v.as_str()).map(String::from);
+        }
+        _ => {}
+    }
+}
+
+fn push_string(value: Option<&serde_json::Value>, target: &mut Vec<String>) {
+    if let Some(value) = value.and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+        target.push(value.to_string());
+    }
+}
+
+fn string_field(value: &serde_json::Value, key: &str) -> String {
+    value.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
 }
 
 // ── Effort injection ──
@@ -462,5 +655,82 @@ pub fn append_effort_beta_header(headers: &mut Vec<(&str, String)>, effort: &str
     if effort.is_empty() || effort == "auto" {
         return;
     }
-    headers.push(("anthropic-beta", format!("effort-2025-11-24")));
+    headers.push(("anthropic-beta", "effort-2025-11-24".to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_codex_responses_payload() {
+        let body = serde_json::json!({
+            "model": "gpt-5.2-codex",
+            "input": [{"role": "user", "content": "hello"}],
+            "prompt_cache_key": "codex-session-1"
+        });
+        let protocol = detect_protocol("/v1/responses", &body);
+        assert_eq!(protocol, ApiProtocol::Codex);
+        assert_eq!(message_count(protocol, &body), 1);
+        assert_eq!(
+            extract_request_session_id(protocol, &HeaderMap::new(), &body).as_deref(),
+            Some("codex-session-1")
+        );
+    }
+
+    #[test]
+    fn normalizes_codex_response_and_usage() {
+        let body = serde_json::json!({
+            "id": "resp_123",
+            "model": "gpt-5.2-codex",
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 7,
+                "input_tokens_details": {"cached_tokens": 5}
+            },
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "done"}]
+            }]
+        });
+        assert_eq!(usage_from_json(&body), (12, 7, 5));
+        assert_eq!(normalize_response_body(ApiProtocol::Codex, &body).text, ["done"]);
+    }
+
+    #[test]
+    fn extracts_codex_stream_usage_and_delta() {
+        let mut normalized = NormalizedResponse::default();
+        let mut input = 0;
+        let mut output = 0;
+        let mut cached = 0;
+        let mut id = None;
+        let mut model = None;
+        parse_codex_stream_event(
+            &serde_json::json!({"type":"response.output_text.delta","delta":"hi"}),
+            &mut normalized,
+            &mut input,
+            &mut output,
+            &mut cached,
+            &mut id,
+            &mut model,
+        );
+        parse_codex_stream_event(
+            &serde_json::json!({
+                "type":"response.completed",
+                "response":{"id":"resp_1","model":"gpt-5","usage":{
+                    "input_tokens":9,"output_tokens":4,
+                    "input_tokens_details":{"cached_tokens":3}
+                }}
+            }),
+            &mut normalized,
+            &mut input,
+            &mut output,
+            &mut cached,
+            &mut id,
+            &mut model,
+        );
+        assert_eq!(normalized.text, ["hi"]);
+        assert_eq!((input, output, cached), (9, 4, 3));
+        assert_eq!(id.as_deref(), Some("resp_1"));
+    }
 }

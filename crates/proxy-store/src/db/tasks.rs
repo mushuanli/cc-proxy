@@ -131,7 +131,7 @@ pub fn get_task(conn: &Connection, id: &TaskId) -> StoreResult<Option<Task>> {
          input_rate_microusd, output_rate_microusd,
          cache_write_rate_microusd, cache_read_rate_microusd,
          cost_microusd, currency,
-         summary_json, summary_created_at, metadata_json
+         summary_json, summary_created_at, metadata_json, messages_count
          FROM tasks WHERE id = ?1",
     )?;
 
@@ -152,7 +152,7 @@ pub fn list_tasks(
         "SELECT id, sequence_no, started_at, ended_at, status,
          method, path,
          provider, resolved_model, http_status_code,
-         input_tokens, output_tokens, cost_microusd,
+         input_tokens, output_tokens, cost_microusd, pricing_model_id,
          duration_ms, ttft_ms, summary_json, messages_count
          FROM tasks WHERE session_id = ?1",
     );
@@ -218,7 +218,7 @@ pub fn get_latest_completed_task(
          input_rate_microusd, output_rate_microusd,
          cache_write_rate_microusd, cache_read_rate_microusd,
          cost_microusd, currency,
-         summary_json, summary_created_at, metadata_json
+         summary_json, summary_created_at, metadata_json, messages_count
          FROM tasks
          WHERE session_id = ?1 AND ended_at IS NOT NULL AND status != 'recording'
          ORDER BY sequence_no DESC LIMIT 1",
@@ -306,6 +306,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
+        messages_count: row.get::<_, i64>("messages_count")? as u32,
     })
 }
 
@@ -326,6 +327,9 @@ fn row_to_task_list_item(row: &rusqlite::Row) -> rusqlite::Result<TaskListItem> 
         input_tokens: row.get::<_, i64>("input_tokens")? as u64,
         output_tokens: row.get::<_, i64>("output_tokens")? as u64,
         cost_microusd: row.get("cost_microusd")?,
+        priced: row
+            .get::<_, Option<String>>("pricing_model_id")?
+            .is_some_and(|id| id != "unknown"),
         duration_ms: row.get("duration_ms")?,
         ttft_ms: row.get("ttft_ms")?,
         summary_json: row.get("summary_json")?,

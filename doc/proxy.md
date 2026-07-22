@@ -5,7 +5,7 @@
 | 模式 | 触发条件 | 行为 |
 |------|---------|------|
 | **CONNECT tunnel** | `method == CONNECT` | 建立 TCP 双向隧道（`tokio::io::copy_bidirectional`） |
-| **Forward proxy** | URI 含 scheme（如 `https://`） | 客户端已确定目标 URL，注入 provider token + 翻译 model + effort |
+| **Forward proxy** | URI 含 scheme（如 `https://`） | 使用 `active_proxy_upstream` 选择 provider/出站代理，目标 URL、认证 header、model 与 body 透明转发 |
 | **Reverse proxy** | URI 不含 scheme（相对路径） | 从 upstream config 解析 provider base URL + 拼接路径（`ANTHROPIC_BASE_URL` 模式） |
 
 ## proxy_handler 流程
@@ -24,7 +24,16 @@
 
 ## dispatch_upstream()
 
-正向代理和反向代理共用 `dispatch_upstream()` 执行实际请求：
+正向代理和反向代理共用 `RelayHandler`、`dispatch_upstream()`、Session/Task 存储与事件发布。两种入口可同时使用并独立选择 upstream：
+
+- relay（相对 URI）使用 `active_upstream`，执行 token、model 与 effort 改写。
+- proxy（absolute URI）使用 `active_proxy_upstream`，只用 tier 决定 provider 及其网络 `proxy`，请求和响应报文透明转发。
+
+Provider 的 `proxy` 优先于全局 `http_proxy`；`proxy = ""` 表示显式直连。
+
+透明 upstream 只要求 tier/default 中存在 provider，model 可以留空。转发与 Inspector 始终保留请求线上原始 model；ModelPricing 只参与费率匹配，不参与透明报文改写。没有匹配费率时请求仍正常转发和存储，Task 标记为 `priced=false`，Inspector 显示“未定价”而不是零费用。
+
+实际上游请求：
 
 - **重试**：指数退避 200ms × 2^n，只对 connect/timeout 错误重试，默认最多 3 次
 - **超时**：默认 120s，超时返回 JSON-RPC-style error with 504
@@ -48,6 +57,8 @@
 - `usage_from_delta` — token 用量
 - `stop_reason` / `message_id` / `model_from_start` / `input_tokens_from_start`
 - `cache_creation_tokens_from_start` / `cache_read_tokens_from_start`
+
+同时识别 Codex/OpenAI Responses 报文：`/v1/responses`、`input`、`prompt_cache_key`，以及 `response.output_text.delta` / `response.completed` 事件。Codex Session/Task 使用 `ClientType::Codex` 持久化，原始 response 和 SSE events 写入 task metadata，Inspector 的 Response 与 SSE Events 页签可直接查看。
 
 `merge_delta_text()` 处理三种 delta 类型：
 - `text_delta` → 纯文本

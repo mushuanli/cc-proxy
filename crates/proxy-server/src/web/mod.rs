@@ -70,6 +70,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             put(settings::update_upstream).delete(settings::delete_upstream),
         )
         .route("/api/upstreams/:name/activate", post(settings::activate_upstream))
+        .route(
+            "/api/upstreams/:name/activate-proxy",
+            post(settings::activate_proxy_upstream),
+        )
         .route("/api/effort", get(settings::get_effort).put(settings::set_effort))
         .route("/api/retention", get(settings::get_retention).put(settings::update_retention))
         // Capture

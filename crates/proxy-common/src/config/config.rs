@@ -16,6 +16,7 @@ impl Default for AppConfig {
             model_pricing: Vec::new(),
             proxy: ProxyConfig {
                 active_upstream: String::new(),
+                active_proxy_upstream: String::new(),
                 active_effort: String::new(),
                 http_proxy: None,
                 providers: Vec::new(),
@@ -44,6 +45,8 @@ impl Default for AppConfig {
 pub struct ProxyConfig {
     #[serde(default)]
     pub active_upstream: String,
+    #[serde(default)]
+    pub active_proxy_upstream: String,
     #[serde(default)]
     pub active_effort: String,
 

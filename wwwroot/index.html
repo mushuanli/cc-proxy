@@ -41,8 +41,10 @@
                 <span class="sep">|</span>
                 <button id="btn-toggle-expand" data-i18n="inspector.expand_all" title="Expand/Collapse all sessions">+ All</button>
                 <span class="sep">|</span>
-                <label data-i18n="inspector.upstream">Upstream:</label>
+                <label>Relay:</label>
                 <select id="upstream-select"></select>
+                <label>Transparent Proxy:</label>
+                <select id="proxy-upstream-select"></select>
                 <span class="sep">|</span>
                 <label data-i18n="inspector.effort">Effort:</label>
                 <select id="effort-select"></select>
@@ -235,8 +237,12 @@
                     <div class="settings-panel">
                         <div class="settings-panel-header">
                             <h2 data-i18n="settings.upstreams_title">Upstreams</h2>
-                            <button id="btn-upstream-add" class="btn-sm btn-primary" data-i18n="settings.add">+ Add</button>
+                            <div class="settings-panel-header-actions">
+                                <button id="btn-upstream-add-transparent" class="btn-sm">+ Transparent</button>
+                                <button id="btn-upstream-add" class="btn-sm btn-primary" data-i18n="settings.add">+ Add</button>
+                            </div>
                         </div>
+                        <div class="settings-panel-hint">透明模式只要求默认 Provider；Model 与费率可选，未匹配费率的请求会标记为“未定价”。</div>
                         <div class="ut-scroll">
                             <table id="upstream-table" class="upstream-table">
                                 <thead id="upstream-table-head"></thead>
@@ -279,16 +285,16 @@
                     </div>
                 </div>
 
-                <!-- Global Proxy panel -->
+                <!-- Transparent Proxy Outbound panel -->
                 <div class="settings-panel">
                     <div class="settings-panel-header">
-                        <h2 data-i18n="settings.global_proxy">Global Proxy</h2>
+                        <h2>Transparent Proxy Outbound</h2>
                     </div>
                     <div class="retention-form">
                         <div class="form-group">
-                            <label data-i18n="settings.global_proxy_label">HTTP Proxy URL</label>
+                            <label>HTTP Proxy</label>
                             <input type="text" id="global-proxy-input" placeholder="http://proxy:8080" style="width:300px">
-                            <span class="hint" data-i18n="settings.global_proxy_hint">Blank = no global proxy</span>
+                            <span class="hint">前向代理模式下访问外部 API 的出站代理（不影响 Relay）</span>
                         </div>
                         <div class="form-actions">
                             <button id="btn-global-proxy-save" class="btn-primary" data-i18n="settings.save">Save</button>

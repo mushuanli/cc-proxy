@@ -2,6 +2,25 @@ import { state } from './state.js';
 import { t } from './i18n.js';
 import { esc, shortSid, formatTime, truncate } from './utils.js';
 
+function responsePreview(item) {
+    if (item.content_text) return item.content_text;
+    const body = item.response_body;
+    if (!body || typeof body !== 'object') return body || item.request_body || '';
+
+    const parts = [];
+    if (Array.isArray(body.thinking)) parts.push(...body.thinking.map(v => `[Thinking] ${v}`));
+    if (Array.isArray(body.text)) parts.push(...body.text);
+    if (Array.isArray(body.tool_calls)) {
+        parts.push(...body.tool_calls.map(call =>
+            `[Tool Use] ${call.name || 'tool'} ${JSON.stringify(call.input ?? {})}`));
+    }
+    if (Array.isArray(body.tool_results)) {
+        parts.push(...body.tool_results.map(result =>
+            `[Tool Result] ${result.content ?? ''}`));
+    }
+    return parts.join('\n') || JSON.stringify(body, null, 2);
+}
+
 // ── Timeline ──
 
 export function addToTimeline(item) {
@@ -23,7 +42,7 @@ export function addToTimeline(item) {
     } else {
         const model = item.model || '—';
         const tokens = item.input_tokens != null ? `${item.input_tokens}→${item.output_tokens || 0}t` : '';
-        const content = item.content_text || item.response_body || item.request_body || '';
+        const content = responsePreview(item);
         const formatted = esc(content)
             .replace(/\[Thinking\]/g, '<span class="tl-thinking">[Thinking]</span>')
             .replace(/\[Tool Use\]/g, '<span class="tl-tool">[Tool Use]</span>');

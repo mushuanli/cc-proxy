@@ -73,7 +73,22 @@ export function refreshInspectorCostStatsNow() {
     _doUpdateInspectorCostStats();
 }
 
+/** Apply cost stats pushed from server via WebSocket (no API call). */
+export function applyCostStats(stats) {
+    const inTok = stats.today_input_tokens || 0;
+    const outTok = stats.today_output_tokens || 0;
+    const todayCost = (stats.today_cost_microusd || 0) / 1_000_000;
+    const monthCost = (stats.month_cost_microusd || 0) / 1_000_000;
+
+    document.getElementById('stat-today-tokens').textContent = `${formatTokens(inTok)}/${formatTokens(outTok)}`;
+    document.getElementById('stat-today-cost').textContent = todayCost > 0 ? `¥${todayCost.toFixed(3)}` : '¥0';
+    document.getElementById('stat-month-cost').textContent = monthCost > 0 ? `¥${monthCost.toFixed(3)}` : '¥0';
+
+    _statLastRefresh = Date.now(); // suppress stale REST fetch within cooldown
+}
+
 window._updateInspectorCostStats = updateInspectorCostStats;
+window._applyCostStats = applyCostStats;
 
 // ── Cost view helpers ──
 

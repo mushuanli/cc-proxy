@@ -36,6 +36,7 @@
   },
 
   "inspector": {
+    "unpriced": "未定价",
     "record": "录制",
     "recording": "录制中…",
     "rec_dot": "录制",

@@ -192,4 +192,48 @@ mod tests {
         let events = parser.feed(b"just some text\nwithout event format\n");
         assert!(events.is_empty());
     }
+
+    #[test]
+    fn extracts_anthropic_stream_usage() {
+        let parser = SseParser::new();
+        let start = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_123",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 42,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 200
+                }
+            }
+        });
+        let delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "output_tokens": 321 }
+        });
+
+        assert_eq!(parser.message_id(&start), Some("msg_123"));
+        assert_eq!(parser.model_from_start(&start), Some("claude-sonnet-4-6"));
+        assert_eq!(parser.input_tokens_from_start(&start), Some(42));
+        assert_eq!(parser.cache_creation_tokens_from_start(&start), Some(100));
+        assert_eq!(parser.cache_read_tokens_from_start(&start), Some(200));
+        assert_eq!(parser.output_tokens_from_delta(&delta), Some(321));
+        assert_eq!(parser.stop_reason(&delta), Some("end_turn"));
+    }
+
+    #[test]
+    fn output_usage_is_not_nested_under_delta() {
+        let parser = SseParser::new();
+        let malformed = serde_json::json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "end_turn",
+                "usage": { "output_tokens": 321 }
+            }
+        });
+
+        assert_eq!(parser.output_tokens_from_delta(&malformed), None);
+    }
 }

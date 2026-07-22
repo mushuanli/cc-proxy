@@ -77,6 +77,16 @@ impl ConfigStore {
         routing::resolve_route(&config, request_model)
     }
 
+    /// Resolve a request model against a specific upstream.
+    pub async fn resolve_route_for(
+        &self,
+        upstream_name: &str,
+        request_model: &str,
+    ) -> ConfigResult<ResolvedRoute> {
+        let config = self.config.read().await;
+        routing::resolve_route_for(&config, upstream_name, request_model)
+    }
+
     /// Resolve billing snapshot for a provider and model.
     pub async fn resolve_billing(
         &self,

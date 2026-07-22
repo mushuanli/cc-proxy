@@ -44,24 +44,35 @@ level = "info"   # trace | debug | info | warn | error
 [server]
 listen_address = "127.0.0.1"
 http_port      = 5000   # Dashboard UI
-proxy_port     = 8888   # Set ANTHROPIC_BASE_URL=http://127.0.0.1:8888
+proxy_port     = 8888   # Reverse: ANTHROPIC_BASE_URL=http://127.0.0.1:8888
+                         # Forward: HTTP_PROXY=http://127.0.0.1:8888 (absolute URI)
 mcp_proxy_port = 9999   # MCP traffic
 
 # ── Proxy & Upstream Routing ──────────────────────────────────────────────────
 [proxy]
 active_upstream = "deepseek-only"
+# Transparent forward-proxy traffic can select a different upstream.
+# Transparent forward-proxy traffic can select a different upstream.
+# "__auto__" = auto-detect provider by matching request URL host to provider URL.
+active_proxy_upstream = "__auto__"
+# Global effort level. Options: auto | low | medium | high | xhigh | max | ultracode
+# "auto" = pass through client value unchanged. Can be overridden per-upstream.
+active_effort = "auto"
 
 # Data retention
 request_retention_hours   = 8    # delete requests older than N hours (0 = never)
 session_max_count         = 200  # max sessions in DB (0 = unlimited)
 session_delete_after_days = 0    # delete session records after N days (0 = never)
 
-# Optional global HTTP proxy. Used by all providers unless overridden per-provider.
-# Set http_proxy to a URL to route all upstream API calls through that proxy.
+# Relay → upstream API proxy (outbound side).
+# Set http_proxy to route relay's upstream API calls through an HTTP proxy.
+# Per-provider proxy overrides this; empty "" forces direct connection.
 # http_proxy = "http://proxy:8080"
 
 # Request timeout (seconds). 0 = no timeout. Errors are logged and 504 is returned.
 request_timeout_secs      = 120
+# Max retries for connection/timeout errors (exponential backoff: 200ms * 2^attempt).
+retry_count               = 3
 
 # ── Providers ─────────────────────────────────────────────────────────────────
 # Only URL + auth token. Model names are declared in model_pricing.providers above.
@@ -71,15 +82,15 @@ request_timeout_secs      = 120
 name  = "anthropic"
 url   = "https://api.anthropic.com"
 token = "sk-ant-..."
-# Optional per-provider proxy. Overrides the global http_proxy.
-# Set to "" (empty) to force direct connection for this provider.
+# Per-provider proxy for relay → this provider (overrides global http_proxy).
+# Unset = inherit global http_proxy. "" = direct. URL = use this proxy.
 # proxy = "http://proxy:8080"
 
 [[proxy.providers]]
 name  = "deepseek"
 url   = "https://api.deepseek.com/anthropic"
 token = "sk-..."
-# proxy = "http://proxy:8080"
+# proxy = ""   # force direct connection, bypass global http_proxy
 
 # ── Upstream: deepseek-only ───────────────────────────────────────────────────
 # Routes all Claude tiers to DeepSeek (cost-efficient, no Anthropic account needed).
@@ -102,12 +113,14 @@ mid     = { keywords = ["sonnet"],         provider = "deepseek", model = "deeps
 low     = { keywords = ["haiku"],          provider = "deepseek", model = "deepseek-v4-flash" }
 default = { provider = "deepseek", model = "deepseek-v4-pro" }
 
+[[proxy.upstreams]]
 name    = "deepseek"
 high    = { keywords = ["opus"],  provider = "deepseek", model = "deepseek-v4-pro" }
 mid     = { keywords = ["sonnet"],         provider = "deepseek", model = "deepseek-v4-flash" }
 low     = { keywords = ["haiku"],          provider = "deepseek", model = "deepseek-v4-flash" }
 default = { provider = "deepseek", model = "deepseek-v4-pro" }
 
+[[proxy.upstreams]]
 name    = "deepseek-flash"
 high    = { keywords = ["opus"],  provider = "deepseek", model = "deepseek-v4-flash" }
 mid     = { keywords = ["sonnet"],         provider = "deepseek", model = "deepseek-v4-flash" }
@@ -123,6 +136,7 @@ high    = { keywords = ["opus"],  provider = "anthropic", model = "claude-fable"
 mid     = { keywords = ["sonnet"],   provider = "anthropic", model = "claude-sonnet" }
 low     = { keywords = ["haiku"],  provider = "anthropic", model = "claude-haiku" }
 default = { provider = "anthropic", model = "claude-sonnet" }
+effort  = "high"   # override global effort when this upstream is active
 
 [[proxy.upstreams]]
 name    = "anthropic-sonnet5"

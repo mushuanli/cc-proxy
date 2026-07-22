@@ -126,6 +126,10 @@ pub async fn add_provider(
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let token = body.get("token").and_then(|v| v.as_str()).map(String::from);
+    let provider_proxy = body
+        .get("proxy")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let log_name = name.clone();
     let result = state
         .config
@@ -134,7 +138,7 @@ pub async fn add_provider(
                 name,
                 url: url.into(),
                 token,
-                proxy: None,
+                proxy: provider_proxy,
             });
             Ok(())
         })
@@ -224,12 +228,14 @@ pub async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResp
     let active = &config.proxy.active_upstream;
     Json(json!({
         "active_upstream": config.proxy.active_upstream,
+        "active_proxy_upstream": config.proxy.active_proxy_upstream,
         "active_effort": config.proxy.active_effort,
         "http_proxy": config.proxy.http_proxy,
         "upstreams": config.proxy.upstreams.iter().map(|u| {
             json!({
                 "name": u.name,
                 "active": u.name == *active,
+                "proxy_active": u.name == config.proxy.active_proxy_upstream,
                 "high": u.high,
                 "mid": u.mid,
                 "low": u.low,
@@ -316,10 +322,19 @@ pub async fn delete_upstream(
                 ));
             }
             let was_active = c.proxy.active_upstream == name;
+            let was_proxy_active = c.proxy.active_proxy_upstream == name;
             c.proxy.upstreams.retain(|u| u.name != name);
             if was_active {
                 c.proxy.active_upstream =
                     c.proxy.upstreams.first().map(|u| u.name.clone()).unwrap_or_default();
+            }
+            if was_proxy_active {
+                c.proxy.active_proxy_upstream = c
+                    .proxy
+                    .upstreams
+                    .first()
+                    .map(|u| u.name.clone())
+                    .unwrap_or_default();
             }
             Ok(())
         })
@@ -359,6 +374,28 @@ pub async fn activate_upstream(
             tracing::warn!("[api] activate_upstream failed: {}", e);
             Json(json!({"error": e.to_string()})).into_response()
         }
+    }
+}
+
+pub async fn activate_proxy_upstream(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let log_name = name.clone();
+    let result = state
+        .config
+        .update(move |c| {
+            c.proxy.active_proxy_upstream = name;
+            Ok(())
+        })
+        .await;
+    match result {
+        Ok(_) => {
+            state.events.publish(upstream_changed(&state.config).await);
+            tracing::info!("[api] activate proxy upstream: {}", log_name);
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
     }
 }
 
@@ -583,6 +620,7 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
     let active = &c.proxy.active_upstream;
     WsMessage::UpstreamChanged {
         active_upstream: active.clone(),
+        active_proxy_upstream: c.proxy.active_proxy_upstream.clone(),
         upstreams: c
             .proxy
             .upstreams
@@ -590,6 +628,7 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
             .map(|u| UpstreamInfo {
                 name: u.name.clone(),
                 active: u.name == *active,
+                proxy_active: u.name == c.proxy.active_proxy_upstream,
                 high: u.high.clone().map(|t| TierRuleInfo {
                     keywords: t.keywords,
                     provider: t.provider,
@@ -626,5 +665,6 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
             .collect(),
         active_effort: c.proxy.active_effort.clone(),
         model_pricing: c.model_pricing.clone(),
+        http_proxy: c.proxy.http_proxy.clone(),
     }
 }

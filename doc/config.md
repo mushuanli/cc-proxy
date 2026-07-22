@@ -33,6 +33,7 @@ Provider {
     name: String,
     url: String,             // API base URL（如 https://api.anthropic.com）
     token: Option<String>,   // 以 "sk-" 开头用 Bearer，否则用 x-api-key
+    proxy: Option<String>,   // 独立 HTTP/SOCKS5 代理；缺省继承全局 http_proxy
 }
 ```
 
@@ -71,7 +72,9 @@ UpstreamConfig {
 ```rust
 ProxyConfig {
     active_upstream: String,
+    active_proxy_upstream: String,      // 透明 proxy 入口独立使用的 upstream
     active_effort: String,            // 默认 "auto"，可选 low/medium/high/xhigh/max/ultracode
+    http_proxy: Option<String>,         // 全局出站 HTTP/SOCKS5 代理
     providers: Vec<Provider>,
     upstreams: Vec<UpstreamConfig>,
     retry_count: u32,                 // 默认 3
@@ -84,6 +87,10 @@ ProxyConfig {
     request_timeout_secs: u64,        // 默认 120
 }
 ```
+
+`active_upstream` 与 `active_proxy_upstream` 可同时指向不同 upstream：相对 URI 的 relay 请求使用前者，absolute-URI 的透明 proxy 请求使用后者。任意 upstream 都可作为 proxy 当前 upstream；它仍按 tier 选择 provider，但不会改写客户端的 model、认证 header 或 JSON body。
+
+透明 proxy 的 TierRule 允许 `model = ""`：provider 用于选择出站端点/网络代理，实际 model 直接取客户端报文。ModelPricing 是可选计费配置；缺失时任务会以未定价状态保存，不阻断转发。
 
 ### ServerConfig
 

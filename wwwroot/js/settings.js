@@ -4,14 +4,16 @@ import { esc } from './utils.js';
 
 // ── Shared state update from server ──
 
-export function applyUpstreamState(active, upstreams, providers, effort, pricing, httpProxy) {
+export function applyUpstreamState(active, proxyActive, upstreams, providers, effort, pricing, httpProxy) {
     state.activeUpstream = active;
+    state.activeProxyUpstream = proxyActive || active;
     state.upstreamList = upstreams || [];
     state.providerList = providers || [];
     state.modelPricingList = pricing || [];
     state.globalProxy = httpProxy || null;
     if (effort !== undefined) { state.activeEffort = effort; }
     populateUpstreamSelect(upstreams, active);
+    populateProxyUpstreamSelect(upstreams, state.activeProxyUpstream);
     populateEffortSelect(state.activeEffort);
     renderModelMatrix();
     renderUpstreamTable();
@@ -42,6 +44,25 @@ export function populateUpstreamSelect(upstreams, active) {
         opt.value = u.name;
         opt.textContent = u.name + (u.active ? ' ✓' : '');
         if (u.name === active || u.active) opt.selected = true;
+        select.appendChild(opt);
+    });
+}
+
+export function populateProxyUpstreamSelect(upstreams, active) {
+    const select = document.getElementById('proxy-upstream-select');
+    if (!select) return;
+    select.innerHTML = '';
+    // Auto-detect option (top)
+    const autoOpt = document.createElement('option');
+    autoOpt.value = '__auto__';
+    autoOpt.textContent = 'Auto (auto-detect)';
+    if (active === '__auto__') autoOpt.selected = true;
+    select.appendChild(autoOpt);
+    (upstreams || []).forEach(u => {
+        const opt = document.createElement('option');
+        opt.value = u.name;
+        opt.textContent = u.name + (u.proxy_active ? ' ✓' : '');
+        if (u.name === active || u.proxy_active) opt.selected = true;
         select.appendChild(opt);
     });
 }
@@ -299,6 +320,8 @@ function providerPopoverHtml(title, p) {
         <div class="mx-pop-title">${esc(title)}${hasToken}</div>
         <label class="mx-pop-field-label">URL</label>
         <input class="mx-pop-input mx-pop-url" type="text" value="${p ? esc(p.url) : ''}" placeholder="https://api.example.com">
+        <label class="mx-pop-field-label">Outbound network proxy</label>
+        <input class="mx-pop-input mx-pop-proxy" type="text" value="${p?.proxy ? esc(p.proxy) : ''}" placeholder="仅 Relay 生效 / http://proxy:8080">
         <label class="mx-pop-field-label">${t('settings.token')} <span style="font-weight:normal;color:var(--text-muted)">(${t('settings.keep_current_token')})</span></label>
         <input class="mx-pop-input mx-pop-token" type="password" placeholder="sk-...">`;
 }
@@ -331,8 +354,9 @@ export function openProviderHeaderPopover(th) {
     pop.querySelector('.mx-pop-save').addEventListener('click', async () => {
         const url = pop.querySelector('.mx-pop-url').value.trim();
         const token = pop.querySelector('.mx-pop-token').value.trim();
+        const proxy = pop.querySelector('.mx-pop-proxy').value.trim();
         if (!url) { alert(t('settings.name_url_required')); return; }
-        const body = { name: provName, url };
+        const body = { name: provName, url, proxy: proxy || null };
         if (token) body.token = token;
         const resp = await fetch(`/api/providers/${encodeURIComponent(provName)}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -360,6 +384,8 @@ export function openAddProviderPopover() {
         <input class="mx-pop-input mx-pop-name" type="text" placeholder="deepseek">
         <label class="mx-pop-field-label">URL</label>
         <input class="mx-pop-input mx-pop-url" type="text" placeholder="https://api.deepseek.com">
+        <label class="mx-pop-field-label">Outbound network proxy</label>
+        <input class="mx-pop-input mx-pop-proxy" type="text" placeholder="仅 Relay 生效 / http://proxy:8080">
         <label class="mx-pop-field-label">${t('settings.token')}</label>
         <input class="mx-pop-input mx-pop-token" type="password" placeholder="sk-...">
         <div class="mx-pop-actions" style="margin-top:4px">
@@ -381,9 +407,10 @@ export function openAddProviderPopover() {
         const name = pop.querySelector('.mx-pop-name').value.trim();
         const url = pop.querySelector('.mx-pop-url').value.trim();
         const token = pop.querySelector('.mx-pop-token').value.trim();
+        const proxy = pop.querySelector('.mx-pop-proxy').value.trim();
         if (!name || !url) { alert(t('settings.name_url_required')); return; }
         if (state.providerList.some(p => p.name === name)) { alert(`Provider '${name}' already exists`); return; }
-        const body = { name, url };
+        const body = { name, url, proxy: proxy || null };
         if (token) body.token = token;
         const resp = await fetch('/api/providers', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -438,7 +465,7 @@ export function renderProviderList() {
             <div class="item-row">
                 <div class="item-row-info">
                     <div class="item-row-name">${esc(p.name)}</div>
-                    <div class="item-row-meta">${esc(p.url)}${p.has_token ? ' · 🔑' : ''} · ${modelCounts[p.name] || 0} models</div>
+                    <div class="item-row-meta">${esc(p.url)}${p.proxy ? ` · proxy ${esc(p.proxy)}` : ''}${p.has_token ? ' · 🔑' : ''} · ${modelCounts[p.name] || 0} models</div>
                 </div>
                 <div class="item-row-actions">
                     <button class="btn-sm" onclick="openProviderEdit('${esc(p.name)}')">Edit</button>
@@ -473,6 +500,10 @@ export function openProviderEdit(name) {
                 <label>Token</label>
                 <input type="password" id="pe-token" placeholder="${t('settings.keep_current_token')}">
             </div>
+            <div class="form-group">
+                <label>Outbound network proxy</label>
+                <input type="text" id="pe-proxy" value="${p.proxy ? esc(p.proxy) : ''}" placeholder="仅 Relay 生效 / http://proxy:8080">
+            </div>
             <div class="form-actions">
                 <button id="btn-provider-save" class="btn-primary">${t('settings.save')}</button>
                 <button id="btn-provider-cancel">${t('settings.cancel')}</button>
@@ -487,6 +518,7 @@ export function openProviderEdit(name) {
         document.getElementById('pe-name').disabled = false;
         document.getElementById('pe-url').value = '';
         document.getElementById('pe-token').value = '';
+        document.getElementById('pe-proxy').value = '';
         document.getElementById('provider-edit').classList.remove('hidden');
         document.getElementById('pe-url').focus();
     }
@@ -507,9 +539,10 @@ export async function saveProvider() {
     const name = state.providerAccordionName || nameEl.value.trim();
     const url = document.getElementById('pe-url').value.trim();
     const token = document.getElementById('pe-token').value.trim();
+    const proxy = document.getElementById('pe-proxy').value.trim();
     if (!name || !url) { alert(t('settings.name_url_required')); return; }
 
-    const body = { name, url };
+    const body = { name, url, proxy: proxy || null };
     if (token) body.token = token;
 
     let resp;
@@ -544,9 +577,14 @@ export function renderUpstreamTable() {
     const body = document.getElementById('upstream-table-body');
     if (!head || !body) return;
 
+    const proxyActiveName = state.activeProxyUpstream || '__auto__';
+    const isAuto = proxyActiveName === '__auto__';
     head.innerHTML = `<tr>
         <th class="ut-th ut-col-name">${t('settings.name')}</th>
-        <th class="ut-th ut-col-active">${t('settings.activate')}</th>
+        <th class="ut-th ut-col-active ut-proxy-th${isAuto ? ' ut-proxy-th-auto' : ''}" data-name="__auto__" title="Click to switch to Auto (auto-detect)">
+            Transparent Proxy<span class="ut-proxy-th-active">${isAuto ? '◉ Auto' : esc(proxyActiveName)}</span>
+        </th>
+        <th class="ut-th ut-col-active">Relay</th>
         <th class="ut-th ut-col-tier">${t('settings.tier_high')}</th>
         <th class="ut-th ut-col-tier">${t('settings.tier_mid')}</th>
         <th class="ut-th ut-col-tier">${t('settings.tier_low')}</th>
@@ -556,7 +594,7 @@ export function renderUpstreamTable() {
     </tr>`;
 
     if (state.upstreamList.length === 0) {
-        body.innerHTML = `<tr><td colspan="8" class="mx-empty">${t('settings.no_upstreams')}</td></tr>`;
+        body.innerHTML = `<tr><td colspan="9" class="mx-empty">${t('settings.no_upstreams')}</td></tr>`;
         return;
     }
     body.innerHTML = state.upstreamList.map(u => upstreamRowHtml(u)).join('');
@@ -573,8 +611,12 @@ function upstreamRowHtml(u) {
     const activeCell = u.active
         ? `<span class="ut-active-check" title="${t('settings.active_badge')}">✓</span>`
         : `<button class="btn-sm ut-activate-btn" data-name="${esc(u.name)}">${t('settings.activate')}</button>`;
+    const proxyCell = u.proxy_active
+        ? `<span class="ut-proxy-on" title="Transparent proxy active (click to change)">◉</span>`
+        : `<span class="ut-proxy-off" title="Click to use as transparent proxy">◯</span>`;
     return `<tr class="ut-row${u.active ? ' ut-row-active' : ''}" id="ut-row-${esc(u.name)}">
         <td class="ut-td ut-col-name"><span class="ut-name">${esc(u.name)}</span>${u.active ? `<span class="active-badge">${t('settings.active_badge')}</span>` : ''}</td>
+        <td class="ut-td ut-col-active ut-proxy-cell" data-name="${esc(u.name)}">${proxyCell}</td>
         <td class="ut-td ut-col-active">${activeCell}</td>
         <td class="ut-td ut-col-tier">${tierCellHtml(u.high)}</td>
         <td class="ut-td ut-col-tier">${tierCellHtml(u.mid)}</td>
@@ -588,7 +630,7 @@ function upstreamRowHtml(u) {
     </tr>`;
 }
 
-function upstreamEditRowHtml(name, u) {
+function upstreamEditRowHtml(name, u, simpleTransparent = false) {
     const effortOpts = state.EFFORT_LEVELS.map(level =>
         `<option value="${level}"${(u?.effort || 'auto') === level ? ' selected' : ''}>${level === 'auto' ? 'pass' : level}</option>`
     ).join('');
@@ -601,8 +643,8 @@ function upstreamEditRowHtml(name, u) {
             <input type="text" class="ue-kw" data-tier="${tier}" value="${rule ? esc(rule.keywords.join(', ')) : ''}">
             <label>${t('settings.provider')}</label>
             <select class="ut-provider-select ue-provider" data-tier="${tier}"><option value="">— none —</option></select>
-            <label>${t('settings.model')}</label>
-            <input type="text" class="ue-model" data-tier="${tier}" value="${rule ? esc(rule.model) : ''}" list="ut-dl-${tier}">
+            <label>Relay Model</label>
+            <input type="text" class="ue-model" data-tier="${tier}" value="${rule ? esc(rule.model) : ''}" list="ut-dl-${tier}" placeholder="optional for transparent proxy">
             <datalist id="ut-dl-${tier}"></datalist>
         </div>`;
     }).join('');
@@ -611,23 +653,26 @@ function upstreamEditRowHtml(name, u) {
         <span class="tier-badge tier-default">${t('settings.tier_default')}</span>
         <label>${t('settings.provider')}</label>
         <select class="ut-provider-select ue-provider" data-tier="default"><option value="">— none —</option></select>
-        <label>${t('settings.model')}</label>
-        <input type="text" class="ue-model" data-tier="default" value="${defRule ? esc(defRule.model) : ''}" list="ut-dl-default">
+        <label>Relay Model</label>
+        <input type="text" class="ue-model" data-tier="default" value="${defRule ? esc(defRule.model) : ''}" list="ut-dl-default" placeholder="optional for transparent proxy">
         <datalist id="ut-dl-default"></datalist>
     </div>`;
     const nameRow = !name ? `<div class="ut-edit-tier-row">
         <label>${t('settings.name')}</label>
         <input type="text" id="ue-name" placeholder="production">
     </div>` : '';
-    return `<tr class="ut-edit-row"><td colspan="8" class="ut-edit-td">
+    const transparentDefaultRow = `<div class="ut-edit-tier-row">
+        <span class="tier-badge tier-default">Default</span>
+        <label>${t('settings.provider')}</label>
+        <select class="ut-provider-select ue-provider" data-tier="default"><option value="">— choose provider —</option></select>
+        <span class="field-hint">请求 model/header/body 保持原样；费率可稍后配置</span>
+    </div>`;
+    return `<tr class="ut-edit-row"><td colspan="9" class="ut-edit-td">
         <div class="ut-edit-form">
             ${nameRow}
-            ${tierRows}
-            ${defaultRow}
+            ${simpleTransparent ? transparentDefaultRow : tierRows + defaultRow}
             <div class="ut-edit-bottom">
-                <label>${t('settings.effort')}</label>
-                <select id="ue-effort">${effortOpts}</select>
-                <span class="field-hint">${t('settings.effort_hint')}</span>
+                ${simpleTransparent ? '<span class="field-hint">保存后会自动设为当前 Transparent Proxy upstream</span>' : `<label>${t('settings.effort')}</label><select id="ue-effort">${effortOpts}</select><span class="field-hint">${t('settings.effort_hint')}</span>`}
                 <div class="ut-edit-actions">
                     <button class="btn-primary ut-save-btn">${t('settings.save')}</button>
                     <button class="ut-cancel-btn">${t('settings.cancel')}</button>
@@ -638,6 +683,12 @@ function upstreamEditRowHtml(name, u) {
 }
 
 function bindUpstreamTableEvents() {
+    // The Auto control lives in <thead>, outside the delegated <tbody> handler.
+    // Assigning onclick avoids accumulating listeners when the table re-renders.
+    document.getElementById('upstream-table-head').onclick = e => {
+        const proxyTh = e.target.closest('.ut-proxy-th');
+        if (proxyTh) activateProxyUpstream(proxyTh.dataset.name);
+    };
     document.getElementById('upstream-table-body').addEventListener('click', e => {
         const editBtn = e.target.closest('.ut-edit-btn');
         if (editBtn) { openUpstreamTableEdit(editBtn.dataset.name); return; }
@@ -645,6 +696,8 @@ function bindUpstreamTableEvents() {
         if (delBtn) { deleteUpstream(delBtn.dataset.name); return; }
         const actBtn = e.target.closest('.ut-activate-btn');
         if (actBtn) { activateUpstream(actBtn.dataset.name); return; }
+        const proxyCell = e.target.closest('.ut-proxy-cell');
+        if (proxyCell) { activateProxyUpstream(proxyCell.dataset.name); return; }
         const saveBtn = e.target.closest('.ut-save-btn');
         if (saveBtn) { saveUpstream(); return; }
         const cancelBtn = e.target.closest('.ut-cancel-btn');
@@ -652,13 +705,14 @@ function bindUpstreamTableEvents() {
     });
 }
 
-export function openUpstreamTableEdit(name) {
+export function openUpstreamTableEdit(name, simpleTransparent = false) {
     closeUpstreamTableEdit();
     const u = name ? state.upstreamList.find(u => u.name === name) : null;
     state.upstreamEditMode = u ? 'edit' : 'add';
+    state.upstreamCreateKind = simpleTransparent ? 'transparent' : null;
     state.upstreamAccordionName = name || null;
 
-    const editHtml = upstreamEditRowHtml(name, u);
+    const editHtml = upstreamEditRowHtml(name, u, simpleTransparent);
     if (name) {
         const row = document.getElementById(`ut-row-${name}`);
         if (!row) return;
@@ -687,6 +741,7 @@ export function closeUpstreamTableEdit() {
     document.querySelector('.ut-edit-row')?.remove();
     state.upstreamAccordionName = null;
     state.upstreamEditMode = null;
+    state.upstreamCreateKind = null;
 }
 
 export function getTierPayload(tier) {
@@ -716,6 +771,10 @@ export async function saveUpstream() {
         default: getTierPayload('default'),
         effort:  document.getElementById('ue-effort')?.value || 'auto',
     };
+    if (state.upstreamCreateKind === 'transparent' && !body.default?.provider) {
+        alert('Transparent upstream requires a default provider');
+        return;
+    }
 
     let resp;
     if (state.upstreamEditMode === 'add') {
@@ -724,6 +783,9 @@ export async function saveUpstream() {
         resp = await fetch(`/api/upstreams/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     }
     if (resp.ok) {
+        if (state.upstreamCreateKind === 'transparent') {
+            await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate-proxy`, { method: 'POST' });
+        }
         closeUpstreamTableEdit();
     } else {
         const err = await resp.json();
@@ -733,6 +795,10 @@ export async function saveUpstream() {
 
 export async function activateUpstream(name) {
     await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate`, { method: 'POST' });
+}
+
+export async function activateProxyUpstream(name) {
+    await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate-proxy`, { method: 'POST' });
 }
 
 export async function deleteUpstream(name) {
@@ -771,6 +837,10 @@ document.getElementById('btn-upstream-add').addEventListener('click', () => {
     openUpstreamTableEdit(null);
 });
 
+document.getElementById('btn-upstream-add-transparent').addEventListener('click', () => {
+    openUpstreamTableEdit(null, true);
+});
+
 document.getElementById('btn-matrix-add-provider').addEventListener('click', (e) => {
     e.stopPropagation();
     openAddProviderPopover();
@@ -783,6 +853,12 @@ document.getElementById('upstream-select').addEventListener('change', async () =
     const name = document.getElementById('upstream-select').value;
     if (!name) return;
     await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate`, { method: 'POST' });
+});
+
+document.getElementById('proxy-upstream-select').addEventListener('change', async () => {
+    const name = document.getElementById('proxy-upstream-select').value;
+    if (!name) return;
+    await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate-proxy`, { method: 'POST' });
 });
 
 // Effort select in Inspector toolbar — saves to active upstream's effort field

@@ -282,6 +282,13 @@ impl ProxyStore {
         crate::db::usage::query_range(&conn, from, to)
     }
 
+    /// Get aggregated cost stats for today and current month.
+    /// Used by relay to push real-time cost updates via WebSocket.
+    pub fn get_cost_stats(&self) -> StoreResult<proxy_common::models::CostStats> {
+        let conn = self.inner.conn.lock().unwrap();
+        crate::db::usage::query_cost_stats(&conn)
+    }
+
     // ── Batch commands ──
 
     /// Run a batch command (archive or summary generation).
