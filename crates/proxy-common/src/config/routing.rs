@@ -9,10 +9,7 @@ use crate::upstream::UpstreamConfig;
 /// 1. Find active upstream by name
 /// 2. Match tier rules: high → mid → low → default
 /// 3. Translate logical model → provider model via ModelPricing
-pub fn resolve_route(
-    config: &AppConfig,
-    request_model: &str,
-) -> ConfigResult<ResolvedRoute> {
+pub fn resolve_route(config: &AppConfig, request_model: &str) -> ConfigResult<ResolvedRoute> {
     resolve_route_for(config, &config.proxy.active_upstream, request_model)
 }
 
@@ -28,10 +25,7 @@ pub fn resolve_route_for(
         .iter()
         .find(|u| u.name == upstream_name)
         .ok_or_else(|| {
-            crate::error::ConfigError::NotFound(format!(
-                "upstream '{}' not found",
-                upstream_name
-            ))
+            crate::error::ConfigError::NotFound(format!("upstream '{}' not found", upstream_name))
         })?;
 
     let (provider_name, configured_model) = resolve_tier(upstream, request_model);
@@ -46,12 +40,19 @@ pub fn resolve_route_for(
     // Translate logical model to provider-specific model name
     let resolved_model = translate_model(&config.model_pricing, &provider_name, &configured_model);
 
+    // Use global active_effort as override; fall back to upstream config
+    let effort = if !config.proxy.active_effort.is_empty() && config.proxy.active_effort != "auto" {
+        Some(config.proxy.active_effort.clone())
+    } else {
+        upstream.effort.clone()
+    };
+
     Ok(ResolvedRoute {
         upstream: upstream.name.clone(),
         provider: provider_name,
         configured_model,
         resolved_model,
-        effort: upstream.effort.clone(),
+        effort,
     })
 }
 

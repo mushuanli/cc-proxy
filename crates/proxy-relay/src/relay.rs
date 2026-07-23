@@ -24,13 +24,13 @@ fn safe_truncate_bytes(s: &str, max_bytes: usize) -> &str {
     }
     &s[..end]
 }
+use proxy_common::ResolvedRoute;
+use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessage};
+use proxy_common::{ConfigStore, EventBus};
+use proxy_store::{NewSessionDefaults, NewTask, ProxyStore};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use proxy_common::{ConfigStore, EventBus};
-use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessage};
-use proxy_common::ResolvedRoute;
-use proxy_store::{NewSessionDefaults, NewTask, ProxyStore};
 
 use crate::upstream;
 
@@ -100,9 +100,7 @@ impl RelayHandler {
 
     /// Return an axum Router for proxy traffic (mount on :8888).
     pub fn build_router(self) -> axum::Router {
-        axum::Router::new()
-            .fallback(proxy_handler)
-            .with_state(self)
+        axum::Router::new().fallback(proxy_handler).with_state(self)
     }
 }
 
@@ -133,7 +131,9 @@ async fn handle_connect_tunnel(_relay: RelayHandler, _uri: Uri) -> Response<Body
     // In practice, Claude Code uses reverse proxy mode (ANTHROPIC_BASE_URL).
     Response::builder()
         .status(StatusCode::NOT_IMPLEMENTED)
-        .body(Body::from("CONNECT tunnel not supported in this configuration"))
+        .body(Body::from(
+            "CONNECT tunnel not supported in this configuration",
+        ))
         .unwrap()
 }
 
@@ -150,7 +150,9 @@ async fn handle_forward_proxy(
         "{}://{}{}",
         uri.scheme().map(|s| s.as_str()).unwrap_or("https"),
         uri.authority().map(|a| a.as_str()).unwrap_or(""),
-        uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path())
+        uri.path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or(uri.path())
     );
 
     proxy_request(relay, method, &upstream_url, headers, body, true).await
@@ -165,7 +167,11 @@ async fn handle_reverse_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path()).to_string();
+    let path = uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or(uri.path())
+        .to_string();
     proxy_request(relay, method, &path, headers, body, false).await
 }
 
@@ -182,16 +188,15 @@ async fn proxy_request(
     let start = Instant::now();
 
     // ── Parse request body ──
-    let mut body_json: serde_json::Value =
-        match serde_json::from_slice(&body) {
-            Ok(v) => v,
-            Err(e) => {
-                return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(Body::from(format!("Invalid JSON: {}", e)))
-                    .unwrap();
-            }
-        };
+    let mut body_json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!("Invalid JSON: {}", e)))
+                .unwrap();
+        }
+    };
 
     let protocol = upstream::detect_protocol(path_or_url, &body_json);
     let request_model = body_json
@@ -207,16 +212,20 @@ async fn proxy_request(
 
     let session_id_str = upstream::extract_request_session_id(protocol, &headers, &body_json)
         .unwrap_or_else(|| format!("{}-{}", protocol.request_type(), TaskId::generate()));
-    let session_id = SessionId::new(session_id_str.clone())
-        .unwrap_or_else(|_| SessionId::from_trusted(
-            format!("{}-{}", protocol.request_type(), TaskId::generate())
-        ));
+    let session_id = SessionId::new(session_id_str.clone()).unwrap_or_else(|_| {
+        SessionId::from_trusted(format!(
+            "{}-{}",
+            protocol.request_type(),
+            TaskId::generate()
+        ))
+    });
 
     let msg_count = upstream::message_count(protocol, &body_json);
 
     // ── Resolve route via the upstream assigned to this ingress mode ──
     let config_snapshot = relay.config.get().await;
-    let upstream_name = if is_transparent && !config_snapshot.proxy.active_proxy_upstream.is_empty() {
+    let upstream_name = if is_transparent && !config_snapshot.proxy.active_proxy_upstream.is_empty()
+    {
         &config_snapshot.proxy.active_proxy_upstream
     } else {
         &config_snapshot.proxy.active_upstream
@@ -257,7 +266,11 @@ async fn proxy_request(
         }
     } else {
         // Normal tier-based route resolution
-        let route = match relay.config.resolve_route_for(upstream_name, &request_model).await {
+        let route = match relay
+            .config
+            .resolve_route_for(upstream_name, &request_model)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("[relay] route resolution failed: {}", e);
@@ -340,10 +353,19 @@ async fn proxy_request(
         .and_then(|p| p.proxy.as_ref())
         .and_then(|proxy_str| {
             if proxy_str.is_empty() {
-                None  // Explicit "no proxy"
+                None // Explicit "no proxy"
             } else {
-                Some(proxy_str.clone())  // Per-provider proxy override
+                Some(proxy_str.clone()) // Per-provider proxy override
             }
+        })
+        .or_else(|| {
+            // Fall back to global http_proxy
+            config_snapshot
+                .proxy
+                .http_proxy
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .cloned()
         });
 
     // ── Effort injection ──
@@ -377,18 +399,20 @@ async fn proxy_request(
     };
 
     // ── Build upstream headers ──
-    let override_token = (!is_transparent).then_some(provider_token.as_deref()).flatten();
+    let override_token = (!is_transparent)
+        .then_some(provider_token.as_deref())
+        .flatten();
     let mut upstream_headers = upstream::build_upstream_headers(&headers, override_token);
     // Effort beta header
     if !is_transparent {
-      if let Some(effort_val) = route.effort.as_ref() {
-        if !effort_val.is_empty() && effort_val != "auto" {
-            upstream_headers.insert(
-                "anthropic-beta",
-                axum::http::HeaderValue::from_static("effort-2025-11-24"),
-            );
+        if let Some(effort_val) = route.effort.as_ref() {
+            if !effort_val.is_empty() && effort_val != "auto" {
+                upstream_headers.insert(
+                    "anthropic-beta",
+                    axum::http::HeaderValue::from_static("effort-2025-11-24"),
+                );
+            }
         }
-      }
     }
 
     // ── Serialize modified body ──
@@ -421,11 +445,7 @@ async fn proxy_request(
     {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::error!(
-                "[proxy] [{}] upstream dispatch failed: {}",
-                sid_short,
-                e,
-            );
+            tracing::error!("[proxy] [{}] upstream dispatch failed: {}", sid_short, e,);
 
             // Build the event from the relay result itself. Persistence is a
             // separate concern; the UI must still receive a complete task if
@@ -520,10 +540,7 @@ async fn proxy_request(
     // ── Log upstream errors ──
     let is_http_error = upstream_response.status_code >= 400;
     if is_http_error {
-        let err_detail = upstream_response
-            .error
-            .as_deref()
-            .unwrap_or("no body");
+        let err_detail = upstream_response.error.as_deref().unwrap_or("no body");
         let body_snippet = upstream_response
             .content_text
             .as_ref()
@@ -572,9 +589,9 @@ async fn proxy_request(
             ..Default::default()
         },
         started_at: task_started_at,
-        first_byte_at: upstream_response.ttft_ms.map(|ttft| {
-            task_started_at + ttft as i64
-        }),
+        first_byte_at: upstream_response
+            .ttft_ms
+            .map(|ttft| task_started_at + ttft as i64),
         ended_at: Some(chrono::Utc::now().timestamp_millis()),
         status: if upstream_response.error.is_some() || is_http_error {
             TaskStatus::Failed
@@ -604,10 +621,13 @@ async fn proxy_request(
             stop_reason: upstream_response.stop_reason.clone(),
             upstream_message_id: upstream_response.message_id.clone(),
         },
-        error: upstream_response.error.as_ref().map(|e| proxy_store::TaskError {
-            error_type: "upstream_error".into(),
-            error_message: e.clone(),
-        }),
+        error: upstream_response
+            .error
+            .as_ref()
+            .map(|e| proxy_store::TaskError {
+                error_type: "upstream_error".into(),
+                error_message: e.clone(),
+            }),
         metadata: inspect_metadata,
         messages_count: msg_count,
     };
@@ -694,7 +714,10 @@ async fn proxy_request(
     // A body transport failure after a successful status cannot be represented
     // as a valid upstream response.
     if upstream_response.status_code < 400 && upstream_response.error.is_some() {
-        let err = upstream_response.error.as_deref().unwrap_or("upstream body error");
+        let err = upstream_response
+            .error
+            .as_deref()
+            .unwrap_or("upstream body error");
         let err_body = serde_json::json!({
             "error": {
                 "type": "proxy_error",
@@ -704,7 +727,9 @@ async fn proxy_request(
         return Response::builder()
             .status(StatusCode::BAD_GATEWAY)
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&err_body).unwrap_or_default()))
+            .body(Body::from(
+                serde_json::to_string(&err_body).unwrap_or_default(),
+            ))
             .unwrap();
     }
 
@@ -733,11 +758,7 @@ fn client_type(protocol: upstream::ApiProtocol) -> ClientType {
     }
 }
 
-fn stored_request_body(
-    is_transparent: bool,
-    raw: &Bytes,
-    parsed: &serde_json::Value,
-) -> String {
+fn stored_request_body(is_transparent: bool, raw: &Bytes, parsed: &serde_json::Value) -> String {
     if is_transparent {
         String::from_utf8_lossy(raw).to_string()
     } else {

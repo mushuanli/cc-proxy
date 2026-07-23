@@ -90,7 +90,11 @@ impl ProxyStore {
             .as_ref()
             .map(|id| {
                 let s = id.as_str();
-                if s.len() > 8 { &s[s.len() - 8..] } else { s }
+                if s.len() > 8 {
+                    &s[s.len() - 8..]
+                } else {
+                    s
+                }
             })
             .unwrap_or("new");
 
@@ -102,11 +106,9 @@ impl ProxyStore {
 
             let result = (|| -> StoreResult<Task> {
                 // Compute cost from billing snapshot + usage (store owns billing logic)
-                let cost_microusd = crate::billing::calculate_cost_microusd(
-                    &task.usage,
-                    &task.billing.rates,
-                )
-                .map_err(|e| crate::error::StoreError::InvalidArgument(e.to_string()))?;
+                let cost_microusd =
+                    crate::billing::calculate_cost_microusd(&task.usage, &task.billing.rates)
+                        .map_err(|e| crate::error::StoreError::InvalidArgument(e.to_string()))?;
 
                 // Generate or use provided task id
                 let task_id = task.id.clone().unwrap_or_else(TaskId::generate);
@@ -126,7 +128,14 @@ impl ProxyStore {
                 let sequence_no = db::sessions::allocate_sequence(&conn, session_id)?;
 
                 // Insert task
-                let inserted = db::tasks::insert_task(&conn, &task, &task_id, session_id, sequence_no, cost_microusd)?;
+                let inserted = db::tasks::insert_task(
+                    &conn,
+                    &task,
+                    &task_id,
+                    session_id,
+                    sequence_no,
+                    cost_microusd,
+                )?;
 
                 if inserted {
                     // Update session aggregates
@@ -158,8 +167,9 @@ impl ProxyStore {
                     )?;
                 }
 
-                db::tasks::get_task(&conn, &task_id)?
-                    .ok_or_else(|| crate::error::StoreError::NotFound("task not found after write".into()))
+                db::tasks::get_task(&conn, &task_id)?.ok_or_else(|| {
+                    crate::error::StoreError::NotFound("task not found after write".into())
+                })
             })();
 
             match result {
@@ -190,14 +200,21 @@ impl ProxyStore {
     /// Get full task details by id.
     pub fn info(&self, task_id: &TaskId) -> StoreResult<Task> {
         let conn = self.inner.conn.lock().unwrap();
-        db::tasks::get_task(&conn, task_id)?
-            .ok_or_else(|| crate::error::StoreError::NotFound(format!("task '{}' not found", task_id)))
+        db::tasks::get_task(&conn, task_id)?.ok_or_else(|| {
+            crate::error::StoreError::NotFound(format!("task '{}' not found", task_id))
+        })
     }
 
     /// List sessions with optional filters.
     pub fn list_sessions(&self, filter: SessionFilter) -> StoreResult<Vec<SessionListItem>> {
         let conn = self.inner.conn.lock().unwrap();
         db::sessions::list_sessions(&conn, &filter)
+    }
+
+    /// Get a single session by exact ID.
+    pub fn get_session(&self, id: &SessionId) -> StoreResult<Option<Session>> {
+        let conn = self.inner.conn.lock().unwrap();
+        db::sessions::get_session(&conn, id)
     }
 
     /// List tasks for a session.
@@ -211,11 +228,7 @@ impl ProxyStore {
     }
 
     /// Rename a session.
-    pub fn name(
-        &self,
-        session_id: &SessionId,
-        new_name: Option<&str>,
-    ) -> StoreResult<Session> {
+    pub fn name(&self, session_id: &SessionId, new_name: Option<&str>) -> StoreResult<Session> {
         let conn = self.inner.conn.lock().unwrap();
         let updated = db::sessions::rename_session(&conn, session_id, new_name)?;
         if !updated {
@@ -304,21 +317,21 @@ impl ProxyStore {
     pub fn summary(&self, task_id: &TaskId) -> StoreResult<SessionSummary> {
         let conn = self.inner.conn.lock().unwrap();
 
-        let task = db::tasks::get_task(&conn, task_id)?
-            .ok_or_else(|| crate::error::StoreError::NotFound(format!(
-                "task '{}' not found",
-                task_id
-            )))?;
+        let task = db::tasks::get_task(&conn, task_id)?.ok_or_else(|| {
+            crate::error::StoreError::NotFound(format!("task '{}' not found", task_id))
+        })?;
 
-        crate::summary::analyzer::analyze_task(&task)
-            .ok_or_else(|| crate::error::StoreError::NotFound(format!(
-                "could not analyze task '{}'",
-                task_id
-            )))
+        crate::summary::analyzer::analyze_task(&task).ok_or_else(|| {
+            crate::error::StoreError::NotFound(format!("could not analyze task '{}'", task_id))
+        })
     }
 
     /// Query daily usage for a date range. Returns raw rows from session_daily_usage.
-    pub fn query_daily_usage_range(&self, from: &str, to: &str) -> StoreResult<Vec<crate::db::usage::DailyUsageRow>> {
+    pub fn query_daily_usage_range(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> StoreResult<Vec<crate::db::usage::DailyUsageRow>> {
         let conn = self.inner.conn.lock().unwrap();
         crate::db::usage::query_range(&conn, from, to)
     }

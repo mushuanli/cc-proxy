@@ -115,7 +115,11 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
                     if !tool_uses.is_empty() {
                         let mut tool_summaries: Vec<ToolCallSummary> = Vec::new();
                         for tool in &tool_uses {
-                            let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("unknown").to_string();
+                            let name = tool
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
                             let input = tool.get("input").cloned().unwrap_or(Value::Null);
 
                             // Update stats
@@ -188,7 +192,11 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
 fn is_tool_result(msg: &Value) -> bool {
     msg.get("content")
         .and_then(|c| c.as_array())
-        .map(|blocks| blocks.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")))
+        .map(|blocks| {
+            blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+        })
         .unwrap_or(false)
 }
 
@@ -203,13 +211,17 @@ pub fn is_real_user_prompt(msg: &Value) -> bool {
     };
 
     // Must be all text blocks
-    let all_text = content.iter().all(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"));
+    let all_text = content
+        .iter()
+        .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"));
     if !all_text {
         return false;
     }
 
     // None of the blocks should be tool_result
-    let has_tool_result = content.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
+    let has_tool_result = content
+        .iter()
+        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
     if has_tool_result {
         return false;
     }
@@ -309,9 +321,10 @@ fn collect_file_touch(
     map: &mut HashMap<String, FileTouched>,
 ) {
     let path = match tool_name {
-        "Read" | "Write" | "Edit" | "NotebookEdit" => {
-            input.get("file_path").and_then(|p| p.as_str()).map(String::from)
-        }
+        "Read" | "Write" | "Edit" | "NotebookEdit" => input
+            .get("file_path")
+            .and_then(|p| p.as_str())
+            .map(String::from),
         "Grep" => input.get("path").and_then(|p| p.as_str()).map(String::from),
         "Glob" => input.get("path").and_then(|p| p.as_str()).map(String::from),
         _ => None,
@@ -326,7 +339,12 @@ fn collect_file_touch(
         order.push(path.clone());
         map.insert(
             path.clone(),
-            FileTouched { path: path.clone(), reads: 0, writes: 0, edits: 0 },
+            FileTouched {
+                path: path.clone(),
+                reads: 0,
+                writes: 0,
+                edits: 0,
+            },
         );
     }
 
@@ -381,11 +399,20 @@ fn describe_tool(name: &str, input: &Value) -> String {
             format!("Run: {}", truncate(text, 80))
         }
         "Agent" => {
-            let agent_type = input.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent");
-            let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let agent_type = input
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent");
+            let desc = input
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("Spawn {}: {}", agent_type, truncate(desc, 60))
         }
-        "TaskCreate" => format!("Create task: {}", truncate(&str_field(input, "subject"), 60)),
+        "TaskCreate" => format!(
+            "Create task: {}",
+            truncate(&str_field(input, "subject"), 60)
+        ),
         "TaskUpdate" => {
             let id = str_field(input, "taskId");
             let status = input.get("status").and_then(|v| v.as_str()).unwrap_or("?");

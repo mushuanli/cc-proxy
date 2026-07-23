@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use proxy_common::{SessionId, TaskId};
@@ -50,11 +51,18 @@ pub(crate) fn task_to_json(
 
 /// Transform full Task to ProxiedRequest-compatible JSON for detail view.
 fn task_to_full_json(task: &proxy_store::Task) -> Value {
-    let raw_response = task.metadata.get("raw_response_body").and_then(|v| v.as_str());
+    let raw_response = task
+        .metadata
+        .get("raw_response_body")
+        .and_then(|v| v.as_str());
     let inspected_response = raw_response
         .and_then(|body| serde_json::from_str::<Value>(body).ok())
         .unwrap_or_else(|| json!(task.response_body));
-    let sse_events = task.metadata.get("sse_events").cloned().unwrap_or_else(|| json!([]));
+    let sse_events = task
+        .metadata
+        .get("sse_events")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     let content_text = task
         .response_body
         .as_ref()
@@ -123,10 +131,8 @@ pub async fn list(
             };
             match state.store.list_tasks(&sid, None) {
                 Ok(tasks) => {
-                    let items: Vec<Value> = tasks
-                        .iter()
-                        .map(|t| task_to_json(t, Some(&sid)))
-                        .collect();
+                    let items: Vec<Value> =
+                        tasks.iter().map(|t| task_to_json(t, Some(&sid))).collect();
                     Json(json!(items)).into_response()
                 }
                 Err(e) => Json(json!({"error": e.to_string()})).into_response(),
@@ -143,7 +149,8 @@ pub async fn list(
                             break;
                         }
                         if let Ok(tasks) = state.store.list_tasks(&s.id, None) {
-                            all_tasks.extend(tasks.into_iter().map(|t| task_to_json(&t, Some(&s.id))));
+                            all_tasks
+                                .extend(tasks.into_iter().map(|t| task_to_json(&t, Some(&s.id))));
                         }
                     }
                     all_tasks.truncate(limit);
@@ -155,10 +162,7 @@ pub async fn list(
     }
 }
 
-pub async fn get(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
     let tid = TaskId::new(id);
     match state.store.info(&tid) {
         Ok(task) => Json(task_to_full_json(&task)).into_response(),
@@ -166,16 +170,18 @@ pub async fn get(
     }
 }
 
-pub async fn delete_one(
-    Path(_id): Path<String>,
-) -> impl IntoResponse {
-    Json(json!({"ok": false, "error": "not implemented"})).into_response()
+pub async fn delete_one(Path(_id): Path<String>) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented"})),
+    )
 }
 
-pub async fn delete_batch(
-    Json(_body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    Json(json!({"ok": false, "error": "not implemented"})).into_response()
+pub async fn delete_batch(Json(_body): Json<serde_json::Value>) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented"})),
+    )
 }
 
 pub async fn summary(
