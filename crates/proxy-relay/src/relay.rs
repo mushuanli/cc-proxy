@@ -634,6 +634,18 @@ async fn proxy_request(
 
     let store_result = relay.store.write(&session_id, task);
 
+    // ── Generate summary cache (async, fire-and-forget) ──
+    if let Ok(ref t) = store_result {
+        if t.status == TaskStatus::Completed && t.request_body.is_some() {
+            let tid = t.id.clone();
+            let sid = t.session_id.clone();
+            let store = relay.store.clone();
+            tokio::task::spawn_blocking(move || {
+                store.cache_summary_if_analyzable(&tid, &sid);
+            });
+        }
+    }
+
     // ── Log completion ──
     if let Ok(ref t) = store_result {
         let cost_usd = t.cost_microusd as f64 / 1_000_000.0;

@@ -334,6 +334,27 @@ impl ProxyStore {
         })
     }
 
+    /// Generate and cache a task summary in one atomic operation.
+    pub fn cache_summary_if_analyzable(
+        &self,
+        task_id: &TaskId,
+        session_id: &SessionId,
+    ) {
+        let conn = self.inner.conn.lock().unwrap();
+
+        let task = match db::tasks::get_task(&conn, task_id) {
+            Ok(Some(t)) => t,
+            _ => return,
+        };
+
+        if let Some(summary) = crate::summary::analyzer::analyze_task(&task) {
+            if let Ok(json) = serde_json::to_string(&summary) {
+                let _ = db::tasks::update_summary(&conn, task_id, &json);
+                let _ = db::sessions::set_archive_dirty(&conn, session_id);
+            }
+        }
+    }
+
     /// Query daily usage for a date range. Returns raw rows from session_daily_usage.
     pub fn query_daily_usage_range(
         &self,
