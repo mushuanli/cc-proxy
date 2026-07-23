@@ -9,6 +9,20 @@ use serde_json::json;
 
 use crate::AppState;
 
+/// Map an error message to the best HTTP status code.
+fn err_response(msg: &str) -> axum::response::Response {
+    let code = if msg.contains("not found") || msg.contains("NotFound") {
+        StatusCode::NOT_FOUND
+    } else if msg.contains("validation") || msg.contains("invalid") || msg.contains("Validation") {
+        StatusCode::BAD_REQUEST
+    } else if msg.contains("duplicate") || msg.contains("conflict") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (code, Json(json!({"error": msg}))).into_response()
+}
+
 // ── Model Pricing ──
 
 pub async fn list_pricing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -44,7 +58,7 @@ pub async fn add_pricing(
         }
         Err(e) => {
             tracing::warn!("[api] add_pricing failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -73,7 +87,7 @@ pub async fn update_pricing(
         }
         Err(e) => {
             tracing::warn!("[api] update_pricing failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -98,7 +112,7 @@ pub async fn delete_pricing(
         }
         Err(e) => {
             tracing::warn!("[api] delete_pricing failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -153,7 +167,7 @@ pub async fn add_provider(
         }
         Err(e) => {
             tracing::warn!("[api] add_provider failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -195,7 +209,7 @@ pub async fn update_provider(
         }
         Err(e) => {
             tracing::warn!("[api] update_provider failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -220,7 +234,7 @@ pub async fn delete_provider(
         }
         Err(e) => {
             tracing::warn!("[api] delete_provider failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -284,7 +298,7 @@ pub async fn add_upstream(
         }
         Err(e) => {
             tracing::warn!("[api] add_upstream failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -313,7 +327,7 @@ pub async fn update_upstream(
         }
         Err(e) => {
             tracing::warn!("[api] update_upstream failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -361,7 +375,7 @@ pub async fn delete_upstream(
         }
         Err(e) => {
             tracing::warn!("[api] delete_upstream failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -386,7 +400,7 @@ pub async fn activate_upstream(
         }
         Err(e) => {
             tracing::warn!("[api] activate_upstream failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -409,7 +423,7 @@ pub async fn activate_proxy_upstream(
             tracing::info!("[api] activate proxy upstream: {}", log_name);
             Json(json!({"ok": true})).into_response()
         }
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(e) => err_response(&e.to_string()),
     }
 }
 
@@ -432,7 +446,11 @@ pub async fn set_effort(
         .to_string();
     let valid = ["auto", "low", "medium", "high", "xhigh", "max", "ultracode"];
     if !valid.contains(&effort.as_str()) {
-        return Json(json!({"error": format!("invalid effort: {}", effort)})).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid effort: {}", effort)})),
+        )
+            .into_response();
     }
     let log_effort = effort.clone();
     let result = state
@@ -450,7 +468,7 @@ pub async fn set_effort(
         }
         Err(e) => {
             tracing::warn!("[api] set_effort failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -502,7 +520,7 @@ pub async fn update_retention(
         }
         Err(e) => {
             tracing::warn!("[api] update_retention failed: {}", e);
-            Json(json!({"error": e.to_string()})).into_response()
+            err_response(&e.to_string())
         }
     }
 }
@@ -563,7 +581,7 @@ pub async fn set_global_proxy(
             state.events.publish(upstream_changed(&state.config).await);
             Json(json!({"ok": true})).into_response()
         }
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(e) => err_response(&e.to_string()),
     }
 }
 
@@ -583,6 +601,36 @@ pub async fn set_mcp(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
+    if let Some(ref value) = url {
+        let parsed = match reqwest::Url::parse(value) {
+            Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "destinationUrl must be an http(s) URL"})),
+                )
+                    .into_response()
+            }
+        };
+        if parsed.host_str().is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "destinationUrl must include a host"})),
+            )
+                .into_response();
+        }
+    }
+    let persisted_url = url.clone();
+    if let Err(e) = state
+        .config
+        .update(move |c| {
+            c.server.mcp_destination = persisted_url;
+            Ok(())
+        })
+        .await
+    {
+        return err_response(&e.to_string());
+    }
     state.mcp.set_destination(url.clone()).await;
     tracing::info!("[api] set_mcp: destination={:?}", url);
     Json(json!({"ok": true, "destination_url": url})).into_response()
@@ -608,13 +656,111 @@ pub async fn clear_hooks(State(state): State<Arc<AppState>>) -> impl IntoRespons
     Json(json!({"ok": true})).into_response()
 }
 
+// ── Hook ──
+
+pub async fn hook_event(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    state.hook_receiver.receive(&body);
+    let event_name = body
+        .get("hook_event_name")
+        .or_else(|| body.get("hookEventName"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    if matches!(event_name, "Stop" | "SessionEnd") {
+        if let Some(raw_sid) = body
+            .get("session_id")
+            .or_else(|| body.get("sessionId"))
+            .and_then(|v| v.as_str())
+        {
+            if let Ok(sid) = proxy_common::SessionId::new(raw_sid.to_string()) {
+                if let Err(e) = state
+                    .store
+                    .stop_session(&sid, chrono::Utc::now().timestamp_millis())
+                    .await
+                {
+                    tracing::warn!("[api] failed to stop hook session {}: {}", sid, e);
+                }
+            }
+        }
+    }
+    tracing::info!("[api] hook_event: {}", event_name);
+    Json(json!({"ok": true})).into_response()
+}
+
 // ── Flush ──
 
-pub async fn flush() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented"})),
-    )
+/// Flush selected sessions to archive YAML files.
+pub async fn flush(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let session_ids: Vec<proxy_common::SessionId> = match body.get("session_ids") {
+        Some(serde_json::Value::Array(arr)) => {
+            let mut ids = Vec::new();
+            for v in arr {
+                match v.as_str() {
+                    Some(s) => match proxy_common::SessionId::new(s.to_string()) {
+                        Ok(id) => ids.push(id),
+                        Err(e) => {
+                            return (StatusCode::BAD_REQUEST, Json(json!({"error": e})))
+                                .into_response()
+                        }
+                    },
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "invalid session_id type"})),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+            if ids.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "no valid session_ids"})),
+                )
+                    .into_response();
+            }
+            ids
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "expected session_ids array"})),
+            )
+                .into_response()
+        }
+    };
+
+    let config = state.config.get().await;
+    let options = proxy_store::ArchiveOptions {
+        task_retention_hours: config.proxy.request_retention_hours,
+        force: true,
+    };
+
+    match state.store.archive(Some(&session_ids), options).await {
+        Ok(results) => {
+            let flushed: Vec<String> = results
+                .iter()
+                .map(|a| a.session_id.as_str().to_string())
+                .collect();
+            let count = flushed.len();
+            tracing::info!("[api] flush: {} sessions exported", count);
+            let errors: Vec<String> = Vec::new();
+            Json(json!({"flushed": flushed, "errors": errors})).into_response()
+        }
+        Err(e) => {
+            tracing::error!("[api] flush failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub async fn flush_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -624,7 +770,7 @@ pub async fn flush_all(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         force: true,
     };
 
-    match state.store.archive(None, options) {
+    match state.store.archive(None, options).await {
         Ok(results) => {
             let flushed: Vec<String> = results
                 .iter()
@@ -645,11 +791,63 @@ pub async fn flush_all(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
 // ── Cleanup ──
 
-pub async fn trigger_cleanup() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented"})),
-    )
+/// Trigger cleanup of old tasks past retention for all archived sessions.
+pub async fn trigger_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let config = state.config.get().await;
+    let retention_hours = config.proxy.request_retention_hours;
+    let delete_after_days = config.proxy.session_delete_after_days;
+    let max_sessions = config.proxy.session_max_count;
+    if retention_hours == 0 && delete_after_days == 0 && max_sessions == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "all retention policies are disabled"})),
+        )
+            .into_response();
+    }
+
+    let deleted_requests = if retention_hours > 0 {
+        match state.store.cleanup(retention_hours as u64).await {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::error!("[api] task cleanup failed: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        0
+    };
+    match state
+        .store
+        .cleanup_sessions(delete_after_days as u64, max_sessions as u64)
+        .await
+    {
+        Ok(deleted_sessions) => {
+            tracing::info!(
+                "[api] cleanup: {} tasks, {} sessions deleted",
+                deleted_requests,
+                deleted_sessions
+            );
+            Json(json!({
+                "ok": true,
+                "deleted": deleted_requests,
+                "deleted_requests": deleted_requests,
+                "deleted_sessions": deleted_sessions
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            tracing::error!("[api] cleanup failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
 }
 
 // ── Helper ──

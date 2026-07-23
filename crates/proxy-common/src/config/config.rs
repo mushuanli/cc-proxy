@@ -32,6 +32,9 @@ impl Default for AppConfig {
                 http_port: 5000,
                 proxy_port: 8888,
                 mcp_proxy_port: 9999,
+                auth_token: None,
+                mcp_destination: None,
+                ws_include_bodies: false,
             },
             logging: LoggingConfig {
                 level: "info".into(),
@@ -96,6 +99,15 @@ pub struct ServerConfig {
     pub proxy_port: u16,
     #[serde(default = "default_mcp_proxy_port")]
     pub mcp_proxy_port: u16,
+    /// Auth token for Dashboard/WebSocket. Required when listen_address is not loopback.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// MCP forwarding destination (persisted across restarts).
+    #[serde(default)]
+    pub mcp_destination: Option<String>,
+    /// Include prompt/response bodies in WebSocket events (off by default).
+    #[serde(default)]
+    pub ws_include_bodies: bool,
 }
 
 fn default_listen_addr() -> String {

@@ -148,6 +148,19 @@ impl AppConfig {
             }
         }
 
+        if let Some(token) = self.server.auth_token.as_deref() {
+            if !(16..=256).contains(&token.len())
+                || !token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                errors.push(
+                    "server.auth_token must be 16-256 ASCII letters, digits, '-' or '_'"
+                        .to_string(),
+                );
+            }
+        }
+
         errors
     }
 }

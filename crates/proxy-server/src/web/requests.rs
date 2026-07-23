@@ -126,62 +126,111 @@ pub async fn list(
             let sid = match SessionId::new(id.clone()) {
                 Ok(v) => v,
                 Err(e) => {
-                    return Json(json!({"error": e})).into_response();
+                    return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
                 }
             };
-            match state.store.list_tasks(&sid, None) {
+            match state.store.list_tasks(&sid, None).await {
                 Ok(tasks) => {
                     let items: Vec<Value> =
                         tasks.iter().map(|t| task_to_json(t, Some(&sid))).collect();
                     Json(json!(items)).into_response()
                 }
-                Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response(),
             }
         }
-        None => {
-            let sessions = state.store.list_sessions(Default::default());
-            match sessions {
-                Ok(list) => {
-                    let limit = q.limit.unwrap_or(2000) as usize;
-                    let mut all_tasks = Vec::new();
-                    for s in list {
-                        if all_tasks.len() >= limit {
-                            break;
-                        }
-                        if let Ok(tasks) = state.store.list_tasks(&s.id, None) {
-                            all_tasks
-                                .extend(tasks.into_iter().map(|t| task_to_json(&t, Some(&s.id))));
-                        }
+        None => match state.store.list_sessions(Default::default()).await {
+            Ok(list) => {
+                let limit = q.limit.unwrap_or(2000) as usize;
+                let mut all_tasks = Vec::new();
+                for s in list {
+                    if all_tasks.len() >= limit {
+                        break;
                     }
-                    all_tasks.truncate(limit);
-                    Json(json!(all_tasks)).into_response()
+                    if let Ok(tasks) = state.store.list_tasks(&s.id, None).await {
+                        all_tasks.extend(tasks.into_iter().map(|t| task_to_json(&t, Some(&s.id))));
+                    }
                 }
-                Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+                all_tasks.truncate(limit);
+                Json(json!(all_tasks)).into_response()
             }
-        }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response(),
+        },
     }
 }
 
 pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
     let tid = TaskId::new(id);
-    match state.store.info(&tid) {
+    match state.store.info(&tid).await {
         Ok(task) => Json(task_to_full_json(&task)).into_response(),
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
-pub async fn delete_one(Path(_id): Path<String>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented"})),
-    )
+pub async fn delete_one(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let tid = TaskId::new(id);
+    match state.store.delete_task(&tid).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(proxy_store::StoreError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "task not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
-pub async fn delete_batch(Json(_body): Json<serde_json::Value>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented"})),
-    )
+pub async fn delete_batch(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(ids) = body.get("ids").and_then(|v| v.as_array()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "ids must be an array"})),
+        )
+            .into_response();
+    };
+    if ids.len() > 10_000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "too many task ids"})),
+        )
+            .into_response();
+    }
+    let mut task_ids = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(id) = id.as_str() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "every task id must be a string"})),
+            )
+                .into_response();
+        };
+        task_ids.push(TaskId::new(id.to_string()));
+    }
+    match state.store.delete_tasks(&task_ids).await {
+        Ok(deleted) => Json(json!({"ok": true, "deleted": deleted})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn summary(
@@ -189,8 +238,15 @@ pub async fn summary(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let tid = TaskId::new(id);
-    match state.store.summary(&tid) {
+    match state.store.summary(&tid).await {
         Ok(s) => Json(json!(s)).into_response(),
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(proxy_store::StoreError::NotFound(e)) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }

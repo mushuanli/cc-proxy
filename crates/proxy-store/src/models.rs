@@ -37,12 +37,21 @@ pub struct Session {
     pub archive_dirty: bool,
 
     // Session authority state (survives task cleanup)
+    pub status: String,
     pub ended_at: Option<i64>,
     pub latest_provider: Option<String>,
     pub latest_model: Option<String>,
     pub latest_upstream: Option<String>,
     pub priced_task_count: u64,
+    pub unpriced_task_count: u64,
     pub total_duration_ms: i64,
+    pub total_ttft_ms: i64,
+    pub ttft_task_count: u64,
+    pub last_task_id: Option<TaskId>,
+    pub last_task_status: Option<String>,
+    pub last_stop_reason: Option<String>,
+    pub last_error_type: Option<String>,
+    pub last_error_message: Option<String>,
 
     pub metadata: serde_json::Value,
 }
@@ -194,6 +203,7 @@ pub struct SessionListItem {
     pub total_cache_read_tokens: u64,
     pub total_cost_microusd: i64,
     pub archive_dirty: bool,
+    pub last_archived_sequence: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

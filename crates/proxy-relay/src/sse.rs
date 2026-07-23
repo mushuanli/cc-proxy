@@ -4,7 +4,10 @@ use serde_json::Value;
 /// Parses a Server-Sent Events byte stream into structured `SseEvent`s.
 pub struct SseParser {
     buffer: Vec<u8>,
+    truncated: bool,
 }
+
+const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 impl Default for SseParser {
     fn default() -> Self {
@@ -14,13 +17,21 @@ impl Default for SseParser {
 
 impl SseParser {
     pub fn new() -> Self {
-        Self { buffer: Vec::new() }
+        Self {
+            buffer: Vec::new(),
+            truncated: false,
+        }
     }
 
     /// Feed a chunk of bytes; returns completed SSE events.
     /// SSE format: lines ending in \n\n delimit events.
     /// Fields: `event: <type>\n`, `data: <json>\n`
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        if self.buffer.len().saturating_add(chunk.len()) > MAX_SSE_EVENT_BYTES {
+            self.buffer.clear();
+            self.truncated = true;
+            return Vec::new();
+        }
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
 
@@ -39,6 +50,10 @@ impl SseParser {
         }
 
         events
+    }
+
+    pub fn was_truncated(&self) -> bool {
+        self.truncated
     }
 
     fn parse_event_block(raw: &[u8]) -> Option<SseEvent> {

@@ -110,18 +110,75 @@ pub fn detect_protocol(path: &str, body: &serde_json::Value) -> ApiProtocol {
 
 /// Extract session_id from Anthropic API request body metadata.
 pub fn extract_session_id(body_json: &serde_json::Value) -> Option<String> {
+    parse_user_id_metadata(body_json).and_then(|inner| {
+        inner
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    })
+}
+
+/// Session metadata extracted from the request (headers + Anthropic metadata).
+#[derive(Clone, Debug)]
+pub struct SessionMetadata {
+    pub cwd: Option<String>,
+    pub project_key: Option<String>,
+}
+
+/// Extract session metadata (cwd, project_key) from request headers and body.
+pub fn extract_session_metadata(
+    headers: &HeaderMap,
+    body_json: &serde_json::Value,
+) -> SessionMetadata {
+    // Check custom headers first
+    let cwd = headers
+        .get("x-cwd")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let project_key = headers
+        .get("x-project-key")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    // Fall back to Anthropic metadata.user_id JSON
+    if let Some(inner) = parse_user_id_metadata(body_json) {
+        if cwd.is_none() {
+            if let Some(c) = inner.get("cwd").and_then(|v| v.as_str()) {
+                return SessionMetadata {
+                    cwd: Some(c.to_string()),
+                    project_key: project_key.or_else(|| {
+                        inner
+                            .get("project_key")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    }),
+                };
+            }
+        }
+        if project_key.is_none() {
+            if let Some(pk) = inner.get("project_key").and_then(|v| v.as_str()) {
+                return SessionMetadata {
+                    cwd,
+                    project_key: Some(pk.to_string()),
+                };
+            }
+        }
+    }
+
+    SessionMetadata { cwd, project_key }
+}
+
+/// Parse the metadata.user_id JSON string from an Anthropic request body.
+fn parse_user_id_metadata(body_json: &serde_json::Value) -> Option<serde_json::Value> {
     body_json
         .get("metadata")
         .and_then(|m| m.get("user_id"))
         .and_then(|v| v.as_str())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|inner| {
-            inner
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-        })
 }
 
 pub fn extract_request_session_id(
@@ -181,6 +238,32 @@ pub struct UpstreamResponse {
     pub duration_ms: u64,
     pub ttft_ms: Option<u64>,
     pub error: Option<String>,
+    pub capture_truncated: bool,
+}
+
+const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CAPTURE_EVENTS: usize = 4096;
+const MAX_CAPTURE_TEXT_BYTES: usize = 1024 * 1024;
+
+fn append_limited(target: &mut Vec<u8>, data: &[u8], limit: usize) -> bool {
+    let remaining = limit.saturating_sub(target.len());
+    let take = remaining.min(data.len());
+    target.extend_from_slice(&data[..take]);
+    take < data.len()
+}
+
+fn push_text_limited(target: &mut String, text: &str, limit: usize) -> bool {
+    let remaining = limit.saturating_sub(target.len());
+    if text.len() <= remaining {
+        target.push_str(text);
+        return false;
+    }
+    let mut end = remaining;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    target.push_str(&text[..end]);
+    true
 }
 
 // ── Dispatch ──
@@ -283,6 +366,7 @@ pub async fn handle_streaming_response(
             } else {
                 Some(error_msg)
             },
+            capture_truncated: false,
         };
     }
 
@@ -402,6 +486,7 @@ pub async fn handle_streaming_response(
         duration_ms: start.elapsed().as_millis() as u64,
         ttft_ms,
         error,
+        capture_truncated: false,
     }
 }
 
@@ -448,6 +533,8 @@ pub fn stream_upstream_response(
         let mut ttft_ms: Option<u64> = None;
         let mut error: Option<String> = None;
         let mut raw_body = Vec::new();
+        let mut capture_truncated = false;
+        let mut captured_event_bytes = 0usize;
         let mut normalized = NormalizedResponse::default();
         let mut parser = SseParser::new();
         let mut byte_stream = response.bytes_stream();
@@ -455,7 +542,7 @@ pub fn stream_upstream_response(
         loop {
             match byte_stream.next().await {
                 Some(Ok(chunk)) => {
-                    raw_body.extend_from_slice(&chunk);
+                    capture_truncated |= append_limited(&mut raw_body, &chunk, MAX_CAPTURE_BYTES);
                     if ttft_ms.is_none() {
                         ttft_ms = Some(start.elapsed().as_millis() as u64);
                     }
@@ -466,26 +553,50 @@ pub fn stream_upstream_response(
                     }
                     let events = parser.feed(&chunk);
                     for ev in &events {
-                        sse_events.push(ev.clone());
+                        let event_bytes = ev
+                            .event_type
+                            .as_ref()
+                            .map_or(0, String::len)
+                            .saturating_add(ev.data.as_ref().map_or(0, String::len));
+                        if sse_events.len() < MAX_CAPTURE_EVENTS
+                            && captured_event_bytes.saturating_add(event_bytes) <= MAX_CAPTURE_BYTES
+                        {
+                            captured_event_bytes += event_bytes;
+                            sse_events.push(ev.clone());
+                        } else {
+                            capture_truncated = true;
+                        }
                         if let Some(data_str) = &ev.data {
                             if let Some(parsed) = parser.parse_message_data(data_str) {
                                 if protocol == ApiProtocol::Codex {
                                     parse_codex_stream_event(
-                                        &parsed, &mut normalized, &mut input_tokens,
-                                        &mut output_tokens, &mut cache_read_tokens,
-                                        &mut message_id, &mut model,
+                                        &parsed,
+                                        &mut normalized,
+                                        &mut input_tokens,
+                                        &mut output_tokens,
+                                        &mut cache_read_tokens,
+                                        &mut message_id,
+                                        &mut model,
                                     );
                                 }
                                 match parser.event_kind(&parsed) {
                                     Some("message_start") => {
                                         model = parser.model_from_start(&parsed).map(String::from);
                                         message_id = parser.message_id(&parsed).map(String::from);
-                                        input_tokens = parser.input_tokens_from_start(&parsed).unwrap_or(input_tokens);
-                                        cache_creation_tokens = parser.cache_creation_tokens_from_start(&parsed).unwrap_or(cache_creation_tokens);
-                                        cache_read_tokens = parser.cache_read_tokens_from_start(&parsed).unwrap_or(cache_read_tokens);
+                                        input_tokens = parser
+                                            .input_tokens_from_start(&parsed)
+                                            .unwrap_or(input_tokens);
+                                        cache_creation_tokens = parser
+                                            .cache_creation_tokens_from_start(&parsed)
+                                            .unwrap_or(cache_creation_tokens);
+                                        cache_read_tokens = parser
+                                            .cache_read_tokens_from_start(&parsed)
+                                            .unwrap_or(cache_read_tokens);
                                     }
                                     Some("message_delta") => {
-                                        if let Some(value) = parser.output_tokens_from_delta(&parsed) {
+                                        if let Some(value) =
+                                            parser.output_tokens_from_delta(&parsed)
+                                        {
                                             output_tokens = value;
                                         }
                                         if let Some(reason) = parser.stop_reason(&parsed) {
@@ -494,13 +605,37 @@ pub fn stream_upstream_response(
                                     }
                                     Some("content_block_delta") => {
                                         if let Some(text) = parser.delta_text(&parsed) {
-                                            content_text.push_str(text);
-                                            normalized.text.push(text.to_string());
+                                            capture_truncated |= push_text_limited(
+                                                &mut content_text,
+                                                text,
+                                                MAX_CAPTURE_TEXT_BYTES,
+                                            );
+                                            let normalized_len = normalized
+                                                .text
+                                                .iter()
+                                                .map(String::len)
+                                                .sum::<usize>();
+                                            if normalized_len < MAX_CAPTURE_TEXT_BYTES {
+                                                let mut fragment = String::new();
+                                                capture_truncated |= push_text_limited(
+                                                    &mut fragment,
+                                                    text,
+                                                    MAX_CAPTURE_TEXT_BYTES - normalized_len,
+                                                );
+                                                if !fragment.is_empty() {
+                                                    normalized.text.push(fragment);
+                                                }
+                                            } else {
+                                                capture_truncated = true;
+                                            }
                                         }
                                     }
                                     Some("error") => {
                                         if let Some(err) = parsed.get("error") {
-                                            error = err.get("message").and_then(|v| v.as_str()).map(String::from);
+                                            error = err
+                                                .get("message")
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from);
                                         }
                                     }
                                     _ => {}
@@ -540,6 +675,7 @@ pub fn stream_upstream_response(
             duration_ms: start.elapsed().as_millis() as u64,
             ttft_ms,
             error,
+            capture_truncated: capture_truncated || parser.was_truncated(),
         };
         let _ = meta_tx.send(meta);
     });
@@ -581,6 +717,7 @@ pub async fn handle_non_streaming_response(
                 duration_ms: start.elapsed().as_millis() as u64,
                 ttft_ms: None,
                 error: Some(format!("Failed to read response body: {}", e)),
+                capture_truncated: false,
             }
         }
     };
@@ -611,6 +748,7 @@ pub async fn handle_non_streaming_response(
                 } else {
                     None
                 },
+                capture_truncated: false,
             };
         }
     };
@@ -702,6 +840,7 @@ pub async fn handle_non_streaming_response(
         duration_ms: start.elapsed().as_millis() as u64,
         ttft_ms: None,
         error,
+        capture_truncated: false,
     }
 }
 
@@ -818,7 +957,19 @@ fn parse_codex_stream_event(
 
 fn push_string(value: Option<&serde_json::Value>, target: &mut Vec<String>) {
     if let Some(value) = value.and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
-        target.push(value.to_string());
+        let used = target.iter().map(String::len).sum::<usize>();
+        if used >= MAX_CAPTURE_TEXT_BYTES {
+            return;
+        }
+        let mut fragment = String::new();
+        push_text_limited(
+            &mut fragment,
+            value,
+            MAX_CAPTURE_TEXT_BYTES.saturating_sub(used),
+        );
+        if !fragment.is_empty() {
+            target.push(fragment);
+        }
     }
 }
 
@@ -852,6 +1003,7 @@ pub fn append_effort_beta_header(headers: &mut Vec<(&str, String)>, effort: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     #[test]
     fn detects_codex_responses_payload() {
@@ -926,5 +1078,33 @@ mod tests {
         assert_eq!(normalized.text, ["hi"]);
         assert_eq!((input, output, cached), (9, 4, 3));
         assert_eq!(id.as_deref(), Some("resp_1"));
+    }
+
+    #[tokio::test]
+    async fn streaming_body_exposes_first_chunk_before_upstream_finishes() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::convert::Infallible>>(2);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(Bytes::from_static(b"first\n\n"))).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let _ = tx.send(Ok(Bytes::from_static(b"second\n\n"))).await;
+        });
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body(reqwest::Body::wrap_stream(
+                    tokio_stream::wrappers::ReceiverStream::new(rx),
+                ))
+                .unwrap(),
+        );
+        let started = Instant::now();
+        let streaming = stream_upstream_response(response, started, ApiProtocol::Anthropic);
+        let mut body = streaming.body.into_data_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_millis(200), body.next())
+            .await
+            .expect("first chunk should not wait for complete upstream")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, Bytes::from_static(b"first\n\n"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
     }
 }

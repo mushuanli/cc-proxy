@@ -12,6 +12,9 @@ struct Args {
     /// Dashboard URL
     #[arg(long, default_value = "http://localhost:5000")]
     dashboard_url: String,
+    /// Dashboard bearer token (or set CC_PROXY_AUTH_TOKEN).
+    #[arg(long, env = "CC_PROXY_AUTH_TOKEN")]
+    auth_token: Option<String>,
 }
 
 #[tokio::main]
@@ -52,9 +55,13 @@ async fn main() -> Result<()> {
 
     // 4. POST to dashboard
     let client = reqwest::Client::new();
-    let resp = client
+    let mut request = client
         .post(format!("{}/api/hook-event", args.dashboard_url))
-        .json(&payload)
+        .json(&payload);
+    if let Some(token) = args.auth_token.filter(|token| !token.is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    let resp = request
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;

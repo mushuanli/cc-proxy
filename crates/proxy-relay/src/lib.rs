@@ -16,7 +16,7 @@ pub mod relay;
 pub mod sse;
 pub mod upstream;
 
-pub use capture::CaptureControl;
+pub use capture::{CaptureControl, ExchangeInfo};
 pub use hook::HookReceiver;
 pub use mcp::McpRelay;
 pub use relay::RelayHandler;

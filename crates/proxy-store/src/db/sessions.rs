@@ -104,10 +104,17 @@ pub fn update_aggregates(
     upstream: Option<&str>,
     priced: bool,
     duration_ms: i64,
+    ttft_ms: Option<i64>,
     ended_at: Option<i64>,
+    task_id: &TaskId,
+    stop_reason: Option<&str>,
+    error_type: Option<&str>,
+    error_message: Option<&str>,
 ) -> StoreResult<()> {
     conn.execute(
         "UPDATE sessions SET
+            created_at = MIN(created_at, ?2),
+            first_activity_at = MIN(first_activity_at, ?2),
             last_activity_at = MAX(last_activity_at, ?2),
             task_count = task_count + 1,
             completed_task_count = completed_task_count +
@@ -120,11 +127,23 @@ pub fn update_aggregates(
             total_cache_read_tokens = total_cache_read_tokens + ?7,
             total_cost_microusd = total_cost_microusd + ?8,
             priced_task_count = priced_task_count + CASE WHEN ?9 THEN 1 ELSE 0 END,
+            unpriced_task_count = unpriced_task_count + CASE WHEN ?9 THEN 0 ELSE 1 END,
             total_duration_ms = total_duration_ms + ?10,
+            total_ttft_ms = total_ttft_ms + COALESCE(?15, 0),
+            ttft_task_count = ttft_task_count + CASE WHEN ?15 IS NULL THEN 0 ELSE 1 END,
             latest_provider = ?11,
             latest_model = ?12,
             latest_upstream = COALESCE(?13, latest_upstream),
-            ended_at = COALESCE(?14, ended_at),
+            ended_at = CASE
+                WHEN ?14 IS NULL THEN ended_at
+                WHEN ended_at IS NULL THEN ?14
+                ELSE MAX(ended_at, ?14)
+            END,
+            last_task_id = ?16,
+            last_task_status = ?3,
+            last_stop_reason = ?17,
+            last_error_type = ?18,
+            last_error_message = ?19,
             archive_dirty = 1
          WHERE id = ?1",
         params![
@@ -142,6 +161,11 @@ pub fn update_aggregates(
             resolved_model,
             upstream,
             ended_at,
+            ttft_ms,
+            task_id.as_str(),
+            stop_reason,
+            error_type,
+            error_message,
         ],
     )?;
     Ok(())
@@ -160,6 +184,7 @@ pub fn update_archive_checkpoint(
             last_archived_at = ?2,
             last_archived_task_id = ?3,
             last_archived_sequence = ?4,
+            status = 'archived',
             archive_dirty = 0
          WHERE id = ?1 AND last_archived_sequence <= ?4",
         params![
@@ -181,17 +206,44 @@ pub fn set_archive_dirty(conn: &Connection, session_id: &SessionId) -> StoreResu
     Ok(())
 }
 
+pub fn delete_session(conn: &Connection, session_id: &SessionId) -> StoreResult<bool> {
+    Ok(conn.execute(
+        "DELETE FROM sessions WHERE id = ?1",
+        params![session_id.as_str()],
+    )? > 0)
+}
+
+/// Monotonic Recording → Stopped transition. Archived sessions never regress.
+pub fn stop_session(conn: &Connection, session_id: &SessionId, ended_at: i64) -> StoreResult<bool> {
+    Ok(conn.execute(
+        "UPDATE sessions
+         SET status = CASE WHEN status = 'recording' THEN 'stopped' ELSE status END,
+             ended_at = CASE
+                 WHEN ended_at IS NULL THEN ?2
+                 ELSE MAX(ended_at, ?2)
+             END,
+             last_activity_at = MAX(last_activity_at, ?2),
+             archive_dirty = 1
+         WHERE id = ?1",
+        params![session_id.as_str(), ended_at],
+    )? > 0)
+}
+
 /// Get a session by id.
 pub fn get_session(conn: &Connection, id: &SessionId) -> StoreResult<Option<Session>> {
     let mut stmt = conn.prepare(
         "SELECT id, client_type, client_session_id, name, cwd, project_key,
-         created_at, first_activity_at, last_activity_at,
+         created_at, first_activity_at, last_activity_at, status,
          task_count, completed_task_count, failed_task_count,
          total_input_tokens, total_output_tokens,
          total_cache_creation_tokens, total_cache_read_tokens,
          total_cost_microusd, currency,
          next_task_sequence, last_archived_at, last_archived_task_id,
-         last_archived_sequence, archive_dirty, metadata_json
+         last_archived_sequence, archive_dirty,
+         ended_at, latest_provider, latest_model, latest_upstream,
+         priced_task_count, unpriced_task_count, total_duration_ms,
+         total_ttft_ms, ttft_task_count, last_task_id, last_task_status,
+         last_stop_reason, last_error_type, last_error_message, metadata_json
          FROM sessions WHERE id = ?1",
     )?;
 
@@ -212,7 +264,7 @@ pub fn list_sessions(
          created_at, last_activity_at, task_count,
          total_input_tokens, total_output_tokens,
          total_cache_creation_tokens, total_cache_read_tokens,
-         total_cost_microusd, archive_dirty
+         total_cost_microusd, archive_dirty, last_archived_sequence
          FROM sessions WHERE 1=1",
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -308,12 +360,25 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
             .map(TaskId::new),
         last_archived_sequence: row.get::<_, i64>("last_archived_sequence")? as u64,
         archive_dirty: archive_dirty != 0,
+        status: row
+            .get::<_, String>("status")
+            .unwrap_or_else(|_| "recording".into()),
         ended_at: row.get("ended_at")?,
         latest_provider: row.get("latest_provider")?,
         latest_model: row.get("latest_model")?,
         latest_upstream: row.get("latest_upstream")?,
         priced_task_count: row.get::<_, i64>("priced_task_count")? as u64,
+        unpriced_task_count: row.get::<_, i64>("unpriced_task_count")? as u64,
         total_duration_ms: row.get("total_duration_ms")?,
+        total_ttft_ms: row.get("total_ttft_ms")?,
+        ttft_task_count: row.get::<_, i64>("ttft_task_count")? as u64,
+        last_task_id: row
+            .get::<_, Option<String>>("last_task_id")?
+            .map(TaskId::new),
+        last_task_status: row.get("last_task_status")?,
+        last_stop_reason: row.get("last_stop_reason")?,
+        last_error_type: row.get("last_error_type")?,
+        last_error_message: row.get("last_error_message")?,
         metadata: row
             .get::<_, String>("metadata_json")
             .ok()
@@ -340,5 +405,6 @@ fn row_to_session_list_item(row: &rusqlite::Row) -> rusqlite::Result<SessionList
         total_cache_read_tokens: row.get::<_, i64>("total_cache_read_tokens")? as u64,
         total_cost_microusd: row.get("total_cost_microusd")?,
         archive_dirty: archive_dirty != 0,
+        last_archived_sequence: row.get::<_, i64>("last_archived_sequence")? as u64,
     })
 }

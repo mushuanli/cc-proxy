@@ -24,20 +24,24 @@ export function bindSummarySidebarActions(sid) {
 
     [renameBtn, exportBtn, deleteBtn].forEach(b => b.classList.remove('hidden'));
 
-    renameBtn.onclick = () => {
+    renameBtn.onclick = async () => {
         const current = state.sessionCache[sid] || shortSid(sid);
         const label = prompt('New name:', current);
         if (!label || label.trim() === current) return;
-        fetch(`/api/session/${encodeURIComponent(sid)}`, {
+        const resp = await fetch(`/api/session/${encodeURIComponent(sid)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ label: label.trim() }),
-        }).then(() => {
+        });
+        if (resp.ok) {
             state.sessionCache[sid] = label.trim();
             document.getElementById('summary-title').textContent = t('summary.summary_of', { label: label.trim().slice(-20) });
             updateFilterOptions();
             renderPage();
-        });
+        } else {
+            const error = await resp.json().catch(() => ({}));
+            alert(error.error || 'Rename failed');
+        }
     };
 
     exportJsonBtn.onclick = () => {
@@ -49,10 +53,11 @@ export function bindSummarySidebarActions(sid) {
         document.getElementById('summary-export-menu').classList.add('hidden');
     };
 
-    deleteBtn.onclick = () => {
+    deleteBtn.onclick = async () => {
         const label = state.sessionCache[sid] || shortSid(sid);
         if (!confirm(t('summary.confirm_delete_session', { label }))) return;
-        fetch(`/api/session/${encodeURIComponent(sid)}`, { method: 'DELETE' }).then(() => {
+        const resp = await fetch(`/api/session/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+        if (resp.ok) {
             delete state.sessionMeta[sid];
             delete state.sessionCache[sid];
             if (state.currentSelectedSession === sid) {
@@ -62,7 +67,10 @@ export function bindSummarySidebarActions(sid) {
                 [renameBtn, exportBtn, deleteBtn].forEach(b => b.classList.add('hidden'));
             }
             renderPage(); updateFilterOptions(); updateRequestCount();
-        });
+        } else {
+            const error = await resp.json().catch(() => ({}));
+            alert(error.error || 'Delete failed');
+        }
     };
 }
 

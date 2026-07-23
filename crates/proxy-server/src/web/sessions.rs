@@ -36,7 +36,7 @@ fn session_to_json(s: &proxy_store::SessionListItem) -> serde_json::Value {
 }
 
 pub async fn list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let result = state.store.list_sessions(SessionFilter::default());
+    let result = state.store.list_sessions(SessionFilter::default()).await;
     match result {
         Ok(sessions) => {
             let count = sessions.len();
@@ -44,7 +44,11 @@ pub async fn list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             tracing::info!("[api] list sessions: {} sessions", count);
             Json(json!(items)).into_response()
         }
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -53,8 +57,8 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
         Ok(v) => v,
         Err(e) => return e,
     };
-    let session = state.store.get_session(&sid);
-    let tasks = state.store.list_tasks(&sid, None);
+    let session = state.store.get_session(&sid).await;
+    let tasks = state.store.list_tasks(&sid, None).await;
 
     match (session, tasks) {
         (Ok(Some(s)), Ok(task_list)) => {
@@ -67,6 +71,7 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
                     "id": s.id,
                     "label": s.name,
                     "name": s.name,
+                    "status": s.status,
                     "client_type": s.client_type,
                     "client_session_id": s.client_session_id,
                     "cwd": s.cwd,
@@ -96,8 +101,14 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
             }))
             .into_response()
         }
-        (Ok(None), _) => Json(json!({"error": "not found"})).into_response(),
-        (Err(e), _) | (_, Err(e)) => Json(json!({"error": e.to_string()})).into_response(),
+        (Ok(None), _) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
+        }
+        (Err(e), _) | (_, Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -111,17 +122,40 @@ pub async fn rename(
         Err(e) => return e,
     };
     let name = body.get("label").and_then(|v| v.as_str());
-    match state.store.name(&sid, name) {
+    match state.store.name(&sid, name).await {
         Ok(_) => Json(json!({"ok": true})).into_response(),
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(proxy_store::StoreError::NotFound(e)) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn delete(Path(_id): Path<String>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented"})),
-    )
+pub async fn delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let sid = match parse_session_id(id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match state.store.delete_session(&sid).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(proxy_store::StoreError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "session not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn summary(
@@ -132,81 +166,94 @@ pub async fn summary(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let tasks = state.store.list_tasks(&sid, None);
 
-    match tasks {
-        Ok(list) if !list.is_empty() => {
-            // Return the summary of the latest task as a session-level view
-            let latest_id = list[0].id.clone();
-            match state.store.summary(&latest_id) {
-                Ok(s) => Json(json!(s)).into_response(),
-                Err(_) => {
-                    // Tasks exist but can't be summarized — return basic stats
-                    let total_in: u64 = list.iter().map(|t| t.input_tokens).sum();
-                    let total_out: u64 = list.iter().map(|t| t.output_tokens).sum();
-                    let models: Vec<&str> =
-                        list.iter().map(|t| t.resolved_model.as_str()).collect();
-                    Json(json!({
-                        "model": models.first().unwrap_or(&""),
-                        "started_at": list[0].started_at,
-                        "input_tokens": total_in,
-                        "output_tokens": total_out,
-                        "cache_read_tokens": 0,
-                        "status_code": null,
-                        "stop_reason": null,
-                        "user_prompts": [],
-                        "assistant_actions": [],
-                        "touched_files": [],
-                        "final_response": "",
-                        "stats": {
-                            "total_messages": 0,
-                            "user_prompt_count": 0,
-                            "tool_result_count": 0,
-                            "tool_call_count": 0,
-                            "tool_call_by_name": {},
-                            "thinking_block_count": 0,
-                        },
-                    }))
-                    .into_response()
-                }
-            }
+    // Get session aggregates (survives task cleanup)
+    let session = state.store.get_session(&sid).await;
+    let session = match session {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"ok": false, "error": "session not found"})),
+            )
+                .into_response()
         }
-        _ => {
-            // No tasks or error — return session metadata as a fallback
-            let sessions = state.store.list_sessions(SessionFilter {
-                id_or_name: Some(sid.as_str().to_string()),
-                ..Default::default()
-            });
-            match sessions {
-                Ok(sessions) if !sessions.is_empty() => {
-                    let s = &sessions[0];
-                    Json(json!({
-                        "model": "",
-                        "started_at": s.created_at,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cache_read_tokens": 0,
-                        "status_code": null,
-                        "stop_reason": null,
-                        "user_prompts": [],
-                        "assistant_actions": [],
-                        "touched_files": [],
-                        "final_response": "",
-                        "stats": {
-                            "total_messages": 0,
-                            "user_prompt_count": 0,
-                            "tool_result_count": 0,
-                            "tool_call_count": 0,
-                            "tool_call_by_name": {},
-                            "thinking_block_count": 0,
-                        },
-                    }))
-                    .into_response()
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    // Try to get the latest task's detailed summary
+    let tasks = state.store.list_tasks(&sid, None).await;
+    if let Ok(ref list) = tasks {
+        if !list.is_empty() {
+            let latest_id = list[0].id.clone();
+            if let Ok(s) = state.store.summary(&latest_id).await {
+                let mut value = serde_json::to_value(&s).unwrap_or_default();
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("task_input_tokens".into(), json!(s.input_tokens));
+                    obj.insert("task_output_tokens".into(), json!(s.output_tokens));
+                    obj.insert("input_tokens".into(), json!(session.total_input_tokens));
+                    obj.insert("output_tokens".into(), json!(session.total_output_tokens));
+                    obj.insert(
+                        "cache_creation_tokens".into(),
+                        json!(session.total_cache_creation_tokens),
+                    );
+                    obj.insert(
+                        "cache_read_tokens".into(),
+                        json!(session.total_cache_read_tokens),
+                    );
+                    obj.insert("task_count".into(), json!(session.task_count));
+                    obj.insert(
+                        "completed_task_count".into(),
+                        json!(session.completed_task_count),
+                    );
+                    obj.insert("failed_task_count".into(), json!(session.failed_task_count));
+                    obj.insert(
+                        "total_cost_microusd".into(),
+                        json!(session.total_cost_microusd),
+                    );
+                    obj.insert("total_duration_ms".into(), json!(session.total_duration_ms));
                 }
-                _ => Json(json!({"ok": false, "error": "session not found"})).into_response(),
+                return Json(value).into_response();
             }
         }
     }
+
+    // Fallback: return session-level aggregates
+    Json(json!({
+        "session_id": session.id.as_str(),
+        "model": session.latest_model.as_deref().unwrap_or(""),
+        "started_at": session.created_at,
+        "input_tokens": session.total_input_tokens,
+        "output_tokens": session.total_output_tokens,
+        "cache_creation_tokens": session.total_cache_creation_tokens,
+        "cache_read_tokens": session.total_cache_read_tokens,
+        "status_code": null,
+        "stop_reason": null,
+        "user_prompts": [],
+        "assistant_actions": [],
+        "touched_files": [],
+        "final_response": "",
+        "stats": {
+            "total_messages": 0,
+            "user_prompt_count": 0,
+            "tool_result_count": 0,
+            "tool_call_count": 0,
+            "tool_call_by_name": {},
+            "thinking_block_count": 0,
+        },
+        "task_count": session.task_count,
+        "completed_task_count": session.completed_task_count,
+        "failed_task_count": session.failed_task_count,
+        "total_cost_microusd": session.total_cost_microusd,
+        "total_duration_ms": session.total_duration_ms,
+    }))
+    .into_response()
 }
 
 pub async fn export_(
@@ -218,18 +265,33 @@ pub async fn export_(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let tasks = state.store.list_tasks(&sid, None);
+    let tasks = state.store.list_tasks(&sid, None).await;
     let format = q.get("format").map(|s| s.as_str()).unwrap_or("json");
 
     match tasks {
-        Ok(list) => {
-            if format == "json" {
-                Json(json!(list)).into_response()
-            } else {
-                Json(json!({"error": format!("unsupported format: {}", format)})).into_response()
-            }
-        }
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Ok(list) => match format {
+            "json" => Json(json!(list)).into_response(),
+            "yaml" | "yml" => match serde_yaml::to_string(&list) {
+                Ok(y) => {
+                    (StatusCode::OK, [("content-type", "application/x-yaml")], y).into_response()
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response(),
+            },
+            _ => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("unsupported format: {}", format)})),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 

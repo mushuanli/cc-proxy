@@ -63,8 +63,11 @@ export function renderArchiveSearch(results, q) {
                 const re = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
                 hi = hi.replace(re, m => `<mark>${m}</mark>`);
             });
-            const roleClass = ALLOWED_ROLES.has(s.role) ? `snippet-role--${s.role}` : '';
-            const roleLabel = s.role ? (t(`archive.role_${s.role}`) || escHtml(s.role)) : '';
+            const roleAllowed = ALLOWED_ROLES.has(s.role);
+            const roleClass = roleAllowed ? `snippet-role--${s.role}` : '';
+            const roleLabel = s.role
+                ? (roleAllowed ? escHtml(t(`archive.role_${s.role}`)) : escHtml(s.role))
+                : '';
             const roleTag = s.role
                 ? `<span class="snippet-role ${roleClass}">${roleLabel}</span>`
                 : '';

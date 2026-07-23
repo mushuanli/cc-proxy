@@ -255,6 +255,19 @@ pub fn cleanup_old_tasks(
     Ok(deleted)
 }
 
+/// Delete task detail only. Session and daily aggregates remain historical authority.
+pub fn delete_task(conn: &Connection, id: &TaskId) -> StoreResult<bool> {
+    Ok(conn.execute("DELETE FROM tasks WHERE id = ?1", params![id.as_str()])? > 0)
+}
+
+pub fn delete_tasks(conn: &Connection, ids: &[TaskId]) -> StoreResult<usize> {
+    let mut deleted = 0;
+    for id in ids {
+        deleted += conn.execute("DELETE FROM tasks WHERE id = ?1", params![id.as_str()])?;
+    }
+    Ok(deleted)
+}
+
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let response_body_str: Option<String> = row.get("response_body")?;
     let response_body =

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 /// Wrapper type for session identifiers.
 /// Must match `[A-Za-z0-9_-]{1,128}` to prevent path traversal and injection.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct SessionId(pub String);
 
 impl SessionId {
@@ -32,6 +32,16 @@ impl SessionId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -60,6 +70,31 @@ impl TaskId {
 impl std::fmt::Display for TaskId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod session_id_tests {
+    use super::SessionId;
+
+    #[test]
+    fn rejects_path_and_attribute_injection_characters() {
+        for value in [
+            "../outside",
+            "bad/name",
+            "bad\\name",
+            "x\" onmouseover=\"alert(1)",
+            "会话",
+            "",
+        ] {
+            assert!(SessionId::new(value.to_string()).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn serde_cannot_bypass_validation() {
+        assert!(serde_json::from_str::<SessionId>("\"../outside\"").is_err());
+        assert!(serde_json::from_str::<SessionId>("\"safe_ID-123\"").is_ok());
     }
 }
 

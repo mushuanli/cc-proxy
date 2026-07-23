@@ -21,10 +21,12 @@ impl HookReceiver {
         // Extract hook event name from payload
         let hook_event_name = payload
             .get("hook_event_name")
+            .or_else(|| payload.get("hookEventName"))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
         let session_id = payload
             .get("session_id")
+            .or_else(|| payload.get("sessionId"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
 

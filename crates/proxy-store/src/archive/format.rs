@@ -25,6 +25,16 @@ pub struct ArchiveSession {
     pub project_key: Option<String>,
     pub created_at: i64,
     pub last_activity_at: i64,
+    pub status: String,
+    pub ended_at: Option<i64>,
+    pub latest_provider: Option<String>,
+    pub latest_model: Option<String>,
+    pub latest_upstream: Option<String>,
+    pub last_task_id: Option<TaskId>,
+    pub last_task_status: Option<String>,
+    pub last_stop_reason: Option<String>,
+    pub last_error_type: Option<String>,
+    pub last_error_message: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,6 +50,11 @@ pub struct ArchiveStatistics {
 
     pub cost_microusd: i64,
     pub currency: String,
+    pub priced_task_count: u64,
+    pub unpriced_task_count: u64,
+    pub total_duration_ms: i64,
+    pub total_ttft_ms: i64,
+    pub ttft_task_count: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +136,11 @@ pub fn build_archive(
         cache_read_tokens: session.total_cache_read_tokens,
         cost_microusd: session.total_cost_microusd,
         currency: session.currency.clone(),
+        priced_task_count: session.priced_task_count,
+        unpriced_task_count: session.unpriced_task_count,
+        total_duration_ms: session.total_duration_ms,
+        total_ttft_ms: session.total_ttft_ms,
+        ttft_task_count: session.ttft_task_count,
     };
 
     let latest = latest_task.map(|t| ArchiveTask {
@@ -175,7 +195,7 @@ pub fn build_archive(
         .collect();
 
     ArchiveDocument {
-        version: 1,
+        version: 2,
         session: ArchiveSession {
             id: session.id.clone(),
             name: session.name.clone(),
@@ -185,6 +205,16 @@ pub fn build_archive(
             project_key: session.project_key.clone(),
             created_at: session.created_at,
             last_activity_at: session.last_activity_at,
+            status: session.status.clone(),
+            ended_at: session.ended_at,
+            latest_provider: session.latest_provider.clone(),
+            latest_model: session.latest_model.clone(),
+            latest_upstream: session.latest_upstream.clone(),
+            last_task_id: session.last_task_id.clone(),
+            last_task_status: session.last_task_status.clone(),
+            last_stop_reason: session.last_stop_reason.clone(),
+            last_error_type: session.last_error_type.clone(),
+            last_error_message: session.last_error_message.clone(),
         },
         statistics,
         latest_task: latest,

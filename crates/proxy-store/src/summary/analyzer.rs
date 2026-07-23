@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,9 +9,21 @@ use crate::models::Task;
 // ── Public data structures ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionSummary {
+pub struct TaskSummaryV1 {
+    #[serde(default = "summary_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub task_id: String,
     pub session_id: String,
+    #[serde(default)]
+    pub status: String,
     pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub priced: bool,
     pub started_at: String,
     pub status_code: Option<u16>,
     pub stop_reason: Option<String>,
@@ -18,11 +31,27 @@ pub struct SessionSummary {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    #[serde(default)]
+    pub cost_microusd: i64,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub ttft_ms: Option<i64>,
+    #[serde(default)]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub error_message: Option<String>,
     pub user_prompts: Vec<UserPrompt>,
     pub assistant_actions: Vec<AssistantAction>,
     pub touched_files: Vec<FileTouched>,
     pub final_response: String,
     pub stats: SessionStats,
+}
+
+pub type SessionSummary = TaskSummaryV1;
+
+fn summary_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,11 +94,16 @@ pub struct SessionStats {
 // ── Entry point ──
 
 /// Analyze a task and extract a human-readable summary.
-/// Returns None if request_body is missing or has no messages.
+/// Supports Anthropic `messages` and Codex `input` array formats.
 pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
     let body_str = task.request_body.as_deref()?;
     let body: Value = serde_json::from_str(body_str).ok()?;
-    let messages = body.get("messages")?.as_array()?;
+
+    // Try Anthropic messages format first, then Codex input array
+    let messages = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.get("input").and_then(|v| v.as_array()))?;
 
     let mut user_prompts: Vec<UserPrompt> = Vec::new();
     let mut assistant_actions: Vec<AssistantAction> = Vec::new();
@@ -84,6 +118,16 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
         tool_call_by_name: HashMap::new(),
         thinking_block_count: 0,
     };
+    let failed_tool_ids: HashSet<&str> = messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|block| {
+            block.get("type").and_then(Value::as_str) == Some("tool_result")
+                && block.get("is_error").and_then(Value::as_bool) == Some(true)
+        })
+        .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+        .collect();
 
     for (i, msg) in messages.iter().enumerate() {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
@@ -127,7 +171,10 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
                             stats.tool_call_count += 1;
 
                             // Collect file touches
-                            collect_file_touch(&name, &input, &mut file_order, &mut file_map);
+                            let tool_id = tool.get("id").and_then(Value::as_str);
+                            if !tool_id.is_some_and(|id| failed_tool_ids.contains(id)) {
+                                collect_file_touch(&name, &input, &mut file_order, &mut file_map);
+                            }
 
                             let description = describe_tool(&name, &input);
                             tool_summaries.push(ToolCallSummary { name, description });
@@ -162,14 +209,23 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
     let final_response = task
         .response_body
         .as_ref()
-        .and_then(|resp| resp.text.first())
+        .map(|resp| resp.text.join(""))
         .filter(|t| !t.is_empty())
-        .map(|t| truncate(t, 3000))
+        .map(|t| truncate(&t, 3000))
         .unwrap_or_else(|| extract_last_assistant_text(messages));
 
     Some(SessionSummary {
+        version: 1,
+        task_id: task.id.as_str().to_string(),
         session_id: task.session_id.to_string(),
+        status: task.status.as_str().to_string(),
         model: task.resolved_model.clone(),
+        provider: task.provider.clone(),
+        upstream: task.upstream.clone(),
+        priced: task
+            .pricing_model_id
+            .as_deref()
+            .is_some_and(|id| id != "unknown"),
         started_at: chrono::DateTime::from_timestamp(task.started_at / 1000, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default(),
@@ -179,6 +235,11 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
         output_tokens: task.output_tokens,
         cache_read_tokens: task.cache_read_tokens,
         cache_creation_tokens: task.cache_creation_tokens,
+        cost_microusd: task.cost_microusd,
+        duration_ms: task.duration_ms,
+        ttft_ms: task.ttft_ms,
+        error_type: task.error_type.clone().filter(|v| !v.is_empty()),
+        error_message: task.error_message.clone().filter(|v| !v.is_empty()),
         user_prompts,
         assistant_actions,
         touched_files,
@@ -211,9 +272,12 @@ pub fn is_real_user_prompt(msg: &Value) -> bool {
     };
 
     // Must be all text blocks
-    let all_text = content
-        .iter()
-        .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"));
+    let all_text = content.iter().all(|b| {
+        matches!(
+            b.get("type").and_then(|t| t.as_str()),
+            Some("text" | "input_text")
+        )
+    });
     if !all_text {
         return false;
     }
@@ -229,7 +293,7 @@ pub fn is_real_user_prompt(msg: &Value) -> bool {
     // Filter out system-reminder blocks, then check if any real text remains
     let text = content
         .iter()
-        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .filter_map(block_text)
         .filter(|t| !t.trim_start().starts_with("<system-reminder>"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -242,8 +306,11 @@ pub fn extract_user_text(msg: &Value) -> String {
         Some(Value::Array(blocks)) => blocks
             .iter()
             .filter_map(|b| {
-                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    b.get("text").and_then(|t| t.as_str())
+                if matches!(
+                    b.get("type").and_then(|t| t.as_str()),
+                    Some("text" | "input_text")
+                ) {
+                    block_text(b)
                 } else {
                     None
                 }
@@ -269,14 +336,22 @@ fn get_tool_uses(blocks: &[Value]) -> Vec<&Value> {
         .collect()
 }
 
+fn block_text(block: &Value) -> Option<&str> {
+    block
+        .get("text")
+        .or_else(|| block.get("input_text"))
+        .or_else(|| block.get("output_text"))
+        .and_then(|value| value.as_str())
+}
+
 fn extract_thought(blocks: &[Value], max_len: usize) -> Option<String> {
     // First try text blocks before any tool_use
     let mut texts = Vec::new();
     for block in blocks {
         let t = block.get("type").and_then(|t| t.as_str());
         match t {
-            Some("text") => {
-                if let Some(s) = block.get("text").and_then(|t| t.as_str()) {
+            Some("text" | "output_text") => {
+                if let Some(s) = block_text(block) {
                     if !s.trim().is_empty() {
                         texts.push(s);
                     }
@@ -299,8 +374,13 @@ fn extract_last_assistant_text(messages: &[Value]) -> String {
             if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
                 let text: String = blocks
                     .iter()
-                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .filter(|b| {
+                        matches!(
+                            b.get("type").and_then(|t| t.as_str()),
+                            Some("text" | "output_text")
+                        )
+                    })
+                    .filter_map(block_text)
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !text.is_empty() {
@@ -409,10 +489,7 @@ fn describe_tool(name: &str, input: &Value) -> String {
                 .unwrap_or("");
             format!("Spawn {}: {}", agent_type, truncate(desc, 60))
         }
-        "TaskCreate" => format!(
-            "Create task: {}",
-            truncate(str_field(input, "subject"), 60)
-        ),
+        "TaskCreate" => format!("Create task: {}", truncate(str_field(input, "subject"), 60)),
         "TaskUpdate" => {
             let id = str_field(input, "taskId");
             let status = input.get("status").and_then(|v| v.as_str()).unwrap_or("?");
@@ -550,6 +627,29 @@ mod tests {
     }
 
     #[test]
+    fn analyze_codex_input_and_current_response() {
+        let body = serde_json::json!({
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "Fix the tests"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "old answer"}]}
+            ]
+        });
+        let mut task = make_task(Some(&body.to_string()));
+        task.response_body = Some(proxy_common::NormalizedResponse {
+            text: vec!["current ".into(), "answer".into()],
+            ..Default::default()
+        });
+        task.provider = "openai".into();
+        task.upstream = Some("codex".into());
+        task.cost_microusd = 123;
+        let summary = analyze_task(&task).unwrap();
+        assert_eq!(summary.user_prompts[0].text, "Fix the tests");
+        assert_eq!(summary.final_response, "current answer");
+        assert_eq!(summary.provider, "openai");
+        assert_eq!(summary.cost_microusd, 123);
+    }
+
+    #[test]
     fn analyze_ignores_system_reminder() {
         let body = serde_json::json!({
             "messages": [
@@ -574,6 +674,24 @@ mod tests {
         let summary = analyze_task(&task).unwrap();
         assert_eq!(summary.user_prompts.len(), 0);
         assert_eq!(summary.stats.tool_result_count, 1);
+    }
+
+    #[test]
+    fn failed_write_is_not_reported_as_a_touched_file() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "write-1", "name": "Write", "input": {"file_path": "/tmp/nope"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "write-1", "is_error": true, "content": "permission denied"}
+                ]}
+            ]
+        });
+        let task = make_task(Some(&body.to_string()));
+        let summary = analyze_task(&task).unwrap();
+        assert!(summary.touched_files.is_empty());
+        assert_eq!(summary.stats.tool_call_count, 1);
     }
 
     #[test]

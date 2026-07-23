@@ -21,6 +21,27 @@ import {
     addHookRow, renderHookTable,
 } from './timeline.js';
 
+// Optional dashboard auth. Open `/?token=...` once; keep the token only for
+// this browser tab, remove it from the address bar, and attach it to API/WS calls.
+const dashboardUrl = new URL(window.location.href);
+const tokenFromUrl = dashboardUrl.searchParams.get('token');
+if (tokenFromUrl) {
+    sessionStorage.setItem('cc-proxy-auth-token', tokenFromUrl);
+    dashboardUrl.searchParams.delete('token');
+    history.replaceState(null, '', dashboardUrl.pathname + dashboardUrl.search + dashboardUrl.hash);
+}
+const dashboardAuthToken = sessionStorage.getItem('cc-proxy-auth-token') || '';
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+    const url = typeof input === 'string' || input instanceof URL ? new URL(input, location.href) : new URL(input.url);
+    if (dashboardAuthToken && url.origin === location.origin && url.pathname.startsWith('/api/')) {
+        const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+        headers.set('Authorization', `Bearer ${dashboardAuthToken}`);
+        init = { ...init, headers };
+    }
+    return nativeFetch(input, init);
+};
+
 // ── Wire up circular-dep bridge for inspector.js ──
 // inspector.js needs openSummaryPanel/openRequestSummaryPanel from session.js
 setSessionPanelFns(openSummaryPanel, openRequestSummaryPanel);
@@ -31,7 +52,9 @@ window._updateInspectorCostStats = updateInspectorCostStats;
 // ── WebSocket ──
 
 export function connect() {
-    state.ws = new WebSocket(`${state.protocol}//${location.host}/ws`);
+    const wsUrl = new URL(`${state.protocol}//${location.host}/ws`);
+    if (dashboardAuthToken) wsUrl.searchParams.set('token', dashboardAuthToken);
+    state.ws = new WebSocket(wsUrl);
 
     state.ws.onopen = () => {
         state._reconnectDelay = 1000;
@@ -374,6 +397,7 @@ Object.assign(window, {
         try {
             const resp = await fetch('/api/cleanup', { method: 'POST' });
             const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || 'cleanup failed');
             const result = document.getElementById('ret-cleanup-result');
             result.className = 'cleanup-result success';
             result.textContent = t('settings.cleaning_result', { reqs: data.deleted_requests, sessions: data.deleted_sessions });

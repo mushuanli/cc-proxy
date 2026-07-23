@@ -1018,7 +1018,12 @@ document.getElementById('btn-delete-selected').addEventListener('click', async (
     if (sessionCount > 0) {
         const sids = Array.from(state.selectedSessionIds);
         for (const sid of sids) {
-            await fetch(`/api/session/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+            const resp = await fetch(`/api/session/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+            if (!resp.ok) {
+                const error = await resp.json().catch(() => ({}));
+                alert(error.error || `Failed to delete session ${sid}`);
+                continue;
+            }
             delete state.sessionMeta[sid];
             delete state.sessionCache[sid];
             if (state.currentSelectedSession === sid) {
@@ -1075,6 +1080,10 @@ document.getElementById('btn-flush-selected').addEventListener('click', async ()
         body: JSON.stringify({ session_ids: sids }),
     });
     const data = await resp.json();
+    if (!resp.ok) {
+        alert(data.error || t('common.export_fail_alert'));
+        return;
+    }
 
     if (data.flushed && data.flushed.length > 0) {
         const fileList = data.flushed.join(', ');

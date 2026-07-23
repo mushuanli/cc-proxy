@@ -13,6 +13,10 @@ use proxy_store::ProxyStore;
 use serde_json::json;
 use tokio::sync::RwLock;
 
+const MCP_TIMEOUT: Duration = Duration::from_secs(120);
+const MCP_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MCP_MAX_CONCURRENT: usize = 32;
+
 /// MCP JSON-RPC proxy relay.
 ///
 /// Forwards MCP requests to the configured destination URL.
@@ -24,6 +28,7 @@ pub struct McpRelay {
     events: EventBus,
     http_client: reqwest::Client,
     destination: Arc<RwLock<Option<String>>>,
+    concurrency: Arc<tokio::sync::Semaphore>,
 }
 
 impl McpRelay {
@@ -33,12 +38,16 @@ impl McpRelay {
             events,
             http_client: client,
             destination: Arc::new(RwLock::new(None)),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(MCP_MAX_CONCURRENT)),
         }
     }
 
     /// Return an axum Router for MCP proxying (mount on :9999).
     pub fn build_router(self) -> axum::Router {
-        axum::Router::new().fallback(mcp_handler).with_state(self)
+        axum::Router::new()
+            .fallback(mcp_handler)
+            .layer(axum::extract::DefaultBodyLimit::max(MCP_MAX_BODY_BYTES))
+            .with_state(self)
     }
 
     /// Set the MCP forwarding destination.
@@ -60,6 +69,20 @@ async fn mcp_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let _permit = match relay.concurrency.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": "MCP relay is busy"},
+                    "id": null
+                })),
+            )
+                .into_response()
+        }
+    };
     let dest = relay.destination.read().await;
     let destination = match dest.as_ref() {
         Some(d) => d.clone(),
@@ -106,46 +129,50 @@ async fn mcp_handler(
         }
     };
 
-    match tokio::time::timeout(Duration::from_secs(120), relay.http_client.execute(upstream_req)).await {
-        Ok(Ok(resp)) => {
-            let status = resp.status();
-            let resp_headers = resp.headers().clone();
+    let exchange = async {
+        let resp = relay
+            .http_client
+            .execute(upstream_req)
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        let resp_headers = resp.headers().clone();
+        if resp
+            .content_length()
+            .is_some_and(|n| n > MCP_MAX_BODY_BYTES as u64)
+        {
+            return Err("MCP response body exceeds limit".to_string());
+        }
+        let mut stream = resp.bytes_stream();
+        let mut collected = Vec::new();
+        use futures::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            if collected.len().saturating_add(chunk.len()) > MCP_MAX_BODY_BYTES {
+                return Err("MCP response body exceeds limit".to_string());
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        Ok::<_, String>((status, resp_headers, Bytes::from(collected)))
+    };
 
-            match resp.bytes().await {
-                Ok(resp_bytes) => {
-                    let msg = WsMessage::NewMcp(proxy_common::models::ProxiedRequest {
-                        status_code: Some(status.as_u16()),
-                        response_body: Some(String::from_utf8_lossy(&resp_bytes).to_string()),
-                        model: Some(method_str),
-                        ..Default::default()
-                    });
-                    relay.events.publish(msg);
+    match tokio::time::timeout(MCP_TIMEOUT, exchange).await {
+        Ok(Ok((status, resp_headers, resp_bytes))) => {
+            let msg = WsMessage::NewMcp(proxy_common::models::ProxiedRequest {
+                status_code: Some(status.as_u16()),
+                response_body: Some(String::from_utf8_lossy(&resp_bytes).to_string()),
+                model: Some(method_str),
+                ..Default::default()
+            });
+            relay.events.publish(msg);
 
-                    let mut response = Response::builder().status(status);
-                    for (k, v) in resp_headers.iter() {
-                        if k.as_str().to_lowercase() != "transfer-encoding" {
-                            response = response.header(k.clone(), v.clone());
-                        }
-                    }
-                    response.body(Body::from(resp_bytes)).unwrap()
-                }
-                Err(e) => {
-                    let msg = WsMessage::NewMcp(proxy_common::models::ProxiedRequest {
-                        error: Some(format!("Failed to read MCP response: {}", e)),
-                        ..Default::default()
-                    });
-                    relay.events.publish(msg);
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32603, "message": e.to_string()},
-                            "id": null
-                        })),
-                    )
-                        .into_response()
+            let mut response = Response::builder().status(status);
+            for (k, v) in resp_headers.iter() {
+                if k.as_str().to_lowercase() != "transfer-encoding" {
+                    response = response.header(k.clone(), v.clone());
                 }
             }
+            response.body(Body::from(resp_bytes)).unwrap()
         }
         Ok(Err(e)) => {
             let msg = WsMessage::NewMcp(proxy_common::models::ProxiedRequest {

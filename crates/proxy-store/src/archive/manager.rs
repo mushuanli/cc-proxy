@@ -40,19 +40,28 @@ impl ArchiveManager {
             return Ok(ArchiveInfo {
                 session_id: session.id.clone(),
                 name: session.name.clone(),
-                file_path: self.session_archive_path(session_id),
+                file_path: self.session_archive_path(session_id)?,
                 archived_at: session.last_archived_at,
                 task_count: session.task_count,
             });
         }
 
-        let latest_task = tasks::get_latest_completed_task(conn, session_id)?;
+        let mut latest_task = tasks::get_latest_completed_task(conn, session_id)?;
+        if let Some(task) = latest_task.as_mut() {
+            if task.summary_json.is_none() {
+                if let Some(summary) = crate::summary::analyzer::analyze_task(task) {
+                    let json = serde_json::to_string(&summary)?;
+                    tasks::update_summary(conn, &task.id, &json)?;
+                    task.summary_json = Some(json);
+                }
+            }
+        }
         let daily_usage = crate::db::usage::get_session_daily_usage(conn, session_id)?;
 
         let doc = build_archive(&session, latest_task.as_ref(), &daily_usage);
         let yaml = serde_yaml::to_string(&doc)?;
 
-        let file_path = self.session_archive_path(session_id);
+        let file_path = self.session_archive_path(session_id)?;
         file::atomic_write(&std::path::PathBuf::from(&file_path), &yaml)?;
 
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -141,19 +150,47 @@ impl ArchiveManager {
         query: &str,
         role_filter: Option<&str>,
     ) -> StoreResult<Vec<ArchiveSearchResult>> {
+        const MAX_FILES: usize = 2_000;
+        const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+        const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+        const MAX_RESULTS: usize = 200;
         let mut results = Vec::new();
         if !self.archive_dir.is_dir() {
             return Ok(results);
         }
 
         let q_lower = query.to_lowercase();
+        if q_lower.chars().count() > 512 {
+            return Err(crate::error::StoreError::InvalidArgument(
+                "archive query is too long".into(),
+            ));
+        }
+        if role_filter.is_some_and(|role| !matches!(role, "user" | "assistant" | "system")) {
+            return Err(crate::error::StoreError::InvalidArgument(
+                "invalid role filter".into(),
+            ));
+        }
+        let mut scanned_files = 0usize;
+        let mut scanned_bytes = 0u64;
 
         for entry in std::fs::read_dir(&self.archive_dir)? {
+            if scanned_files >= MAX_FILES
+                || scanned_bytes >= MAX_TOTAL_BYTES
+                || results.len() >= MAX_RESULTS
+            {
+                break;
+            }
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
             }
+            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            if size > MAX_FILE_BYTES || scanned_bytes.saturating_add(size) > MAX_TOTAL_BYTES {
+                continue;
+            }
+            scanned_files += 1;
+            scanned_bytes += size;
 
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
@@ -165,8 +202,6 @@ impl ArchiveManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
-
             // Extract name and last_activity_at from YAML
             let mut name: Option<String> = None;
             let mut last_active_at: Option<String> = None;
@@ -334,15 +369,84 @@ impl ArchiveManager {
         &self.archive_dir
     }
 
-    fn session_archive_path(&self, session_id: &SessionId) -> String {
-        debug_assert!(
-            file::is_safe_filename(session_id),
-            "session_archive_path called with unsafe session id: {}",
-            session_id.as_str()
-        );
-        self.archive_dir
-            .join(format!("{}.yaml", session_id.as_str()))
-            .to_string_lossy()
-            .into_owned()
+    /// Delete a session and its archive as one recoverable logical operation.
+    pub fn delete_session(&self, conn: &Connection, session_id: &SessionId) -> StoreResult<bool> {
+        let archive_path = std::path::PathBuf::from(self.session_archive_path(session_id)?);
+        let tombstone = archive_path.with_file_name(format!(
+            ".{}.{}.tmp",
+            archive_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("archive"),
+            ulid::Ulid::new()
+        ));
+        let moved_archive = if archive_path.exists() {
+            std::fs::rename(&archive_path, &tombstone)?;
+            true
+        } else {
+            false
+        };
+
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        match sessions::delete_session(conn, session_id) {
+            Ok(true) => {
+                if let Err(error) = conn.execute_batch("COMMIT") {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    if moved_archive {
+                        let _ = std::fs::rename(&tombstone, &archive_path);
+                    }
+                    return Err(error.into());
+                }
+                if moved_archive {
+                    std::fs::remove_file(tombstone)?;
+                }
+                Ok(true)
+            }
+            Ok(false) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                if moved_archive {
+                    let _ = std::fs::rename(&tombstone, &archive_path);
+                }
+                Ok(false)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                if moved_archive {
+                    let _ = std::fs::rename(&tombstone, &archive_path);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn session_archive_path(&self, session_id: &SessionId) -> StoreResult<String> {
+        if !file::is_safe_filename(session_id) {
+            return Err(crate::error::StoreError::InvalidArgument(format!(
+                "unsafe session id for filename: {}",
+                session_id.as_str()
+            )));
+        }
+        let archive_root = self.archive_dir.canonicalize()?;
+        let target = archive_root.join(format!("{}.yaml", session_id.as_str()));
+        if target.parent() != Some(archive_root.as_path()) {
+            return Err(crate::error::StoreError::InvalidArgument(
+                "archive target escaped archive directory".into(),
+            ));
+        }
+        Ok(target.to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_boundary_rejects_trusted_but_unsafe_id() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = ArchiveManager::new(root.path().to_path_buf());
+        let unsafe_id = SessionId::from_trusted("../outside".into());
+        assert!(manager.session_archive_path(&unsafe_id).is_err());
+        assert!(!root.path().parent().unwrap().join("outside.yaml").exists());
     }
 }

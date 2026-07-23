@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use futures::stream::SplitSink;
@@ -16,22 +16,63 @@ const PING_INTERVAL: Duration = Duration::from_secs(10);
 const DEAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Check if an Origin header value is allowed to connect.
-fn is_allowed_origin(origin: &str) -> bool {
-    origin.starts_with("http://localhost") || origin.starts_with("http://127.0.0.1")
+fn is_allowed_origin(origin: &str, host_header: Option<&str>) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    match host_header {
+        Some(host) => authority.as_str().eq_ignore_ascii_case(host),
+        None => matches!(authority.host(), "localhost" | "127.0.0.1" | "::1"),
+    }
 }
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Validate Origin header to prevent cross-site WebSocket hijacking
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
-        if !is_allowed_origin(origin) {
+        let host = headers.get("host").and_then(|v| v.to_str().ok());
+        if !is_allowed_origin(origin, host) {
             tracing::warn!("[ws] rejected connection from origin: {}", origin);
             return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
         }
     }
+
+    // Validate auth token if configured
+    let config = state.config.get().await;
+    if let Some(ref token) = config.server.auth_token {
+        if !token.is_empty() {
+            let expected = format!("Bearer {}", token);
+            let provided_header = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let provided_query = query.get("token").map(String::as_str).unwrap_or("");
+            let cookie_matches = headers
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .map(|cookies| {
+                    cookies.split(';').any(|cookie| {
+                        cookie.trim().strip_prefix("cc_proxy_auth=") == Some(token.as_str())
+                    })
+                })
+                .unwrap_or(false);
+            if provided_header != expected && provided_query != token && !cookie_matches {
+                tracing::warn!("[ws] rejected connection: unauthorized");
+                return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+            }
+        }
+    }
+
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -122,5 +163,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 async fn send_json<T: serde::Serialize>(sender: &mut SplitSink<WebSocket, Message>, msg: &T) {
     if let Ok(json) = serde_json::to_string(msg) {
         let _ = sender.send(Message::Text(json)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_origin;
+
+    #[test]
+    fn websocket_origin_must_match_dashboard_authority_exactly() {
+        assert!(is_allowed_origin(
+            "http://127.0.0.1:5000",
+            Some("127.0.0.1:5000")
+        ));
+        assert!(!is_allowed_origin(
+            "http://127.0.0.1.evil.example:5000",
+            Some("127.0.0.1:5000")
+        ));
+        assert!(!is_allowed_origin(
+            "http://localhost:9999",
+            Some("localhost:5000")
+        ));
+        assert!(!is_allowed_origin("null", Some("localhost:5000")));
     }
 }

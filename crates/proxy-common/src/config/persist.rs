@@ -17,9 +17,7 @@ pub async fn persist_config(path: &Path, config: &AppConfig) -> ConfigResult<()>
     let mut doc: toml_edit::DocumentMut = if content.is_empty() {
         toml_edit::DocumentMut::new()
     } else {
-        content
-            .parse()
-            .map_err(ConfigError::TomlEdit)?
+        content.parse().map_err(ConfigError::TomlEdit)?
     };
 
     // Write model_pricing array
@@ -40,14 +38,23 @@ pub async fn persist_config(path: &Path, config: &AppConfig) -> ConfigResult<()>
 
     let serialized = doc.to_string();
 
-    // Atomic write: write to tmp file, sync, then rename
-    let tmp_path = path.with_extension("toml.tmp");
-    tokio::fs::write(&tmp_path, &serialized).await?;
-    let f = tokio::fs::File::open(&tmp_path).await?;
-    f.sync_all().await?;
-    drop(f);
-    tokio::fs::rename(&tmp_path, path).await?;
+    atomic_write(path, &serialized).await
+}
 
+async fn atomic_write(path: &Path, content: &str) -> ConfigResult<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let tmp_path = path.with_file_name(format!(".{file_name}.{}.tmp", ulid::Ulid::new()));
+    tokio::fs::write(&tmp_path, content).await?;
+    let file = tokio::fs::File::open(&tmp_path).await?;
+    file.sync_all().await?;
+    drop(file);
+    if let Err(error) = tokio::fs::rename(&tmp_path, path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -193,6 +200,16 @@ fn write_server_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         "mcp_proxy_port",
         toml_edit::value(config.server.mcp_proxy_port as i64),
     );
+    if let Some(ref token) = config.server.auth_token {
+        tbl.insert("auth_token", toml_edit::value(token.as_str()));
+    }
+    if let Some(ref dest) = config.server.mcp_destination {
+        tbl.insert("mcp_destination", toml_edit::value(dest.as_str()));
+    }
+    tbl.insert(
+        "ws_include_bodies",
+        toml_edit::value(config.server.ws_include_bodies),
+    );
     doc["server"] = toml_edit::Item::Table(tbl);
 }
 
@@ -212,15 +229,12 @@ pub async fn persist_model_pricing(path: &Path, pricing: &[ModelPricing]) -> Con
     let mut doc: toml_edit::DocumentMut = if content.is_empty() {
         toml_edit::DocumentMut::new()
     } else {
-        content
-            .parse()
-            .map_err(ConfigError::TomlEdit)?
+        content.parse().map_err(ConfigError::TomlEdit)?
     };
 
     write_model_pricing(&mut doc, pricing);
 
-    tokio::fs::write(path, doc.to_string()).await?;
-    Ok(())
+    atomic_write(path, &doc.to_string()).await
 }
 
 /// Persist providers changes.
@@ -233,9 +247,7 @@ pub async fn persist_providers(path: &Path, providers: &[Provider]) -> ConfigRes
     let mut doc: toml_edit::DocumentMut = if content.is_empty() {
         toml_edit::DocumentMut::new()
     } else {
-        content
-            .parse()
-            .map_err(ConfigError::TomlEdit)?
+        content.parse().map_err(ConfigError::TomlEdit)?
     };
 
     let mut providers_arr = toml_edit::ArrayOfTables::new();
@@ -253,6 +265,5 @@ pub async fn persist_providers(path: &Path, providers: &[Provider]) -> ConfigRes
     }
 
     doc["proxy"]["providers"] = toml_edit::Item::ArrayOfTables(providers_arr);
-    tokio::fs::write(path, doc.to_string()).await?;
-    Ok(())
+    atomic_write(path, &doc.to_string()).await
 }

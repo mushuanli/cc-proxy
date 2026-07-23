@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use proxy_common::{CostData, DailyCost, ModelCost, ProviderCost, SessionCost};
@@ -32,12 +33,16 @@ pub async fn get_costs(
         .into_response();
     }
 
-    match state.store.query_daily_usage_range(&from, &to) {
+    match state.store.query_daily_usage_range(&from, &to).await {
         Ok(rows) => {
             let data = aggregate_costs(&rows, &from, &to);
             Json(json!(data)).into_response()
         }
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 

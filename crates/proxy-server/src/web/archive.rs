@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::json;
@@ -68,12 +69,20 @@ pub async fn list(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let filter = q.get("q").map(|s| s.as_str());
-    match state.store.list_archives(filter) {
+    match state.store.list_archives(filter).await {
         Ok(archives) => {
-            let items: Vec<serde_json::Value> = archives.iter().map(archive_to_json).collect();
+            let items = tokio::task::spawn_blocking(move || {
+                archives.iter().map(archive_to_json).collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
             Json(json!(items)).into_response()
         }
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -84,19 +93,33 @@ pub async fn search(
     let query = q.get("q").map(|s| s.as_str()).unwrap_or("");
     if query.is_empty() {
         // No query → return all archives (same as list)
-        match state.store.list_archives(None) {
+        match state.store.list_archives(None).await {
             Ok(archives) => {
-                let items: Vec<serde_json::Value> = archives.iter().map(archive_to_json).collect();
+                let items = tokio::task::spawn_blocking(move || {
+                    archives.iter().map(archive_to_json).collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
                 return Json(json!(items)).into_response();
             }
-            Err(e) => return Json(json!({"error": e.to_string()})).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
         }
     }
 
     let role_filter = q.get("role").map(|s| s.as_str());
-    match state.store.search_archives(query, role_filter) {
+    match state.store.search_archives(query, role_filter).await {
         Ok(results) => Json(json!(results)).into_response(),
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -104,12 +127,24 @@ pub async fn file(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match state.store.read_archive_file(&name) {
+    match state.store.read_archive_file(&name).await {
         Ok(content) => axum::response::Response::builder()
             .header("content-type", "text/plain; charset=utf-8")
             .body(axum::body::Body::from(content))
             .unwrap(),
-        Err(e) => Json(json!({"error": e.to_string()})).into_response(),
+        Err(proxy_store::StoreError::InvalidArgument(e)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response()
+        }
+        Err(proxy_store::StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "archive not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -121,16 +156,30 @@ pub async fn set_name(
     let new_name = body.get("name").and_then(|v| v.as_str());
     let session_id = match proxy_common::SessionId::new(sid) {
         Ok(v) => v,
-        Err(e) => return Json(json!({"ok": false, "error": e})).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": e})),
+            )
+                .into_response()
+        }
     };
-    match state.store.rename_archive_session(&session_id, new_name) {
+    match state
+        .store
+        .rename_archive_session(&session_id, new_name)
+        .await
+    {
         Ok(()) => {
             tracing::info!("[api] archive rename: sid={}", session_id.as_str());
             Json(json!({"ok": true})).into_response()
         }
         Err(e) => {
             tracing::warn!("[api] archive rename failed: {}", e);
-            Json(json!({"ok": false, "error": e.to_string()})).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
+                .into_response()
         }
     }
 }

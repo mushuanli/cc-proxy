@@ -5,7 +5,11 @@ use crate::error::StoreResult;
 
 /// Write content to a temp file, then atomically rename to the target path.
 pub fn atomic_write(path: &Path, content: &str) -> StoreResult<()> {
-    let tmp_path = path.with_extension("yaml.tmp");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("archive");
+    let tmp_path = path.with_file_name(format!(".{file_name}.{}.tmp", ulid::Ulid::new()));
 
     std::fs::write(&tmp_path, content)?;
 
@@ -14,7 +18,10 @@ pub fn atomic_write(path: &Path, content: &str) -> StoreResult<()> {
     f.sync_all()?;
     drop(f);
 
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error.into());
+    }
 
     Ok(())
 }

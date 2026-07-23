@@ -188,6 +188,28 @@ mod tests {
     }
 
     #[test]
+    fn active_effort_overrides_upstream_and_auto_falls_back() {
+        let mut config = make_config();
+        config.proxy.upstreams[0].effort = Some("medium".into());
+        config.proxy.active_effort = "high".into();
+        assert_eq!(
+            resolve_route(&config, "claude-haiku")
+                .unwrap()
+                .effort
+                .as_deref(),
+            Some("high")
+        );
+        config.proxy.active_effort = "auto".into();
+        assert_eq!(
+            resolve_route(&config, "claude-haiku")
+                .unwrap()
+                .effort
+                .as_deref(),
+            Some("medium")
+        );
+    }
+
+    #[test]
     fn resolve_route_for_explicit_upstream() {
         let mut config = make_config();
         config.proxy.upstreams.push(UpstreamConfig {

@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use proxy_common::{ConfigStore, EventBus};
-use proxy_relay::{CaptureControl, McpRelay, RelayHandler};
+use proxy_relay::{CaptureControl, HookReceiver, McpRelay, RelayHandler};
 use proxy_store::{ProxyStore, ProxyStoreConfig};
 
 pub struct AppState {
@@ -19,12 +19,34 @@ pub struct AppState {
     pub relay: RelayHandler,
     pub mcp: McpRelay,
     pub capture: CaptureControl,
+    pub hook_receiver: HookReceiver,
 }
 
 impl AppState {
     pub async fn new(config_path: &str) -> anyhow::Result<Self> {
         // ── Config ──
         let config = ConfigStore::open(config_path).await?;
+        if config
+            .get()
+            .await
+            .server
+            .auth_token
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+        {
+            let generated = format!(
+                "{}{}",
+                proxy_common::TaskId::generate(),
+                proxy_common::TaskId::generate()
+            );
+            config
+                .update(move |candidate| {
+                    candidate.server.auth_token = Some(generated);
+                    Ok(())
+                })
+                .await?;
+        }
         let config_snapshot = config.get().await;
 
         // ── Store ──
@@ -43,12 +65,16 @@ impl AppState {
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()?;
 
+        // ── Capture ──
+        let capture = CaptureControl::new(PathBuf::from("captures"), events.clone());
+
         // ── Proxy relay ──
         let relay = RelayHandler::new(
             config.clone(),
             store.clone(),
             events.clone(),
             client.clone(),
+            capture.clone(),
         )
         .with_retry_config(
             config_snapshot.proxy.retry_count,
@@ -57,9 +83,14 @@ impl AppState {
 
         // ── MCP relay ──
         let mcp = McpRelay::new(store.clone(), events.clone(), client);
+        if let Some(ref dest) = config_snapshot.server.mcp_destination {
+            if !dest.is_empty() {
+                mcp.set_destination(Some(dest.clone())).await;
+            }
+        }
 
-        // ── Capture ──
-        let capture = CaptureControl::new(PathBuf::from("captures"), events.clone());
+        // ── Hook receiver ──
+        let hook_receiver = HookReceiver::new(events.clone());
 
         Ok(Self {
             config,
@@ -68,6 +99,7 @@ impl AppState {
             relay,
             mcp,
             capture,
+            hook_receiver,
         })
     }
 }
@@ -101,6 +133,24 @@ async fn main() -> anyhow::Result<()> {
         config.proxy.active_upstream,
     );
     tracing::info!("Effort level = '{}'", config.proxy.active_effort);
+
+    // Refuse an externally reachable control plane without authentication.
+    let is_loopback = config.server.listen_address == "127.0.0.1"
+        || config.server.listen_address == "::1"
+        || config.server.listen_address == "localhost";
+    if !is_loopback {
+        if config.server.auth_token.as_deref().unwrap_or("").is_empty() {
+            anyhow::bail!(
+                "server.auth_token is required when listen_address '{}' is not loopback",
+                config.server.listen_address
+            );
+        } else {
+            tracing::info!(
+                "[server] listen_address={} with auth_token configured",
+                config.server.listen_address,
+            );
+        }
+    }
 
     for u in &config.proxy.upstreams {
         let high = u
