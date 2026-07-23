@@ -43,26 +43,30 @@ impl ConfigStore {
     }
 
     /// Atomically update the in-memory config and persist to disk.
+    /// Uses clone-validate-persist-swap pattern to prevent partial mutations.
     pub async fn update<F>(&self, updater: F) -> ConfigResult<AppConfig>
     where
         F: FnOnce(&mut AppConfig) -> ConfigResult<()>,
     {
-        let mut guard = self.config.write().await;
-        updater(&mut guard)?;
+        // 1. Clone current config under read lock
+        let mut candidate = self.config.read().await.clone();
 
-        // Validate before persisting
-        let errors = guard.validate();
+        // 2. Apply mutation to the clone
+        updater(&mut candidate)?;
+
+        // 3. Validate the clone (not the live config)
+        let errors = candidate.validate();
         if !errors.is_empty() {
             return Err(crate::error::ConfigError::Validation(errors.join("; ")));
         }
 
-        drop(guard);
+        // 4. Persist clone to disk atomically
+        persist_config(&self.path, &candidate).await?;
 
-        // Persist to disk
-        let config = self.get().await;
-        persist_config(&self.path, &config).await?;
+        // 5. Swap in-memory state only after successful persist
+        *self.config.write().await = candidate.clone();
 
-        Ok(config)
+        Ok(candidate)
     }
 
     /// Persist current config to disk without updating.

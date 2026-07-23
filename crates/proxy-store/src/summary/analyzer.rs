@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use proxy_common::models::ProxiedRequest;
+use crate::models::Task;
 
 // ── Public data structures ──
 
@@ -64,10 +64,10 @@ pub struct SessionStats {
 
 // ── Entry point ──
 
-/// Analyze the latest request of a session and extract a human-readable summary.
+/// Analyze a task and extract a human-readable summary.
 /// Returns None if request_body is missing or has no messages.
-pub fn analyze_request(req: &ProxiedRequest) -> Option<SessionSummary> {
-    let body_str = req.request_body.as_deref()?;
+pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
+    let body_str = task.request_body.as_deref()?;
     let body: Value = serde_json::from_str(body_str).ok()?;
     let messages = body.get("messages")?.as_array()?;
 
@@ -153,24 +153,28 @@ pub fn analyze_request(req: &ProxiedRequest) -> Option<SessionSummary> {
         .filter_map(|p| file_map.get(p).cloned())
         .collect();
 
-    // Final response: prefer content_text (merged by proxy), fall back to last assistant text
-    let final_response = req
-        .content_text
-        .as_deref()
+    // Final response: prefer the actual response body from this task,
+    // fall back to the last assistant text in the request messages
+    let final_response = task
+        .response_body
+        .as_ref()
+        .and_then(|resp| resp.text.first())
         .filter(|t| !t.is_empty())
         .map(|t| truncate(t, 3000))
         .unwrap_or_else(|| extract_last_assistant_text(messages));
 
     Some(SessionSummary {
-        session_id: req.session_id.clone().unwrap_or_default(),
-        model: req.model.clone().unwrap_or_default(),
-        started_at: req.timestamp.to_rfc3339(),
-        status_code: req.status_code,
-        stop_reason: req.stop_reason.clone(),
-        input_tokens: req.input_tokens.unwrap_or(0) as u64,
-        output_tokens: req.output_tokens.unwrap_or(0) as u64,
-        cache_read_tokens: req.cache_read_input_tokens.unwrap_or(0) as u64,
-        cache_creation_tokens: req.cache_creation_input_tokens.unwrap_or(0) as u64,
+        session_id: task.session_id.to_string(),
+        model: task.resolved_model.clone(),
+        started_at: chrono::DateTime::from_timestamp(task.started_at / 1000, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default(),
+        status_code: task.http_status_code,
+        stop_reason: task.stop_reason.clone(),
+        input_tokens: task.input_tokens,
+        output_tokens: task.output_tokens,
+        cache_read_tokens: task.cache_read_tokens,
+        cache_creation_tokens: task.cache_creation_tokens,
         user_prompts,
         assistant_actions,
         touched_files,
@@ -452,21 +456,59 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proxy_common::models::ProxiedRequest;
+    use crate::models::Task;
+    use proxy_common::{SessionId, TaskId, TaskStatus};
 
-    fn make_req_with_body(body: &str) -> ProxiedRequest {
-        let mut req = ProxiedRequest::new("POST", "/v1/messages");
-        req.request_body = Some(body.to_string());
-        req.model = Some("claude-sonnet-4-6".into());
-        req.input_tokens = Some(100);
-        req.output_tokens = Some(50);
-        req
+    fn make_task(body: Option<&str>) -> Task {
+        Task {
+            id: TaskId::new("01TEST".into()),
+            session_id: SessionId::from_trusted("01TEST".into()),
+            sequence_no: 1,
+            created_at: 0,
+            started_at: 0,
+            first_byte_at: None,
+            ended_at: None,
+            status: TaskStatus::Completed,
+            method: "POST".into(),
+            path: "/v1/messages".into(),
+            request_headers: None,
+            request_body: body.map(String::from),
+            response_headers: None,
+            response_body: None,
+            http_status_code: Some(200),
+            is_streaming: true,
+            requested_model: Some("claude-sonnet-4-6".into()),
+            provider: "anthropic".into(),
+            pricing_model_id: None,
+            resolved_model: "claude-sonnet-4-6".into(),
+            upstream: None,
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            duration_ms: None,
+            ttft_ms: None,
+            stop_reason: None,
+            upstream_message_id: None,
+            error_type: None,
+            error_message: None,
+            input_rate_microusd: 0,
+            output_rate_microusd: 0,
+            cache_write_rate_microusd: 0,
+            cache_read_rate_microusd: 0,
+            cost_microusd: 0,
+            currency: "USD".into(),
+            summary_json: None,
+            summary_created_at: None,
+            metadata: serde_json::Value::Null,
+            messages_count: 0,
+        }
     }
 
     #[test]
     fn analyze_returns_none_when_no_body() {
-        let req = ProxiedRequest::new("POST", "/v1/messages");
-        assert!(analyze_request(&req).is_none());
+        let task = make_task(None);
+        assert!(analyze_task(&task).is_none());
     }
 
     #[test]
@@ -476,8 +518,8 @@ mod tests {
                 {"role": "user", "content": [{"type": "text", "text": "Hello, world!"}]}
             ]
         });
-        let req = make_req_with_body(&body.to_string());
-        let summary = analyze_request(&req).unwrap();
+        let task = make_task(Some(&body.to_string()));
+        let summary = analyze_task(&task).unwrap();
         assert_eq!(summary.user_prompts.len(), 1);
         assert_eq!(summary.user_prompts[0].text, "Hello, world!");
     }
@@ -490,8 +532,8 @@ mod tests {
                 {"role": "user", "content": [{"type": "text", "text": "Real prompt"}]}
             ]
         });
-        let req = make_req_with_body(&body.to_string());
-        let summary = analyze_request(&req).unwrap();
+        let task = make_task(Some(&body.to_string()));
+        let summary = analyze_task(&task).unwrap();
         assert_eq!(summary.user_prompts.len(), 1);
         assert_eq!(summary.user_prompts[0].text, "Real prompt");
     }
@@ -503,8 +545,8 @@ mod tests {
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "file content"}]}
             ]
         });
-        let req = make_req_with_body(&body.to_string());
-        let summary = analyze_request(&req).unwrap();
+        let task = make_task(Some(&body.to_string()));
+        let summary = analyze_task(&task).unwrap();
         assert_eq!(summary.user_prompts.len(), 0);
         assert_eq!(summary.stats.tool_result_count, 1);
     }
@@ -519,8 +561,8 @@ mod tests {
                 ]}
             ]
         });
-        let req = make_req_with_body(&body.to_string());
-        let summary = analyze_request(&req).unwrap();
+        let task = make_task(Some(&body.to_string()));
+        let summary = analyze_task(&task).unwrap();
         assert_eq!(summary.assistant_actions.len(), 1);
         assert!(summary.assistant_actions[0].tools.is_empty());
         assert_eq!(
@@ -540,8 +582,8 @@ mod tests {
                 ]}
             ]
         });
-        let req = make_req_with_body(&body.to_string());
-        let summary = analyze_request(&req).unwrap();
+        let task = make_task(Some(&body.to_string()));
+        let summary = analyze_task(&task).unwrap();
         assert_eq!(summary.assistant_actions.len(), 1);
         assert_eq!(summary.assistant_actions[0].tools[0].name, "Read");
         assert_eq!(summary.touched_files.len(), 1);

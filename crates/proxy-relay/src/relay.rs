@@ -12,6 +12,18 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
+
+/// Truncate a &str to at most `max_bytes` bytes, preserving UTF-8 boundaries.
+fn safe_truncate_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -195,7 +207,10 @@ async fn proxy_request(
 
     let session_id_str = upstream::extract_request_session_id(protocol, &headers, &body_json)
         .unwrap_or_else(|| format!("{}-{}", protocol.request_type(), TaskId::generate()));
-    let session_id = SessionId::new(session_id_str.clone());
+    let session_id = SessionId::new(session_id_str.clone())
+        .unwrap_or_else(|_| SessionId::from_trusted(
+            format!("{}-{}", protocol.request_type(), TaskId::generate())
+        ));
 
     let msg_count = upstream::message_count(protocol, &body_json);
 
@@ -262,10 +277,12 @@ async fn proxy_request(
         (route, provider_url, provider_token)
     };
 
-    let sid_short = if session_id_str.len() > 8 {
-        &session_id_str[session_id_str.len() - 8..]
+    // session_id is validated (ASCII-only), safe for byte slicing
+    let sid_s = session_id.as_str();
+    let sid_short = if sid_s.len() > 8 {
+        &sid_s[sid_s.len() - 8..]
     } else {
-        &session_id_str
+        sid_s
     };
     tracing::info!(
         "[relay] {}:{} => [{}:{}]",
@@ -510,11 +527,7 @@ async fn proxy_request(
         let body_snippet = upstream_response
             .content_text
             .as_ref()
-            .map(|t| {
-                let s: &str = t;
-                let truncated = if s.len() > 200 { &s[..200] } else { s };
-                truncated.to_string()
-            })
+            .map(|t| safe_truncate_bytes(t, 200).to_string())
             .unwrap_or_default();
         tracing::warn!(
             "[proxy] [{}] {} -> {} (provider={}) HTTP {} err={} body={}",

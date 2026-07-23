@@ -17,7 +17,7 @@ export function renderArchiveList(files) {
         pane.innerHTML = `<div class="archive-empty">${t('archive.no_files')}</div>`;
         return;
     }
-    pane.innerHTML = files.map(f => {
+    pane.innerHTML = files.map((f, i) => {
         const sid = archiveSid(f.file);
         const displayName = f.name || '';
         const sidSuffix = sid.slice(-8);
@@ -27,13 +27,17 @@ export function renderArchiveList(files) {
         const lastActive = f.last_active_at
             ? `${t('archive.last_active')}: ${fmtRelTime(f.last_active_at)}`
             : '';
-        return `<div class="archive-card" data-file="${escHtml(f.file)}" data-sid="${escHtml(sid)}">
+        return `<div class="archive-card" data-idx="${i}">
             <div class="archive-card-header">${titleHtml}</div>
             <div class="archive-card-meta">${lastActive} · ${fmtBytes(f.size)}</div>
         </div>`;
     }).join('');
     pane.querySelectorAll('.archive-card').forEach(card => {
-        card.addEventListener('click', () => loadArchiveFile(card.dataset.file));
+        const idx = parseInt(card.dataset.idx, 10);
+        const f = files[idx];
+        card.dataset.file = f.file;
+        card.dataset.sid = archiveSid(f.file);
+        card.addEventListener('click', () => loadArchiveFile(f.file));
     });
 }
 
@@ -51,15 +55,18 @@ export function renderArchiveSearch(results, q) {
         ? ` <span class="archive-filter-tag">${t('archive.filter_user_only')}</span>`
         : '';
     status.innerHTML = `${results.length} ${results.length === 1 ? 'file' : 'files'}${filterLabel}`;
-    pane.innerHTML = results.map(r => {
+    const ALLOWED_ROLES = new Set(['user', 'assistant', 'system']);
+    pane.innerHTML = results.map((r, i) => {
         const snippetsHtml = r.snippets.map(s => {
             let hi = escHtml(s.text);
             keywords.forEach(kw => {
                 const re = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
                 hi = hi.replace(re, m => `<mark>${m}</mark>`);
             });
+            const roleClass = ALLOWED_ROLES.has(s.role) ? `snippet-role--${s.role}` : '';
+            const roleLabel = s.role ? (t(`archive.role_${s.role}`) || escHtml(s.role)) : '';
             const roleTag = s.role
-                ? `<span class="snippet-role snippet-role--${s.role}">${t(`archive.role_${s.role}`) || s.role}</span>`
+                ? `<span class="snippet-role ${roleClass}">${roleLabel}</span>`
                 : '';
             return `<div class="archive-snippet">${roleTag}${hi}</div>`;
         }).join('');
@@ -72,7 +79,7 @@ export function renderArchiveSearch(results, q) {
         const lastActive = r.last_active_at
             ? `<span class="archive-card-meta">${t('archive.last_active')}: ${fmtRelTime(r.last_active_at)}</span>`
             : '';
-        return `<div class="archive-card" data-file="${escHtml(r.file)}" data-sid="${escHtml(sid)}">
+        return `<div class="archive-card" data-idx="${i}">
             <div class="archive-card-header">${titleHtml}</div>
             ${lastActive}
             <div class="archive-card-matches">${t('archive.matches', { n: r.match_count })}</div>
@@ -80,7 +87,11 @@ export function renderArchiveSearch(results, q) {
         </div>`;
     }).join('');
     pane.querySelectorAll('.archive-card').forEach(card => {
-        card.addEventListener('click', () => loadArchiveFile(card.dataset.file));
+        const idx = parseInt(card.dataset.idx, 10);
+        const r = results[idx];
+        card.dataset.file = r.file;
+        card.dataset.sid = archiveSid(r.file);
+        card.addEventListener('click', () => loadArchiveFile(r.file));
     });
 }
 

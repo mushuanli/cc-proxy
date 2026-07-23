@@ -53,7 +53,10 @@ pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let sid = proxy_common::SessionId::new(id);
+    let sid = match parse_session_id(id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let session = state.store.list_sessions(SessionFilter {
         id_or_name: Some(sid.as_str().to_string()),
         ..Default::default()
@@ -84,7 +87,10 @@ pub async fn rename(
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let sid = proxy_common::SessionId::new(id);
+    let sid = match parse_session_id(id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let name = body.get("label").and_then(|v| v.as_str());
     match state.store.name(&sid, name) {
         Ok(_) => Json(json!({"ok": true})).into_response(),
@@ -103,7 +109,10 @@ pub async fn summary(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let sid = proxy_common::SessionId::new(id);
+    let sid = match parse_session_id(id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let tasks = state.store.list_tasks(&sid, None);
 
     match tasks {
@@ -183,7 +192,10 @@ pub async fn export_(
     Path(id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let sid = proxy_common::SessionId::new(id);
+    let sid = match parse_session_id(id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let tasks = state.store.list_tasks(&sid, None);
     let format = q.get("format").map(|s| s.as_str()).unwrap_or("json");
 
@@ -197,4 +209,17 @@ pub async fn export_(
         }
         Err(e) => Json(json!({"error": e.to_string()})).into_response(),
     }
+}
+
+/// Parse a SessionId from a path parameter, returning a 400 error on invalid input.
+fn parse_session_id(id: String) -> Result<proxy_common::SessionId, axum::response::Response> {
+    proxy_common::SessionId::new(id).map_err(|e| {
+        axum::response::Response::builder()
+            .status(axum::http::StatusCode::BAD_REQUEST)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                json!({"error": e}).to_string(),
+            ))
+            .unwrap()
+    })
 }

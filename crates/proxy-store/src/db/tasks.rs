@@ -257,7 +257,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
 
     Ok(Task {
         id: TaskId::new(row.get::<_, String>("id")?),
-        session_id: SessionId::new(row.get::<_, String>("session_id")?),
+        session_id: SessionId::from_trusted(row.get::<_, String>("session_id")?),
         sequence_no: row.get::<_, i64>("sequence_no")? as u64,
         created_at: row.get("created_at")?,
         started_at: row.get("started_at")?,

@@ -48,13 +48,13 @@ mod tests {
 
     #[test]
     fn safe_filename_accepts_ulid() {
-        let id = SessionId::new("01JZA7M8MYP6K9X7HYF5Q2W3EN".into());
+        let id = SessionId::from_trusted("01JZA7M8MYP6K9X7HYF5Q2W3EN".into());
         assert!(is_safe_filename(&id));
     }
 
     #[test]
     fn safe_filename_rejects_slash() {
-        let id = SessionId::new("bad/name".into());
+        let id = SessionId::from_trusted("bad/name".into());
         assert!(!is_safe_filename(&id));
     }
 }

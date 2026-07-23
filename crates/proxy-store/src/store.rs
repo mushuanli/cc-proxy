@@ -78,11 +78,12 @@ impl ProxyStore {
     /// Cost is computed internally from `task.billing.rates` and `task.usage` —
     /// the caller does not need to calculate cost.
     pub fn write(&self, session_id: &SessionId, task: NewTask) -> StoreResult<Task> {
-        let sid_short = session_id.as_str().len();
-        let sid_short = if sid_short > 8 {
-            &session_id.as_str()[sid_short - 8..]
+        // SessionId is validated ASCII-only, safe for byte slicing
+        let sid_str = session_id.as_str();
+        let sid_short = if sid_str.len() > 8 {
+            &sid_str[sid_str.len() - 8..]
         } else {
-            session_id.as_str()
+            sid_str
         };
         let task_id_debug = task
             .id
@@ -96,65 +97,81 @@ impl ProxyStore {
         let op = || -> StoreResult<Task> {
             let conn = self.inner.conn.lock().unwrap();
 
-            // Compute cost from billing snapshot + usage (store owns billing logic)
-            let cost_microusd = crate::billing::calculate_cost_microusd(
-                &task.usage,
-                &task.billing.rates,
-            )
-            .map_err(|e| crate::error::StoreError::InvalidArgument(e.to_string()))?;
+            // Wrap all writes in a transaction for atomicity
+            conn.execute_batch("BEGIN IMMEDIATE")?;
 
-            // Generate or use provided task id
-            let task_id = task.id.clone().unwrap_or_else(TaskId::generate);
+            let result = (|| -> StoreResult<Task> {
+                // Compute cost from billing snapshot + usage (store owns billing logic)
+                let cost_microusd = crate::billing::calculate_cost_microusd(
+                    &task.usage,
+                    &task.billing.rates,
+                )
+                .map_err(|e| crate::error::StoreError::InvalidArgument(e.to_string()))?;
 
-            // Check if task already exists (idempotency)
-            if db::tasks::get_task(&conn, &task_id)?.is_some() {
-                return db::tasks::get_task(&conn, &task_id)?
-                    .ok_or_else(|| crate::error::StoreError::NotFound("task vanished".into()));
+                // Generate or use provided task id
+                let task_id = task.id.clone().unwrap_or_else(TaskId::generate);
+
+                // Check if task already exists (idempotency)
+                if db::tasks::get_task(&conn, &task_id)?.is_some() {
+                    return db::tasks::get_task(&conn, &task_id)?
+                        .ok_or_else(|| crate::error::StoreError::NotFound("task vanished".into()));
+                }
+
+                let now_ms = chrono::Utc::now().timestamp_millis();
+
+                // Ensure session exists
+                db::sessions::ensure_session(&conn, session_id, &task.session_defaults, now_ms)?;
+
+                // Allocate sequence number
+                let sequence_no = db::sessions::allocate_sequence(&conn, session_id)?;
+
+                // Insert task
+                let inserted = db::tasks::insert_task(&conn, &task, &task_id, session_id, sequence_no, cost_microusd)?;
+
+                if inserted {
+                    // Update session aggregates
+                    db::sessions::update_aggregates(
+                        &conn,
+                        session_id,
+                        task.status.as_str(),
+                        task.usage.input_tokens,
+                        task.usage.output_tokens,
+                        task.usage.cache_creation_tokens,
+                        task.usage.cache_read_tokens,
+                        cost_microusd,
+                        task.started_at,
+                    )?;
+
+                    // Upsert daily usage
+                    db::usage::upsert_daily_usage(
+                        &conn,
+                        session_id,
+                        &task.billing.provider,
+                        &task.billing.resolved_model,
+                        &task.billing.currency,
+                        task.status.as_str(),
+                        task.usage.input_tokens,
+                        task.usage.output_tokens,
+                        task.usage.cache_creation_tokens,
+                        task.usage.cache_read_tokens,
+                        cost_microusd,
+                    )?;
+                }
+
+                db::tasks::get_task(&conn, &task_id)?
+                    .ok_or_else(|| crate::error::StoreError::NotFound("task not found after write".into()))
+            })();
+
+            match result {
+                Ok(task) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(task)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
             }
-
-            let now_ms = chrono::Utc::now().timestamp_millis();
-
-            // Ensure session exists
-            db::sessions::ensure_session(&conn, session_id, &task.session_defaults, now_ms)?;
-
-            // Allocate sequence number
-            let sequence_no = db::sessions::allocate_sequence(&conn, session_id)?;
-
-            // Insert task
-            let inserted = db::tasks::insert_task(&conn, &task, &task_id, session_id, sequence_no, cost_microusd)?;
-
-            if inserted {
-                // Update session aggregates
-                db::sessions::update_aggregates(
-                    &conn,
-                    session_id,
-                    task.status.as_str(),
-                    task.usage.input_tokens,
-                    task.usage.output_tokens,
-                    task.usage.cache_creation_tokens,
-                    task.usage.cache_read_tokens,
-                    cost_microusd,
-                    task.started_at,
-                )?;
-
-                // Upsert daily usage
-                db::usage::upsert_daily_usage(
-                    &conn,
-                    session_id,
-                    &task.billing.provider,
-                    &task.billing.resolved_model,
-                    &task.billing.currency,
-                    task.status.as_str(),
-                    task.usage.input_tokens,
-                    task.usage.output_tokens,
-                    task.usage.cache_creation_tokens,
-                    task.usage.cache_read_tokens,
-                    cost_microusd,
-                )?;
-            }
-
-            db::tasks::get_task(&conn, &task_id)?
-                .ok_or_else(|| crate::error::StoreError::NotFound("task not found after write".into()))
         };
 
         op().map_err(|e| {
@@ -293,14 +310,7 @@ impl ProxyStore {
                 task_id
             )))?;
 
-        // Build a minimal ProxiedRequest for the analyzer
-        let req = proxy_common::models::ProxiedRequest {
-            request_body: task.request_body.clone(),
-            model: task.requested_model.clone(),
-            ..Default::default()
-        };
-
-        crate::summary::analyzer::analyze_request(&req)
+        crate::summary::analyzer::analyze_task(&task)
             .ok_or_else(|| crate::error::StoreError::NotFound(format!(
                 "could not analyze task '{}'",
                 task_id

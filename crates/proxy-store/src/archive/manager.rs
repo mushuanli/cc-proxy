@@ -123,7 +123,7 @@ impl ArchiveManager {
                 }
             }
 
-            let session_id = SessionId::new(file_name.to_string());
+            let session_id = SessionId::from_trusted(file_name.to_string());
             result.push(ArchiveInfo {
                 session_id,
                 name: None,
@@ -271,6 +271,12 @@ impl ArchiveManager {
         session_id: &SessionId,
         new_name: Option<&str>,
     ) -> StoreResult<()> {
+        // Defense-in-depth: validate session id before file system operations
+        if !file::is_safe_filename(session_id) {
+            return Err(crate::error::StoreError::InvalidArgument(
+                format!("unsafe session id for file operation: {}", session_id),
+            ));
+        }
         // Update in database if the session still exists there
         let db_updated = sessions::rename_session(conn, session_id, new_name).unwrap_or(false);
 
@@ -342,6 +348,11 @@ impl ArchiveManager {
     }
 
     fn session_archive_path(&self, session_id: &SessionId) -> String {
+        debug_assert!(
+            file::is_safe_filename(session_id),
+            "session_archive_path called with unsafe session id: {}",
+            session_id.as_str()
+        );
         self.archive_dir
             .join(format!("{}.yaml", session_id.as_str()))
             .to_string_lossy()

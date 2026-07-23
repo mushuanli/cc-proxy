@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
@@ -14,10 +15,23 @@ use crate::AppState;
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 const DEAD_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Check if an Origin header value is allowed to connect.
+fn is_allowed_origin(origin: &str) -> bool {
+    origin.starts_with("http://localhost") || origin.starts_with("http://127.0.0.1")
+}
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // Validate Origin header to prevent cross-site WebSocket hijacking
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if !is_allowed_origin(origin) {
+            tracing::warn!("[ws] rejected connection from origin: {}", origin);
+            return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+        }
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 

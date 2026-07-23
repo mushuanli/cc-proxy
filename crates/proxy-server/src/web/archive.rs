@@ -124,7 +124,10 @@ pub async fn set_name(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let new_name = body.get("name").and_then(|v| v.as_str());
-    let session_id = proxy_common::SessionId::new(sid);
+    let session_id = match proxy_common::SessionId::new(sid) {
+        Ok(v) => v,
+        Err(e) => return Json(json!({"ok": false, "error": e})).into_response(),
+    };
     match state.store.rename_archive_session(&session_id, new_name) {
         Ok(()) => {
             tracing::info!("[api] archive rename: sid={}", session_id.as_str());

@@ -6,11 +6,25 @@ use uuid::Uuid;
 // ── Shared domain types for proxy-config & proxy-store ──
 
 /// Wrapper type for session identifiers.
+/// Must match `[A-Za-z0-9_-]{1,128}` to prevent path traversal and injection.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
 impl SessionId {
-    pub fn new(id: String) -> Self { Self(id) }
+    /// Validate and create a SessionId from untrusted input.
+    pub fn new(id: String) -> Result<Self, String> {
+        if id.is_empty() || id.len() > 128 {
+            return Err(format!("session id length must be 1-128, got {}", id.len()));
+        }
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("session id contains invalid characters: '{}'", id));
+        }
+        Ok(Self(id))
+    }
+
+    /// Create a SessionId from a trusted source (database, internal).
+    pub fn from_trusted(id: String) -> Self { Self(id) }
+
     pub fn as_str(&self) -> &str { &self.0 }
 }
 
@@ -18,10 +32,6 @@ impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
-}
-
-impl From<String> for SessionId {
-    fn from(s: String) -> Self { Self(s) }
 }
 
 /// Wrapper type for task identifiers (ULID-based).

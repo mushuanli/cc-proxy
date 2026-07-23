@@ -115,7 +115,12 @@ pub async fn list(
 ) -> impl IntoResponse {
     match q.session_id {
         Some(ref id) => {
-            let sid = SessionId::new(id.clone());
+            let sid = match SessionId::new(id.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Json(json!({"error": e})).into_response();
+                }
+            };
             match state.store.list_tasks(&sid, None) {
                 Ok(tasks) => {
                     let items: Vec<Value> = tasks

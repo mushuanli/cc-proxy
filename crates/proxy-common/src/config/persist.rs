@@ -39,7 +39,14 @@ pub async fn persist_config(path: &Path, config: &AppConfig) -> ConfigResult<()>
     doc.remove("api_target");
 
     let serialized = doc.to_string();
-    tokio::fs::write(path, &serialized).await?;
+
+    // Atomic write: write to tmp file, sync, then rename
+    let tmp_path = path.with_extension("toml.tmp");
+    tokio::fs::write(&tmp_path, &serialized).await?;
+    let f = tokio::fs::File::open(&tmp_path).await?;
+    f.sync_all().await?;
+    drop(f);
+    tokio::fs::rename(&tmp_path, path).await?;
 
     Ok(())
 }

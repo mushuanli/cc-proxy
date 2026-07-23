@@ -264,7 +264,7 @@ pub fn rename_session(
 fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     let archive_dirty: i32 = row.get("archive_dirty")?;
     Ok(Session {
-        id: SessionId::new(row.get::<_, String>("id")?),
+        id: SessionId::from_trusted(row.get::<_, String>("id")?),
         client_type: read_client_type(row)?,
         client_session_id: row.get::<_, Option<String>>("client_session_id")?,
         name: row.get::<_, Option<String>>("name")?,
@@ -300,7 +300,7 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
 fn row_to_session_list_item(row: &rusqlite::Row) -> rusqlite::Result<SessionListItem> {
     let archive_dirty: i32 = row.get("archive_dirty")?;
     Ok(SessionListItem {
-        id: SessionId::new(row.get::<_, String>("id")?),
+        id: SessionId::from_trusted(row.get::<_, String>("id")?),
         client_type: read_client_type(row)?,
         client_session_id: row.get("client_session_id")?,
         name: row.get("name")?,
