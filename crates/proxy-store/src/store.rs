@@ -8,8 +8,8 @@ use crate::command::{RunCommand, RunResult};
 use crate::db::{self, connection, migration};
 use crate::error::StoreResult;
 use crate::models::{
-    ArchiveInfo, ArchiveOptions, NewTask, Session, SessionFilter, SessionListItem, Task,
-    TaskListItem, TimeRange,
+    ArchiveInfo, ArchiveOptions, ArchiveSearchResult, NewTask, Session, SessionFilter,
+    SessionListItem, Task, TaskListItem, TimeRange,
 };
 use crate::summary::analyzer::SessionSummary;
 
@@ -247,6 +247,37 @@ impl ProxyStore {
     /// List archive files on disk.
     pub fn list_archives(&self, filter: Option<&str>) -> StoreResult<Vec<ArchiveInfo>> {
         self.inner.archive.list_archives(filter)
+    }
+
+    /// Read the raw content of an archive YAML file.
+    pub fn read_archive_file(&self, filename: &str) -> StoreResult<String> {
+        self.inner.archive.read_file(filename)
+    }
+
+    /// Full-text search across archive YAML files.
+    pub fn search_archives(
+        &self,
+        query: &str,
+        role_filter: Option<&str>,
+    ) -> StoreResult<Vec<ArchiveSearchResult>> {
+        self.inner.archive.search(query, role_filter)
+    }
+
+    /// Rename a session in both the DB and the archive YAML file.
+    pub fn rename_archive_session(
+        &self,
+        session_id: &SessionId,
+        new_name: Option<&str>,
+    ) -> StoreResult<()> {
+        let conn = self.inner.conn.lock().unwrap();
+        self.inner
+            .archive
+            .rename_session(&conn, session_id, new_name)
+    }
+
+    /// Get the archive directory path.
+    pub fn archive_dir(&self) -> &PathBuf {
+        self.inner.archive.archive_dir()
     }
 
     // ── Summary ──

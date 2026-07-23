@@ -602,8 +602,31 @@ pub async fn flush(
 }
 
 pub async fn flush_all(
+    State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    Json(json!({"ok": true, "message": "not implemented"})).into_response()
+    let config = state.config.get().await;
+    let options = proxy_store::ArchiveOptions {
+        task_retention_hours: config.proxy.request_retention_hours,
+        force: true,
+    };
+
+    match state.store.archive(None, options) {
+        Ok(results) => {
+            let flushed: Vec<String> = results
+                .iter()
+                .map(|a| a.session_id.as_str().to_string())
+                .collect();
+            let count = flushed.len();
+            tracing::info!("[api] flush_all: {} sessions exported", count);
+            let errors: Vec<String> = Vec::new();
+            Json(json!({"flushed": flushed, "errors": errors})).into_response()
+        }
+        Err(e) => {
+            tracing::error!("[api] flush_all failed: {}", e);
+            let flushed: Vec<String> = Vec::new();
+            Json(json!({"flushed": flushed, "errors": [e.to_string()]})).into_response()
+        }
+    }
 }
 
 // ── Cleanup ──

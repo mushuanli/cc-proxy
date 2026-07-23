@@ -227,6 +227,26 @@ pub struct TimeRange {
     pub to: Option<DateTime<Utc>>,
 }
 
+/// A search result from archive file content search.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchiveSearchResult {
+    pub file: String,
+    pub name: Option<String>,
+    pub last_active_at: Option<String>,
+    pub size: u64,
+    pub snippets: Vec<ArchiveSnippet>,
+    pub match_count: usize,
+    pub role_filter: Option<String>,
+    pub keywords: Vec<String>,
+}
+
+/// A matched text snippet from archive search.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchiveSnippet {
+    pub text: String,
+    pub role: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ArchiveOptions {
     pub task_retention_hours: u32,
