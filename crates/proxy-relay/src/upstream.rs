@@ -405,6 +405,153 @@ pub async fn handle_streaming_response(
     }
 }
 
+/// Streaming response with tee: chunks forwarded to client immediately,
+/// metadata collected in background for store recording.
+pub struct StreamingResponse {
+    pub status_code: u16,
+    pub response_headers: HeaderMap,
+    pub body: axum::body::Body,
+    pub metadata: tokio::sync::oneshot::Receiver<UpstreamResponse>,
+}
+
+/// Handle a streaming response by teeing chunks:
+/// - Forward each chunk to the client via mpsc → Body::from_stream()
+/// - Collect all chunks for SSE parsing and recording
+/// - Send parsed metadata via oneshot when complete
+pub fn stream_upstream_response(
+    response: reqwest::Response,
+    start: Instant,
+    protocol: ApiProtocol,
+) -> StreamingResponse {
+    use futures::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let status_code = response.status().as_u16();
+    let response_headers = response.headers().clone();
+    let resp_headers_for_return = response_headers.clone();
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+    let (meta_tx, meta_rx) = tokio::sync::oneshot::channel::<UpstreamResponse>();
+    let body = axum::body::Body::from_stream(
+        ReceiverStream::new(chunk_rx).map(Result::<Bytes, axum::Error>::Ok),
+    );
+
+    tokio::spawn(async move {
+        let mut sse_events = Vec::new();
+        let mut content_text = String::new();
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+        let mut cache_creation_tokens: u32 = 0;
+        let mut cache_read_tokens: u32 = 0;
+        let mut stop_reason: Option<String> = None;
+        let mut message_id: Option<String> = None;
+        let mut model: Option<String> = None;
+        let mut ttft_ms: Option<u64> = None;
+        let mut error: Option<String> = None;
+        let mut raw_body = Vec::new();
+        let mut normalized = NormalizedResponse::default();
+        let mut parser = SseParser::new();
+        let mut byte_stream = response.bytes_stream();
+
+        loop {
+            match byte_stream.next().await {
+                Some(Ok(chunk)) => {
+                    raw_body.extend_from_slice(&chunk);
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(start.elapsed().as_millis() as u64);
+                    }
+                    // Forward to client; stop if client disconnected
+                    if chunk_tx.send(chunk.clone()).await.is_err() {
+                        error = Some("client disconnected".to_string());
+                        break;
+                    }
+                    let events = parser.feed(&chunk);
+                    for ev in &events {
+                        sse_events.push(ev.clone());
+                        if let Some(data_str) = &ev.data {
+                            if let Some(parsed) = parser.parse_message_data(data_str) {
+                                if protocol == ApiProtocol::Codex {
+                                    parse_codex_stream_event(
+                                        &parsed, &mut normalized, &mut input_tokens,
+                                        &mut output_tokens, &mut cache_read_tokens,
+                                        &mut message_id, &mut model,
+                                    );
+                                }
+                                match parser.event_kind(&parsed) {
+                                    Some("message_start") => {
+                                        model = parser.model_from_start(&parsed).map(String::from);
+                                        message_id = parser.message_id(&parsed).map(String::from);
+                                        input_tokens = parser.input_tokens_from_start(&parsed).unwrap_or(input_tokens);
+                                        cache_creation_tokens = parser.cache_creation_tokens_from_start(&parsed).unwrap_or(cache_creation_tokens);
+                                        cache_read_tokens = parser.cache_read_tokens_from_start(&parsed).unwrap_or(cache_read_tokens);
+                                    }
+                                    Some("message_delta") => {
+                                        if let Some(value) = parser.output_tokens_from_delta(&parsed) {
+                                            output_tokens = value;
+                                        }
+                                        if let Some(reason) = parser.stop_reason(&parsed) {
+                                            stop_reason = Some(reason.to_string());
+                                        }
+                                    }
+                                    Some("content_block_delta") => {
+                                        if let Some(text) = parser.delta_text(&parsed) {
+                                            content_text.push_str(text);
+                                            normalized.text.push(text.to_string());
+                                        }
+                                    }
+                                    Some("error") => {
+                                        if let Some(err) = parsed.get("error") {
+                                            error = err.get("message").and_then(|v| v.as_str()).map(String::from);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    error = Some(format!("Stream error: {}", e));
+                    break;
+                }
+                None => break,
+            }
+        }
+        drop(chunk_tx);
+
+        let meta = UpstreamResponse {
+            status_code,
+            response_headers,
+            content_text: if content_text.is_empty() {
+                let text = normalized.text.join("");
+                (!text.is_empty()).then_some(text)
+            } else {
+                Some(content_text)
+            },
+            raw_body: Bytes::from(raw_body),
+            normalized,
+            sse_events,
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+            stop_reason,
+            message_id,
+            model,
+            duration_ms: start.elapsed().as_millis() as u64,
+            ttft_ms,
+            error,
+        };
+        let _ = meta_tx.send(meta);
+    });
+
+    StreamingResponse {
+        status_code,
+        response_headers: resp_headers_for_return,
+        body,
+        metadata: meta_rx,
+    }
+}
+
 /// Parse non-streaming response.
 pub async fn handle_non_streaming_response(
     response: reqwest::Response,
