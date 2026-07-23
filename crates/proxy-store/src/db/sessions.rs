@@ -88,6 +88,7 @@ pub fn allocate_sequence(conn: &Connection, session_id: &SessionId) -> StoreResu
 }
 
 /// Update session aggregates after a task write.
+#[allow(clippy::too_many_arguments)]
 pub fn update_aggregates(
     conn: &Connection,
     session_id: &SessionId,
@@ -143,7 +144,12 @@ pub fn update_archive_checkpoint(
             last_archived_sequence = ?4,
             archive_dirty = 0
          WHERE id = ?1 AND last_archived_sequence <= ?4",
-        params![session_id.as_str(), archived_at, task_id, sequence_no as i64],
+        params![
+            session_id.as_str(),
+            archived_at,
+            task_id,
+            sequence_no as i64
+        ],
     )?;
     Ok(())
 }
@@ -212,17 +218,11 @@ pub fn list_sessions(
     if let Some(ref tr) = filter.time_range {
         if let Some(from) = tr.from {
             param_values.push(Box::new(from.timestamp_millis()));
-            sql.push_str(&format!(
-                " AND last_activity_at >= ?{}",
-                param_values.len()
-            ));
+            sql.push_str(&format!(" AND last_activity_at >= ?{}", param_values.len()));
         }
         if let Some(to) = tr.to {
             param_values.push(Box::new(to.timestamp_millis()));
-            sql.push_str(&format!(
-                " AND last_activity_at <= ?{}",
-                param_values.len()
-            ));
+            sql.push_str(&format!(" AND last_activity_at <= ?{}", param_values.len()));
         }
     }
 
@@ -237,7 +237,8 @@ pub fn list_sessions(
         sql.push_str(&format!(" OFFSET ?{}", param_values.len()));
     }
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), row_to_session_list_item)?;
 

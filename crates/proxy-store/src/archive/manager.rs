@@ -32,11 +32,9 @@ impl ArchiveManager {
         session_id: &SessionId,
         options: &ArchiveOptions,
     ) -> StoreResult<ArchiveInfo> {
-        let session = sessions::get_session(conn, session_id)?
-            .ok_or_else(|| crate::error::StoreError::NotFound(format!(
-                "session '{}' not found",
-                session_id
-            )))?;
+        let session = sessions::get_session(conn, session_id)?.ok_or_else(|| {
+            crate::error::StoreError::NotFound(format!("session '{}' not found", session_id))
+        })?;
 
         if !options.force && !session.archive_dirty {
             return Ok(ArchiveInfo {
@@ -55,20 +53,14 @@ impl ArchiveManager {
         let yaml = serde_yaml::to_string(&doc)?;
 
         let file_path = self.session_archive_path(session_id);
-        file::atomic_write(
-            &std::path::PathBuf::from(&file_path),
-            &yaml,
-        )?;
+        file::atomic_write(&std::path::PathBuf::from(&file_path), &yaml)?;
 
         let now_ms = chrono::Utc::now().timestamp_millis();
         let checkpoint_task_id = latest_task
             .as_ref()
             .map(|t| t.id.as_str().to_string())
             .unwrap_or_default();
-        let checkpoint_seq = latest_task
-            .as_ref()
-            .map(|t| t.sequence_no)
-            .unwrap_or(0);
+        let checkpoint_seq = latest_task.as_ref().map(|t| t.sequence_no).unwrap_or(0);
 
         sessions::update_archive_checkpoint(
             conn,
@@ -81,12 +73,7 @@ impl ArchiveManager {
         // Clean up old tasks past retention
         if options.task_retention_hours > 0 {
             let cutoff_ms = now_ms - (options.task_retention_hours as i64 * 3600 * 1000);
-            tasks::cleanup_old_tasks(
-                conn,
-                session_id,
-                checkpoint_seq,
-                cutoff_ms,
-            )?;
+            tasks::cleanup_old_tasks(conn, session_id, checkpoint_seq, cutoff_ms)?;
         }
 
         Ok(ArchiveInfo {
@@ -112,10 +99,7 @@ impl ArchiveManager {
                 continue;
             }
 
-            let file_name = path
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let file_name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("");
 
             if let Some(ref f) = filter {
                 if !file_name.contains(f) {
@@ -152,7 +136,11 @@ impl ArchiveManager {
     }
 
     /// Full-text search across archive YAML files.
-    pub fn search(&self, query: &str, role_filter: Option<&str>) -> StoreResult<Vec<ArchiveSearchResult>> {
+    pub fn search(
+        &self,
+        query: &str,
+        role_filter: Option<&str>,
+    ) -> StoreResult<Vec<ArchiveSearchResult>> {
         let mut results = Vec::new();
         if !self.archive_dir.is_dir() {
             return Ok(results);
@@ -224,7 +212,7 @@ impl ArchiveManager {
                     .map(|r| r.trim().trim_matches('"').trim_matches('\'').to_string());
 
                 // Apply role filter
-                if let Some(ref rf) = role_filter {
+                if let Some(rf) = role_filter {
                     if role.as_deref() != Some(rf) {
                         continue;
                     }
@@ -273,9 +261,10 @@ impl ArchiveManager {
     ) -> StoreResult<()> {
         // Defense-in-depth: validate session id before file system operations
         if !file::is_safe_filename(session_id) {
-            return Err(crate::error::StoreError::InvalidArgument(
-                format!("unsafe session id for file operation: {}", session_id),
-            ));
+            return Err(crate::error::StoreError::InvalidArgument(format!(
+                "unsafe session id for file operation: {}",
+                session_id
+            )));
         }
         // Update in database if the session still exists there
         let db_updated = sessions::rename_session(conn, session_id, new_name).unwrap_or(false);
@@ -321,10 +310,8 @@ impl ArchiveManager {
                                 found_session = true;
                             }
                             true
-                        } else if line.starts_with("  name:") {
-                            false
                         } else {
-                            true
+                            !line.starts_with("  name:")
                         }
                     })
                     .collect();

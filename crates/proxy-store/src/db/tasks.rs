@@ -17,19 +17,19 @@ pub fn insert_task(
     let response_body_json = task
         .response_body
         .as_ref()
-        .map(|r| serde_json::to_string(r))
+        .map(serde_json::to_string)
         .transpose()?;
 
     let request_headers_json = task
         .request_headers
         .as_ref()
-        .map(|h| serde_json::to_string(h))
+        .map(serde_json::to_string)
         .transpose()?;
 
     let response_headers_json = task
         .response_headers
         .as_ref()
-        .map(|h| serde_json::to_string(h))
+        .map(serde_json::to_string)
         .transpose()?;
 
     let metadata_json = serde_json::to_string(&task.metadata)?;
@@ -98,8 +98,14 @@ pub fn insert_task(
             task.timing.ttft_ms,
             task.timing.stop_reason,
             task.timing.upstream_message_id,
-            task.error.as_ref().map(|e| e.error_type.as_str()).unwrap_or(""),
-            task.error.as_ref().map(|e| e.error_message.as_str()).unwrap_or(""),
+            task.error
+                .as_ref()
+                .map(|e| e.error_type.as_str())
+                .unwrap_or(""),
+            task.error
+                .as_ref()
+                .map(|e| e.error_message.as_str())
+                .unwrap_or(""),
             task.billing.rates.input_microusd,
             task.billing.rates.output_microusd,
             task.billing.rates.cache_write_microusd,
@@ -159,7 +165,7 @@ pub fn list_tasks(
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     params.push(Box::new(session_id.as_str().to_string()));
 
-    if let Some(ref tr) = time_range {
+    if let Some(tr) = time_range {
         if let Some(from) = tr.from {
             params.push(Box::new(from.timestamp_millis()));
             sql.push_str(&format!(" AND started_at >= ?{}", params.len()));
@@ -172,8 +178,7 @@ pub fn list_tasks(
 
     sql.push_str(" ORDER BY sequence_no DESC");
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), row_to_task_list_item)?;
 
@@ -185,11 +190,7 @@ pub fn list_tasks(
 }
 
 /// Update task summary_json cache.
-pub fn update_summary(
-    conn: &Connection,
-    id: &TaskId,
-    summary_json: &str,
-) -> StoreResult<()> {
+pub fn update_summary(conn: &Connection, id: &TaskId, summary_json: &str) -> StoreResult<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     conn.execute(
         "UPDATE tasks SET summary_json = ?2, summary_created_at = ?3 WHERE id = ?1",
@@ -245,15 +246,19 @@ pub fn cleanup_old_tasks(
            AND ended_at IS NOT NULL
            AND ended_at < ?3
            AND status != 'recording'",
-        params![session_id.as_str(), last_archived_sequence as i64, retention_cutoff_ms],
+        params![
+            session_id.as_str(),
+            last_archived_sequence as i64,
+            retention_cutoff_ms
+        ],
     )?;
     Ok(deleted)
 }
 
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let response_body_str: Option<String> = row.get("response_body")?;
-    let response_body = response_body_str
-        .and_then(|s| serde_json::from_str::<NormalizedResponse>(&s).ok());
+    let response_body =
+        response_body_str.and_then(|s| serde_json::from_str::<NormalizedResponse>(&s).ok());
 
     Ok(Task {
         id: TaskId::new(row.get::<_, String>("id")?),

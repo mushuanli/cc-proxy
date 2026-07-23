@@ -19,7 +19,7 @@ pub async fn persist_config(path: &Path, config: &AppConfig) -> ConfigResult<()>
     } else {
         content
             .parse()
-            .map_err(|e| ConfigError::TomlEdit(toml_edit::TomlError::from(e)))?
+            .map_err(ConfigError::TomlEdit)?
     };
 
     // Write model_pricing array
@@ -84,12 +84,18 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
     let proxy = &config.proxy;
     let mut tbl = toml_edit::Table::new();
 
-    tbl.insert("active_upstream", toml_edit::value(proxy.active_upstream.as_str()));
+    tbl.insert(
+        "active_upstream",
+        toml_edit::value(proxy.active_upstream.as_str()),
+    );
     tbl.insert(
         "active_proxy_upstream",
         toml_edit::value(proxy.active_proxy_upstream.as_str()),
     );
-    tbl.insert("active_effort", toml_edit::value(proxy.active_effort.as_str()));
+    tbl.insert(
+        "active_effort",
+        toml_edit::value(proxy.active_effort.as_str()),
+    );
     if let Some(ref hp) = proxy.http_proxy {
         tbl.insert("http_proxy", toml_edit::value(hp.as_str()));
     }
@@ -160,7 +166,10 @@ fn tier_rule_to_item(rule: &TierRule) -> toml_edit::Item {
     for k in &rule.keywords {
         kw_arr.push(k.as_str());
     }
-    tbl.insert("keywords", toml_edit::value(toml_edit::Value::Array(kw_arr)));
+    tbl.insert(
+        "keywords",
+        toml_edit::value(toml_edit::Value::Array(kw_arr)),
+    );
     tbl.insert("provider", toml_edit::value(rule.provider.as_str()));
     tbl.insert("model", toml_edit::value(rule.model.as_str()));
     toml_edit::Item::Table(tbl)
@@ -172,8 +181,14 @@ fn write_server_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         "listen_address",
         toml_edit::value(config.server.listen_address.as_str()),
     );
-    tbl.insert("http_port", toml_edit::value(config.server.http_port as i64));
-    tbl.insert("proxy_port", toml_edit::value(config.server.proxy_port as i64));
+    tbl.insert(
+        "http_port",
+        toml_edit::value(config.server.http_port as i64),
+    );
+    tbl.insert(
+        "proxy_port",
+        toml_edit::value(config.server.proxy_port as i64),
+    );
     tbl.insert(
         "mcp_proxy_port",
         toml_edit::value(config.server.mcp_proxy_port as i64),
@@ -199,7 +214,7 @@ pub async fn persist_model_pricing(path: &Path, pricing: &[ModelPricing]) -> Con
     } else {
         content
             .parse()
-            .map_err(|e| ConfigError::TomlEdit(toml_edit::TomlError::from(e)))?
+            .map_err(ConfigError::TomlEdit)?
     };
 
     write_model_pricing(&mut doc, pricing);
@@ -220,7 +235,7 @@ pub async fn persist_providers(path: &Path, providers: &[Provider]) -> ConfigRes
     } else {
         content
             .parse()
-            .map_err(|e| ConfigError::TomlEdit(toml_edit::TomlError::from(e)))?
+            .map_err(ConfigError::TomlEdit)?
     };
 
     let mut providers_arr = toml_edit::ArrayOfTables::new();

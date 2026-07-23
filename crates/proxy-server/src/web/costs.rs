@@ -68,14 +68,16 @@ fn aggregate_costs(rows: &[DailyUsageRow], from: &str, to: &str) -> CostData {
         entry.request_count += row.task_count;
 
         // by_provider
-        let entry = provider_map.entry(row.provider.clone()).or_insert(ProviderCost {
-            provider: row.provider.clone(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            request_count: 0,
-        });
+        let entry = provider_map
+            .entry(row.provider.clone())
+            .or_insert(ProviderCost {
+                provider: row.provider.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                request_count: 0,
+            });
         entry.input_tokens += row.input_tokens;
         entry.output_tokens += row.output_tokens;
         entry.cache_creation_tokens += row.cache_creation_tokens;
@@ -83,14 +85,16 @@ fn aggregate_costs(rows: &[DailyUsageRow], from: &str, to: &str) -> CostData {
         entry.request_count += row.task_count;
 
         // by_session
-        let entry = session_map.entry(row.session_id.clone()).or_insert(SessionAgg {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            request_count: 0,
-            models: Vec::new(),
-        });
+        let entry = session_map
+            .entry(row.session_id.clone())
+            .or_insert(SessionAgg {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                request_count: 0,
+                models: Vec::new(),
+            });
         entry.input_tokens += row.input_tokens;
         entry.output_tokens += row.output_tokens;
         entry.cache_creation_tokens += row.cache_creation_tokens;
@@ -119,10 +123,10 @@ fn aggregate_costs(rows: &[DailyUsageRow], from: &str, to: &str) -> CostData {
     }
 
     let mut by_model: Vec<ModelCost> = model_map.into_values().collect();
-    by_model.sort_by(|a, b| b.input_tokens.cmp(&a.input_tokens));
+    by_model.sort_by_key(|b| std::cmp::Reverse(b.input_tokens));
 
     let mut by_provider: Vec<ProviderCost> = provider_map.into_values().collect();
-    by_provider.sort_by(|a, b| b.input_tokens.cmp(&a.input_tokens));
+    by_provider.sort_by_key(|b| std::cmp::Reverse(b.input_tokens));
 
     let by_session: Vec<SessionCost> = session_map
         .into_iter()

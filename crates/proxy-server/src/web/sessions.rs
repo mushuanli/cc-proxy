@@ -227,6 +227,7 @@ pub async fn export_(
 }
 
 /// Parse a SessionId from a path parameter, returning a 400 error on invalid input.
+#[allow(clippy::result_large_err)]
 fn parse_session_id(id: String) -> Result<proxy_common::SessionId, axum::response::Response> {
     proxy_common::SessionId::new(id).map_err(|e| {
         axum::response::Response::builder()

@@ -16,16 +16,23 @@ impl SessionId {
         if id.is_empty() || id.len() > 128 {
             return Err(format!("session id length must be 1-128, got {}", id.len()));
         }
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return Err(format!("session id contains invalid characters: '{}'", id));
         }
         Ok(Self(id))
     }
 
     /// Create a SessionId from a trusted source (database, internal).
-    pub fn from_trusted(id: String) -> Self { Self(id) }
+    pub fn from_trusted(id: String) -> Self {
+        Self(id)
+    }
 
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for SessionId {
@@ -39,9 +46,15 @@ impl std::fmt::Display for SessionId {
 pub struct TaskId(pub String);
 
 impl TaskId {
-    pub fn new(id: String) -> Self { Self(id) }
-    pub fn generate() -> Self { Self(ulid::Ulid::new().to_string()) }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn new(id: String) -> Self {
+        Self(id)
+    }
+    pub fn generate() -> Self {
+        Self(ulid::Ulid::new().to_string())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for TaskId {
@@ -63,23 +76,12 @@ pub struct TaskUsage {
 ///
 /// All rates are stored as integers (micro-USD) to avoid floating-point drift.
 /// Example: $3/1M tokens → 3_000_000 micro-USD/1M tokens.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PriceRates {
     pub input_microusd: i64,
     pub output_microusd: i64,
     pub cache_write_microusd: i64,
     pub cache_read_microusd: i64,
-}
-
-impl Default for PriceRates {
-    fn default() -> Self {
-        Self {
-            input_microusd: 0,
-            output_microusd: 0,
-            cache_write_microusd: 0,
-            cache_read_microusd: 0,
-        }
-    }
 }
 
 /// A snapshot of billing parameters at the time a task is created.
@@ -160,8 +162,11 @@ impl TaskStatus {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for TaskStatus {
-    fn default() -> Self { Self::Recording }
+    fn default() -> Self {
+        Self::Recording
+    }
 }
 
 /// Client type identifier.
@@ -193,8 +198,11 @@ impl ClientType {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for ClientType {
-    fn default() -> Self { Self::ClaudeCode }
+    fn default() -> Self {
+        Self::ClaudeCode
+    }
 }
 
 impl TryFrom<&str> for ClientType {
@@ -241,7 +249,7 @@ pub struct ProxiedRequest {
     pub request_headers: HashMap<String, String>,
     pub request_body: Option<String>,
     pub model: Option<String>,
-    pub provider: Option<String>,   // routing decision writes the provider name here
+    pub provider: Option<String>, // routing decision writes the provider name here
     pub is_streaming: bool,
     pub max_tokens: Option<u32>,
     // Response
@@ -385,9 +393,9 @@ pub struct Session {
 
 impl Session {
     pub fn new(label: Option<String>) -> Self {
-        let label = label.filter(|l| !l.is_empty()).unwrap_or_else(|| {
-            Utc::now().format("Recording %Y-%m-%d %H:%M").to_string()
-        });
+        let label = label
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| Utc::now().format("Recording %Y-%m-%d %H:%M").to_string());
         Self {
             id: short_id(),
             label: Some(label),
@@ -451,13 +459,18 @@ pub struct UpstreamInfo {
 #[serde(tag = "type", content = "payload")]
 pub enum WsMessage {
     NewRequest(ProxiedRequest),
-    SseEvent { request_id: String, event: SseEvent },
+    SseEvent {
+        request_id: String,
+        event: SseEvent,
+    },
     RequestUpdated(ProxiedRequest),
     NewHook(HookEvent),
     NewMcp(ProxiedRequest),
     Cleared,
     McpCleared,
-    McpConfigChanged { destination_url: Option<String> },
+    McpConfigChanged {
+        destination_url: Option<String>,
+    },
     UpstreamChanged {
         active_upstream: String,
         active_proxy_upstream: String,
@@ -467,13 +480,23 @@ pub enum WsMessage {
         model_pricing: Vec<crate::config::ModelPricing>,
         http_proxy: Option<String>,
     },
-    History { requests: Vec<ProxiedRequest> },
-    HookHistory { events: Vec<HookEvent> },
-    McpHistory { requests: Vec<ProxiedRequest> },
+    History {
+        requests: Vec<ProxiedRequest>,
+    },
+    HookHistory {
+        events: Vec<HookEvent>,
+    },
+    McpHistory {
+        requests: Vec<ProxiedRequest>,
+    },
     SessionStarted(Session),
     SessionStopped(Session),
-    SessionUpdated { request_id: String },
-    TeeStatusChanged { enabled: bool },
+    SessionUpdated {
+        request_id: String,
+    },
+    TeeStatusChanged {
+        enabled: bool,
+    },
     /// Real-time cost stats pushed after each task write.
     /// Frontend uses this to update the inspector toolbar cost display
     /// without making a separate GET /api/costs call.

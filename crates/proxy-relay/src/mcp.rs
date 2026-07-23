@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::State;
@@ -26,11 +27,7 @@ pub struct McpRelay {
 }
 
 impl McpRelay {
-    pub fn new(
-        store: ProxyStore,
-        events: EventBus,
-        client: reqwest::Client,
-    ) -> Self {
+    pub fn new(store: ProxyStore, events: EventBus, client: reqwest::Client) -> Self {
         Self {
             store,
             events,
@@ -41,18 +38,14 @@ impl McpRelay {
 
     /// Return an axum Router for MCP proxying (mount on :9999).
     pub fn build_router(self) -> axum::Router {
-        axum::Router::new()
-            .fallback(mcp_handler)
-            .with_state(self)
+        axum::Router::new().fallback(mcp_handler).with_state(self)
     }
 
     /// Set the MCP forwarding destination.
     pub async fn set_destination(&self, url: Option<String>) {
         let destination_url = url.clone();
         *self.destination.write().await = url;
-        let msg = WsMessage::McpConfigChanged {
-            destination_url,
-        };
+        let msg = WsMessage::McpConfigChanged { destination_url };
         self.events.publish(msg);
     }
 
@@ -113,8 +106,8 @@ async fn mcp_handler(
         }
     };
 
-    match relay.http_client.execute(upstream_req).await {
-        Ok(resp) => {
+    match tokio::time::timeout(Duration::from_secs(120), relay.http_client.execute(upstream_req)).await {
+        Ok(Ok(resp)) => {
             let status = resp.status();
             let resp_headers = resp.headers().clone();
 
@@ -154,7 +147,7 @@ async fn mcp_handler(
                 }
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let msg = WsMessage::NewMcp(proxy_common::models::ProxiedRequest {
                 error: Some(format!("MCP upstream error: {}", e)),
                 ..Default::default()
@@ -165,6 +158,22 @@ async fn mcp_handler(
                 Json(json!({
                     "jsonrpc": "2.0",
                     "error": {"code": -32603, "message": format!("Upstream error: {}", e)},
+                    "id": null
+                })),
+            )
+                .into_response()
+        }
+        Err(_elapsed) => {
+            let msg = WsMessage::NewMcp(proxy_common::models::ProxiedRequest {
+                error: Some("MCP request timed out after 120s".to_string()),
+                ..Default::default()
+            });
+            relay.events.publish(msg);
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": "MCP request timed out"},
                     "id": null
                 })),
             )

@@ -262,7 +262,7 @@ pub fn extract_user_text(msg: &Value) -> String {
     }
 }
 
-fn get_tool_uses<'a>(blocks: &'a [Value]) -> Vec<&'a Value> {
+fn get_tool_uses(blocks: &[Value]) -> Vec<&Value> {
     blocks
         .iter()
         .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
@@ -385,12 +385,12 @@ fn describe_tool(name: &str, input: &Value) -> String {
         "Grep" => {
             let pattern = str_field(input, "pattern");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            format!("Search \"{}\" in {}", truncate(&pattern, 40), path)
+            format!("Search \"{}\" in {}", truncate(pattern, 40), path)
         }
         "Glob" => {
             let pattern = str_field(input, "pattern");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            format!("Find files \"{}\" in {}", truncate(&pattern, 40), path)
+            format!("Find files \"{}\" in {}", truncate(pattern, 40), path)
         }
         "Bash" => {
             let desc = input.get("description").and_then(|v| v.as_str());
@@ -411,7 +411,7 @@ fn describe_tool(name: &str, input: &Value) -> String {
         }
         "TaskCreate" => format!(
             "Create task: {}",
-            truncate(&str_field(input, "subject"), 60)
+            truncate(str_field(input, "subject"), 60)
         ),
         "TaskUpdate" => {
             let id = str_field(input, "taskId");
@@ -466,14 +466,12 @@ fn str_field<'a>(input: &'a Value, key: &str) -> &'a str {
 fn truncate(s: &str, max_len: usize) -> String {
     let s = s.trim();
     // Operate on char boundaries to avoid panic
-    let mut end = 0;
-    let mut count = 0;
-    for ch in s.chars() {
+    let mut byte_pos = 0;
+    for (count, ch) in s.chars().enumerate() {
         if count >= max_len {
-            return format!("{}…", &s[..end]);
+            return format!("{}…", &s[..byte_pos]);
         }
-        end += ch.len_utf8();
-        count += 1;
+        byte_pos += ch.len_utf8();
     }
     s.to_string()
 }

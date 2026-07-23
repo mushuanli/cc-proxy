@@ -87,7 +87,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 match msg {
                     Ok(ws_msg) => {
                         if let Ok(json) = serde_json::to_string(&ws_msg) {
-                            if sender.send(Message::Text(json.into())).await.is_err() {
+                            if sender.send(Message::Text(json)).await.is_err() {
                                 break;
                             }
                         }
@@ -119,11 +119,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let _ = sender.send(Message::Close(None)).await;
 }
 
-async fn send_json<T: serde::Serialize>(
-    sender: &mut SplitSink<WebSocket, Message>,
-    msg: &T,
-) {
+async fn send_json<T: serde::Serialize>(sender: &mut SplitSink<WebSocket, Message>, msg: &T) {
     if let Ok(json) = serde_json::to_string(msg) {
-        let _ = sender.send(Message::Text(json.into())).await;
+        let _ = sender.send(Message::Text(json)).await;
     }
 }
