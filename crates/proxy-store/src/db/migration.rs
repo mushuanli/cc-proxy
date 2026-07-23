@@ -8,6 +8,7 @@ pub fn migrate(conn: &Connection) -> StoreResult<()> {
     conn.execute_batch(CREATE_TASKS)?;
     conn.execute_batch(CREATE_SESSION_DAILY_USAGE)?;
     migrate_v2_add_messages_count(conn)?;
+    migrate_v3_session_authority(conn)?;
     Ok(())
 }
 
@@ -19,6 +20,24 @@ fn migrate_v2_add_messages_count(conn: &Connection) -> StoreResult<()> {
     if !has_column {
         conn.execute_batch(
             "ALTER TABLE tasks ADD COLUMN messages_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
+}
+
+/// Migration v3: add session authority columns (ended_at, latest provider/model/upstream, priced count, duration).
+fn migrate_v3_session_authority(conn: &Connection) -> StoreResult<()> {
+    let has_column: bool = conn
+        .prepare("SELECT ended_at FROM sessions LIMIT 0")
+        .is_ok();
+    if !has_column {
+        conn.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN ended_at INTEGER;
+             ALTER TABLE sessions ADD COLUMN latest_provider TEXT;
+             ALTER TABLE sessions ADD COLUMN latest_model TEXT;
+             ALTER TABLE sessions ADD COLUMN latest_upstream TEXT;
+             ALTER TABLE sessions ADD COLUMN priced_task_count INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN total_duration_ms INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
     Ok(())
@@ -57,6 +76,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_archived_task_id       TEXT,
     last_archived_sequence      INTEGER NOT NULL DEFAULT 0,
     archive_dirty               INTEGER NOT NULL DEFAULT 1,
+
+    -- Session authority state (survives task cleanup)
+    ended_at                    INTEGER,
+    latest_provider             TEXT,
+    latest_model                TEXT,
+    latest_upstream             TEXT,
+    priced_task_count           INTEGER NOT NULL DEFAULT 0,
+    total_duration_ms           INTEGER NOT NULL DEFAULT 0,
 
     metadata_json               TEXT NOT NULL DEFAULT '{}',
 

@@ -99,6 +99,12 @@ pub fn update_aggregates(
     cache_read_tokens: u64,
     cost_microusd: i64,
     activity_at: i64,
+    provider: &str,
+    resolved_model: &str,
+    upstream: Option<&str>,
+    priced: bool,
+    duration_ms: i64,
+    ended_at: Option<i64>,
 ) -> StoreResult<()> {
     conn.execute(
         "UPDATE sessions SET
@@ -113,6 +119,12 @@ pub fn update_aggregates(
             total_cache_creation_tokens = total_cache_creation_tokens + ?6,
             total_cache_read_tokens = total_cache_read_tokens + ?7,
             total_cost_microusd = total_cost_microusd + ?8,
+            priced_task_count = priced_task_count + CASE WHEN ?9 THEN 1 ELSE 0 END,
+            total_duration_ms = total_duration_ms + ?10,
+            latest_provider = ?11,
+            latest_model = ?12,
+            latest_upstream = COALESCE(?13, latest_upstream),
+            ended_at = COALESCE(?14, ended_at),
             archive_dirty = 1
          WHERE id = ?1",
         params![
@@ -124,6 +136,12 @@ pub fn update_aggregates(
             cache_creation_tokens as i64,
             cache_read_tokens as i64,
             cost_microusd,
+            priced,
+            duration_ms,
+            provider,
+            resolved_model,
+            upstream,
+            ended_at,
         ],
     )?;
     Ok(())
@@ -290,6 +308,12 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
             .map(TaskId::new),
         last_archived_sequence: row.get::<_, i64>("last_archived_sequence")? as u64,
         archive_dirty: archive_dirty != 0,
+        ended_at: row.get("ended_at")?,
+        latest_provider: row.get("latest_provider")?,
+        latest_model: row.get("latest_model")?,
+        latest_upstream: row.get("latest_upstream")?,
+        priced_task_count: row.get::<_, i64>("priced_task_count")? as u64,
+        total_duration_ms: row.get("total_duration_ms")?,
         metadata: row
             .get::<_, String>("metadata_json")
             .ok()

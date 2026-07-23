@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use proxy_common::{BillingSnapshot, ClientType, NormalizedResponse, SessionId, TaskId, TaskStatus, TaskUsage};
+use proxy_common::{
+    BillingSnapshot, ClientType, NormalizedResponse, SessionId, TaskId, TaskStatus, TaskUsage,
+};
 use serde::{Deserialize, Serialize};
 
 /// A Session as stored in the database.
@@ -33,6 +35,14 @@ pub struct Session {
     pub last_archived_task_id: Option<TaskId>,
     pub last_archived_sequence: u64,
     pub archive_dirty: bool,
+
+    // Session authority state (survives task cleanup)
+    pub ended_at: Option<i64>,
+    pub latest_provider: Option<String>,
+    pub latest_model: Option<String>,
+    pub latest_upstream: Option<String>,
+    pub priced_task_count: u64,
+    pub total_duration_ms: i64,
 
     pub metadata: serde_json::Value,
 }

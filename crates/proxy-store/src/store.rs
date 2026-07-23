@@ -139,6 +139,8 @@ impl ProxyStore {
 
                 if inserted {
                     // Update session aggregates
+                    let priced = task.billing.pricing_model_id != "unknown";
+                    let duration_ms = task.timing.duration_ms.unwrap_or(0);
                     db::sessions::update_aggregates(
                         &conn,
                         session_id,
@@ -149,6 +151,12 @@ impl ProxyStore {
                         task.usage.cache_read_tokens,
                         cost_microusd,
                         task.started_at,
+                        &task.billing.provider,
+                        &task.billing.resolved_model,
+                        task.upstream.as_deref(),
+                        priced,
+                        duration_ms,
+                        task.ended_at,
                     )?;
 
                     // Upsert daily usage
