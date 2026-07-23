@@ -16,10 +16,7 @@ pub enum BillingError {
 ///
 /// Performs intermediate arithmetic in i128 to prevent overflow,
 /// then rounds half-up and narrows to i64.
-pub fn calculate_cost_microusd(
-    usage: &TaskUsage,
-    rates: &PriceRates,
-) -> Result<i64, BillingError> {
+pub fn calculate_cost_microusd(usage: &TaskUsage, rates: &PriceRates) -> Result<i64, BillingError> {
     let total = i128::from(usage.input_tokens) * i128::from(rates.input_microusd)
         + i128::from(usage.output_tokens) * i128::from(rates.output_microusd)
         + i128::from(usage.cache_creation_tokens) * i128::from(rates.cache_write_microusd)

@@ -44,11 +44,14 @@ fn archive_to_json(a: &proxy_store::ArchiveInfo) -> serde_json::Value {
     }
     // Fallback: use file modification time
     if last_active_at.is_none() {
-        last_active_at = path.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| {
-            let dur = t.duration_since(std::time::UNIX_EPOCH).ok()?;
-            chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0)
-                .map(|dt| dt.to_rfc3339())
-        });
+        last_active_at = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| {
+                let dur = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+                chrono::DateTime::from_timestamp(dur.as_secs() as i64, 0).map(|dt| dt.to_rfc3339())
+            });
     }
     json!({
         "file": file,
@@ -67,10 +70,7 @@ pub async fn list(
     let filter = q.get("q").map(|s| s.as_str());
     match state.store.list_archives(filter) {
         Ok(archives) => {
-            let items: Vec<serde_json::Value> = archives
-                .iter()
-                .map(archive_to_json)
-                .collect();
+            let items: Vec<serde_json::Value> = archives.iter().map(archive_to_json).collect();
             Json(json!(items)).into_response()
         }
         Err(e) => Json(json!({"error": e.to_string()})).into_response(),
@@ -86,10 +86,7 @@ pub async fn search(
         // No query → return all archives (same as list)
         match state.store.list_archives(None) {
             Ok(archives) => {
-                let items: Vec<serde_json::Value> = archives
-                    .iter()
-                    .map(archive_to_json)
-                    .collect();
+                let items: Vec<serde_json::Value> = archives.iter().map(archive_to_json).collect();
                 return Json(json!(items)).into_response();
             }
             Err(e) => return Json(json!({"error": e.to_string()})).into_response(),
@@ -108,12 +105,10 @@ pub async fn file(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     match state.store.read_archive_file(&name) {
-        Ok(content) => {
-            axum::response::Response::builder()
-                .header("content-type", "text/plain; charset=utf-8")
-                .body(axum::body::Body::from(content))
-                .unwrap()
-        }
+        Ok(content) => axum::response::Response::builder()
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(content))
+            .unwrap(),
         Err(e) => Json(json!({"error": e.to_string()})).into_response(),
     }
 }

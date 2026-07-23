@@ -57,9 +57,9 @@ impl ModelPricing {
         if self.id == name {
             return true;
         }
-        self.providers.values().any(|names| {
-            names.iter().any(|n| !n.is_empty() && n == name)
-        })
+        self.providers
+            .values()
+            .any(|names| names.iter().any(|n| !n.is_empty() && n == name))
     }
 
     /// Convert the f64 prices to integer PriceRates (micro-USD / 1M tokens).

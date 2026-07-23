@@ -44,8 +44,14 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .route("/api/session/:id/export", get(sessions::export_))
         .route("/api/session/:id/summary", get(sessions::summary))
         // Requests (Tasks)
-        .route("/api/requests", get(requests::list).delete(requests::delete_batch))
-        .route("/api/request/:id", get(requests::get).delete(requests::delete_one))
+        .route(
+            "/api/requests",
+            get(requests::list).delete(requests::delete_batch),
+        )
+        .route(
+            "/api/request/:id",
+            get(requests::get).delete(requests::delete_one),
+        )
         .route("/api/request/:id/summary", get(requests::summary))
         // Settings (config)
         .route(
@@ -56,7 +62,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             "/api/model-pricing/:id",
             put(settings::update_pricing).delete(settings::delete_pricing),
         )
-        .route("/api/providers", get(settings::list_providers).post(settings::add_provider))
+        .route(
+            "/api/providers",
+            get(settings::list_providers).post(settings::add_provider),
+        )
         .route(
             "/api/providers/:name",
             put(settings::update_provider).delete(settings::delete_provider),
@@ -69,18 +78,30 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             "/api/upstreams/:name",
             put(settings::update_upstream).delete(settings::delete_upstream),
         )
-        .route("/api/upstreams/:name/activate", post(settings::activate_upstream))
+        .route(
+            "/api/upstreams/:name/activate",
+            post(settings::activate_upstream),
+        )
         .route(
             "/api/upstreams/:name/activate-proxy",
             post(settings::activate_proxy_upstream),
         )
-        .route("/api/effort", get(settings::get_effort).put(settings::set_effort))
-        .route("/api/retention", get(settings::get_retention).put(settings::update_retention))
+        .route(
+            "/api/effort",
+            get(settings::get_effort).put(settings::set_effort),
+        )
+        .route(
+            "/api/retention",
+            get(settings::get_retention).put(settings::update_retention),
+        )
         // Capture
         .route("/api/capture", post(settings::toggle_capture))
         .route("/api/capture/status", get(settings::capture_status))
         // MCP destination
-        .route("/api/mcp-destination", get(settings::get_mcp).put(settings::set_mcp))
+        .route(
+            "/api/mcp-destination",
+            get(settings::get_mcp).put(settings::set_mcp),
+        )
         // Clear
         .route("/api/clear", post(settings::clear_all))
         .route("/api/clear-mcp", post(settings::clear_mcp))
@@ -91,7 +112,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // Cleanup
         .route("/api/cleanup", post(settings::trigger_cleanup))
         // Global proxy
-        .route("/api/proxy", get(settings::get_global_proxy).put(settings::set_global_proxy))
+        .route(
+            "/api/proxy",
+            get(settings::get_global_proxy).put(settings::set_global_proxy),
+        )
         // Costs
         .route("/api/costs", get(costs::get_costs))
         // Archive
@@ -102,19 +126,17 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // Health
         .route("/api/health", get(health::check))
         // 404 catch-all: return JSON for /api/*, HTML for everything else
-        .fallback(|uri: axum::http::Uri| {
-            async move {
-                if uri.path().starts_with("/api/") || uri.path() == "/ws" {
-                    axum::response::Response::builder()
-                        .status(axum::http::StatusCode::NOT_FOUND)
-                        .header("content-type", "application/json")
-                        .body(axum::body::Body::from(
-                            json!({"error": "not found", "path": uri.path()}).to_string(),
-                        ))
-                        .unwrap()
-                } else {
-                    static_files::serve(uri).await
-                }
+        .fallback(|uri: axum::http::Uri| async move {
+            if uri.path().starts_with("/api/") || uri.path() == "/ws" {
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::NOT_FOUND)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"error": "not found", "path": uri.path()}).to_string(),
+                    ))
+                    .unwrap()
+            } else {
+                static_files::serve(uri).await
             }
         })
         .layer(middleware::from_fn(api_logger))

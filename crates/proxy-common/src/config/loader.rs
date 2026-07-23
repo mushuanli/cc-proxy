@@ -12,10 +12,7 @@ pub async fn load_config(path: &Path) -> ConfigResult<AppConfig> {
             Ok(config)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(
-                "config file '{}' not found, using defaults",
-                path.display()
-            );
+            tracing::warn!("config file '{}' not found, using defaults", path.display());
             Ok(AppConfig::default())
         }
         Err(e) => Err(ConfigError::Io(e)),

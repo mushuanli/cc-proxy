@@ -36,10 +36,7 @@ pub fn normalize_response(raw: &Value) -> NormalizedResponse {
     };
 
     for block in blocks {
-        let block_type = block
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         match block_type {
             "thinking" => {
@@ -100,11 +97,7 @@ pub fn normalize_response(raw: &Value) -> NormalizedResponse {
 
 /// Sanitize every string field in a NormalizedResponse.
 pub fn sanitize_response(resp: &mut NormalizedResponse) {
-    resp.thinking = resp
-        .thinking
-        .iter()
-        .map(|t| sanitize_text(t))
-        .collect();
+    resp.thinking = resp.thinking.iter().map(|t| sanitize_text(t)).collect();
     resp.text = resp.text.iter().map(|t| sanitize_text(t)).collect();
     for tc in &mut resp.tool_calls {
         tc.name = sanitize_text(&tc.name);
@@ -125,7 +118,10 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_newlines() {
-        assert_eq!(sanitize_text("line1\nline2\r\nline3"), "line1\nline2\r\nline3");
+        assert_eq!(
+            sanitize_text("line1\nline2\r\nline3"),
+            "line1\nline2\r\nline3"
+        );
     }
 
     #[test]

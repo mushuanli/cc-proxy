@@ -103,13 +103,54 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Effort level = '{}'", config.proxy.active_effort);
 
     for u in &config.proxy.upstreams {
-        let high = u.high.as_ref().map(|r| format!("{}→{}/{}", r.keywords.first().unwrap_or(&"-".into()), r.provider, r.model)).unwrap_or_else(|| "-".into());
-        let mid = u.mid.as_ref().map(|r| format!("{}→{}/{}", r.keywords.first().unwrap_or(&"-".into()), r.provider, r.model)).unwrap_or_else(|| "-".into());
-        let low = u.low.as_ref().map(|r| format!("{}→{}/{}", r.keywords.first().unwrap_or(&"-".into()), r.provider, r.model)).unwrap_or_else(|| "-".into());
-        let default = u.default.as_ref().map(|r| format!("{}/{}", r.provider, r.model)).unwrap_or_else(|| "-".into());
+        let high = u
+            .high
+            .as_ref()
+            .map(|r| {
+                format!(
+                    "{}→{}/{}",
+                    r.keywords.first().unwrap_or(&"-".into()),
+                    r.provider,
+                    r.model
+                )
+            })
+            .unwrap_or_else(|| "-".into());
+        let mid = u
+            .mid
+            .as_ref()
+            .map(|r| {
+                format!(
+                    "{}→{}/{}",
+                    r.keywords.first().unwrap_or(&"-".into()),
+                    r.provider,
+                    r.model
+                )
+            })
+            .unwrap_or_else(|| "-".into());
+        let low = u
+            .low
+            .as_ref()
+            .map(|r| {
+                format!(
+                    "{}→{}/{}",
+                    r.keywords.first().unwrap_or(&"-".into()),
+                    r.provider,
+                    r.model
+                )
+            })
+            .unwrap_or_else(|| "-".into());
+        let default = u
+            .default
+            .as_ref()
+            .map(|r| format!("{}/{}", r.provider, r.model))
+            .unwrap_or_else(|| "-".into());
         tracing::info!(
             "  upstream '{}' H:[{}] M:[{}] L:[{}] default→{}",
-            u.name, high, mid, low, default,
+            u.name,
+            high,
+            mid,
+            low,
+            default,
         );
     }
 
@@ -134,9 +175,21 @@ async fn main() -> anyhow::Result<()> {
         config.server.mcp_proxy_port,
     );
 
-    tracing::info!("Dashboard: http://{}:{}", config.server.listen_address, config.server.http_port);
-    tracing::info!("Anthropic proxy: http://{}:{}", config.server.listen_address, config.server.proxy_port);
-    tracing::info!("MCP proxy: http://{}:{}", config.server.listen_address, config.server.mcp_proxy_port);
+    tracing::info!(
+        "Dashboard: http://{}:{}",
+        config.server.listen_address,
+        config.server.http_port
+    );
+    tracing::info!(
+        "Anthropic proxy: http://{}:{}",
+        config.server.listen_address,
+        config.server.proxy_port
+    );
+    tracing::info!(
+        "MCP proxy: http://{}:{}",
+        config.server.listen_address,
+        config.server.mcp_proxy_port
+    );
 
     let http_listener = TcpListener::bind(http_addr).await?;
     let proxy_listener = TcpListener::bind(proxy_addr).await?;

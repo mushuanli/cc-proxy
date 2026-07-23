@@ -72,10 +72,18 @@ pub struct ProxyConfig {
     pub session_delete_after_days: u32,
 }
 
-fn default_retry_count() -> u32 { 3 }
-fn default_request_timeout_secs() -> u64 { 120 }
-fn default_request_retention_hours() -> u32 { 8 }
-fn default_max_sessions() -> u32 { 20 }
+fn default_retry_count() -> u32 {
+    3
+}
+fn default_request_timeout_secs() -> u64 {
+    120
+}
+fn default_request_retention_hours() -> u32 {
+    8
+}
+fn default_max_sessions() -> u32 {
+    20
+}
 
 /// Network bind settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,10 +98,18 @@ pub struct ServerConfig {
     pub mcp_proxy_port: u16,
 }
 
-fn default_listen_addr() -> String { "127.0.0.1".into() }
-fn default_http_port() -> u16 { 5000 }
-fn default_proxy_port() -> u16 { 8888 }
-fn default_mcp_proxy_port() -> u16 { 9999 }
+fn default_listen_addr() -> String {
+    "127.0.0.1".into()
+}
+fn default_http_port() -> u16 {
+    5000
+}
+fn default_proxy_port() -> u16 {
+    8888
+}
+fn default_mcp_proxy_port() -> u16 {
+    9999
+}
 
 /// Logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +118,9 @@ pub struct LoggingConfig {
     pub level: String,
 }
 
-fn default_log_level() -> String { "info".into() }
+fn default_log_level() -> String {
+    "info".into()
+}
 
 // Re-export types that are in their own modules for convenience
 pub use super::pricing::ModelPricing;

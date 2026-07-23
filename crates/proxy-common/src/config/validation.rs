@@ -47,12 +47,7 @@ impl AppConfig {
                 }
 
                 // Provider must exist
-                if !self
-                    .proxy
-                    .providers
-                    .iter()
-                    .any(|p| p.name == rule.provider)
-                {
+                if !self.proxy.providers.iter().any(|p| p.name == rule.provider) {
                     errors.push(format!(
                         "upstream '{}' {tier}: provider '{}' not found",
                         upstream.name, rule.provider
@@ -64,9 +59,7 @@ impl AppConfig {
                 if rule.model.is_empty() {
                     continue;
                 }
-                if let Some(mp) =
-                    self.model_pricing.iter().find(|mp| mp.id == rule.model)
-                {
+                if let Some(mp) = self.model_pricing.iter().find(|mp| mp.id == rule.model) {
                     if !mp.providers.contains_key(&rule.provider) {
                         errors.push(format!(
                             "upstream '{}' {tier}: logical model '{}' has no mapping for provider '{}'",
@@ -98,29 +91,34 @@ impl AppConfig {
         }
 
         // 4. Duplicate checks
-        let provider_names: Vec<&str> =
-            self.proxy.providers.iter().map(|p| p.name.as_str()).collect();
+        let provider_names: Vec<&str> = self
+            .proxy
+            .providers
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         if has_duplicates(&provider_names) {
             errors.push("duplicate provider names found".to_string());
         }
 
-        let upstream_names: Vec<&str> =
-            self.proxy.upstreams.iter().map(|u| u.name.as_str()).collect();
+        let upstream_names: Vec<&str> = self
+            .proxy
+            .upstreams
+            .iter()
+            .map(|u| u.name.as_str())
+            .collect();
         if has_duplicates(&upstream_names) {
             errors.push("duplicate upstream names found".to_string());
         }
 
-        let pricing_ids: Vec<&str> =
-            self.model_pricing.iter().map(|mp| mp.id.as_str()).collect();
+        let pricing_ids: Vec<&str> = self.model_pricing.iter().map(|mp| mp.id.as_str()).collect();
         if has_duplicates(&pricing_ids) {
             errors.push("duplicate model_pricing ids found".to_string());
         }
 
         // 5. Effort validation
         if !self.proxy.active_effort.is_empty() && self.proxy.active_effort != "auto" {
-            let valid_efforts = [
-                "low", "medium", "high", "xhigh", "max", "ultracode",
-            ];
+            let valid_efforts = ["low", "medium", "high", "xhigh", "max", "ultracode"];
             if !valid_efforts.contains(&self.proxy.active_effort.as_str()) {
                 errors.push(format!(
                     "invalid active_effort '{}': must be one of: auto, {}",
@@ -156,9 +154,7 @@ impl AppConfig {
 
 /// Check that a proxy URL starts with a valid scheme.
 fn is_valid_proxy_url(url: &str) -> bool {
-    url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("socks5://")
+    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("socks5://")
 }
 
 fn has_duplicates<T: PartialEq>(items: &[T]) -> bool {

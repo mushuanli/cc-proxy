@@ -162,17 +162,27 @@ pub fn build_archive(
             body: Some(serde_json::to_value(body).unwrap_or_default()),
         }),
         summary: t.summary_json.as_ref().and_then(|s| {
-            serde_json::from_str::<serde_json::Value>(s).ok().map(|v| {
-                ArchiveSummary {
-                    user_request: v.get("user_request").and_then(|u| u.as_str()).map(String::from),
-                    assistant_result: v.get("assistant_result").and_then(|a| a.as_str()).map(String::from),
+            serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .map(|v| ArchiveSummary {
+                    user_request: v
+                        .get("user_request")
+                        .and_then(|u| u.as_str())
+                        .map(String::from),
+                    assistant_result: v
+                        .get("assistant_result")
+                        .and_then(|a| a.as_str())
+                        .map(String::from),
                     touched_files: v
                         .get("touched_files")
                         .and_then(|f| f.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
-                }
-            })
+                })
         }),
     });
 

@@ -31,11 +31,7 @@ impl SseParser {
             }
         }
         // Also handle \r\n\r\n
-        while let Some(pos) = self
-            .buffer
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-        {
+        while let Some(pos) = self.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
             let raw = self.buffer.drain(..=pos + 3).collect::<Vec<_>>();
             if let Some(event) = Self::parse_event_block(&raw) {
                 events.push(event);
@@ -63,10 +59,7 @@ impl SseParser {
         }
 
         if event_type.is_some() || data.is_some() {
-            Some(SseEvent {
-                event_type,
-                data,
-            })
+            Some(SseEvent { event_type, data })
         } else {
             None
         }
@@ -172,7 +165,8 @@ mod tests {
     #[test]
     fn parse_partial_chunks() {
         let mut parser = SseParser::new();
-        let ev1 = parser.feed(b"event: ping\ndata: {\"type\":\"ping\"}\n\nevent: delta\ndata: {\"t");
+        let ev1 =
+            parser.feed(b"event: ping\ndata: {\"type\":\"ping\"}\n\nevent: delta\ndata: {\"t");
         assert_eq!(ev1.len(), 1);
         let ev2 = parser.feed(b"ype\":\"delta\"}\n\n");
         assert_eq!(ev2.len(), 1);

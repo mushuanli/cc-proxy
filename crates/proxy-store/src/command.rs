@@ -10,9 +10,7 @@ pub enum RunCommand {
         options: ArchiveOptions,
     },
     /// Generate summaries for tasks.
-    Summary {
-        task_ids: Option<Vec<TaskId>>,
-    },
+    Summary { task_ids: Option<Vec<TaskId>> },
 }
 
 /// Result of a RunCommand.

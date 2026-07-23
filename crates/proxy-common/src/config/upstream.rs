@@ -13,8 +13,7 @@ pub struct TierRule {
 
 impl TierRule {
     pub fn is_active(&self) -> bool {
-        !self.provider.is_empty()
-            && self.keywords.iter().any(|kw| !kw.is_empty())
+        !self.provider.is_empty() && self.keywords.iter().any(|kw| !kw.is_empty())
     }
 
     pub fn matches(&self, model_lower: &str) -> bool {

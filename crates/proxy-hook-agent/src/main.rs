@@ -4,7 +4,10 @@ use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "hook-agent", about = "Relays Claude Code hook events to CC Proxy dashboard")]
+#[command(
+    name = "hook-agent",
+    about = "Relays Claude Code hook events to CC Proxy dashboard"
+)]
 struct Args {
     /// Dashboard URL
     #[arg(long, default_value = "http://localhost:5000")]

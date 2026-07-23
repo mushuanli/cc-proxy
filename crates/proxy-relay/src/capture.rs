@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use proxy_common::EventBus;
 use proxy_common::WsMessage;
@@ -28,7 +28,8 @@ impl CaptureControl {
     /// Toggle recording on/off. Broadcasts TeeStatusChanged.
     pub fn set_enabled(&self, val: bool) {
         self.enabled.store(val, Ordering::Relaxed);
-        self.events.publish(WsMessage::TeeStatusChanged { enabled: val });
+        self.events
+            .publish(WsMessage::TeeStatusChanged { enabled: val });
     }
 
     /// Query whether recording is active.

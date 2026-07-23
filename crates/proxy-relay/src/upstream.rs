@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::sse::SseParser;
 use axum::http::{HeaderMap, HeaderValue, Method};
 use bytes::Bytes;
 use proxy_common::models::{NormalizedResponse, SseEvent, ToolCallRecord};
-use crate::sse::SseParser;
 
 // ── Header constants ──
 
@@ -49,9 +49,13 @@ pub fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>)
         let key = k.as_str().to_lowercase();
         if matches!(
             key.as_str(),
-            "host" | "connection" | "transfer-encoding"
-                | "content-length" | "accept-encoding"
-                | "proxy-connection" | "proxy-authorization"
+            "host"
+                | "connection"
+                | "transfer-encoding"
+                | "content-length"
+                | "accept-encoding"
+                | "proxy-connection"
+                | "proxy-authorization"
         ) {
             continue;
         }
@@ -93,7 +97,9 @@ impl ApiProtocol {
 }
 
 pub fn detect_protocol(path: &str, body: &serde_json::Value) -> ApiProtocol {
-    if path.contains("/responses") || (body.get("input").is_some() && body.get("messages").is_none()) {
+    if path.contains("/responses")
+        || (body.get("input").is_some() && body.get("messages").is_none())
+    {
         ApiProtocol::Codex
     } else {
         ApiProtocol::Anthropic
@@ -124,7 +130,11 @@ pub fn extract_request_session_id(
     body: &serde_json::Value,
 ) -> Option<String> {
     for name in ["session_id", "x-session-id", "x-codex-session-id"] {
-        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty()) {
+        if let Some(value) = headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+        {
             return Some(value.to_string());
         }
     }
@@ -251,7 +261,11 @@ pub async fn handle_streaming_response(
         return UpstreamResponse {
             status_code,
             response_headers,
-            content_text: if body_text.is_empty() { None } else { Some(body_text) },
+            content_text: if body_text.is_empty() {
+                None
+            } else {
+                Some(body_text)
+            },
             raw_body: body_bytes,
             normalized: NormalizedResponse::default(),
             sse_events: vec![],
@@ -346,7 +360,10 @@ pub async fn handle_streaming_response(
                                 }
                                 Some("error") => {
                                     if let Some(err) = parsed.get("error") {
-                                        error = err.get("message").and_then(|v| v.as_str()).map(String::from);
+                                        error = err
+                                            .get("message")
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from);
                                     }
                                 }
                                 _ => {}
@@ -447,7 +464,7 @@ pub async fn handle_non_streaming_response(
                 } else {
                     None
                 },
-            }
+            };
         }
     };
 
@@ -558,13 +575,15 @@ fn usage_from_json(body: &serde_json::Value) -> (u32, u32, u32) {
     (input, output, cached)
 }
 
-fn normalize_response_body(
-    protocol: ApiProtocol,
-    body: &serde_json::Value,
-) -> NormalizedResponse {
+fn normalize_response_body(protocol: ApiProtocol, body: &serde_json::Value) -> NormalizedResponse {
     let mut normalized = NormalizedResponse::default();
     if protocol == ApiProtocol::Anthropic {
-        for block in body.get("content").and_then(|v| v.as_array()).into_iter().flatten() {
+        for block in body
+            .get("content")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             match block.get("type").and_then(|v| v.as_str()) {
                 Some("text") => push_string(block.get("text"), &mut normalized.text),
                 Some("thinking") => push_string(block.get("thinking"), &mut normalized.thinking),
@@ -579,15 +598,30 @@ fn normalize_response_body(
         return normalized;
     }
 
-    for item in body.get("output").and_then(|v| v.as_array()).into_iter().flatten() {
+    for item in body
+        .get("output")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
         match item.get("type").and_then(|v| v.as_str()) {
             Some("message") => {
-                for content in item.get("content").and_then(|v| v.as_array()).into_iter().flatten() {
+                for content in item
+                    .get("content")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
                     push_string(content.get("text"), &mut normalized.text);
                 }
             }
             Some("reasoning") => {
-                for summary in item.get("summary").and_then(|v| v.as_array()).into_iter().flatten() {
+                for summary in item
+                    .get("summary")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
                     push_string(summary.get("text"), &mut normalized.thinking);
                 }
             }
@@ -622,8 +656,14 @@ fn parse_codex_stream_event(
             *input_tokens = input.max(*input_tokens);
             *output_tokens = output.max(*output_tokens);
             *cache_read_tokens = cached.max(*cache_read_tokens);
-            *message_id = response.get("id").and_then(|v| v.as_str()).map(String::from);
-            *model = response.get("model").and_then(|v| v.as_str()).map(String::from);
+            *message_id = response
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            *model = response
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(String::from);
         }
         _ => {}
     }
@@ -636,7 +676,11 @@ fn push_string(value: Option<&serde_json::Value>, target: &mut Vec<String>) {
 }
 
 fn string_field(value: &serde_json::Value, key: &str) -> String {
-    value.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 // ── Effort injection ──
@@ -694,7 +738,10 @@ mod tests {
             }]
         });
         assert_eq!(usage_from_json(&body), (12, 7, 5));
-        assert_eq!(normalize_response_body(ApiProtocol::Codex, &body).text, ["done"]);
+        assert_eq!(
+            normalize_response_body(ApiProtocol::Codex, &body).text,
+            ["done"]
+        );
     }
 
     #[test]
