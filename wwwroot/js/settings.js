@@ -52,6 +52,11 @@ export function populateProxyUpstreamSelect(upstreams, active) {
     const select = document.getElementById('proxy-upstream-select');
     if (!select) return;
     select.innerHTML = '';
+    const forbidOpt = document.createElement('option');
+    forbidOpt.value = '__forbid__';
+    forbidOpt.textContent = 'Forbid';
+    if (active === '__forbid__') forbidOpt.selected = true;
+    select.appendChild(forbidOpt);
     // Auto-detect option (top)
     const autoOpt = document.createElement('option');
     autoOpt.value = '__auto__';
@@ -577,12 +582,13 @@ export function renderUpstreamTable() {
     const body = document.getElementById('upstream-table-body');
     if (!head || !body) return;
 
-    const proxyActiveName = state.activeProxyUpstream || '__auto__';
+    const proxyActiveName = state.activeProxyUpstream || '__forbid__';
     const isAuto = proxyActiveName === '__auto__';
+    const isForbid = proxyActiveName === '__forbid__';
     head.innerHTML = `<tr>
         <th class="ut-th ut-col-name">${t('settings.name')}</th>
-        <th class="ut-th ut-col-active ut-proxy-th${isAuto ? ' ut-proxy-th-auto' : ''}" data-name="__auto__" title="Click to switch to Auto (auto-detect)">
-            Transparent Proxy<span class="ut-proxy-th-active">${isAuto ? '◉ Auto' : esc(proxyActiveName)}</span>
+        <th class="ut-th ut-col-active ut-proxy-th${isAuto ? ' ut-proxy-th-auto' : ''}${isForbid ? ' ut-proxy-th-forbid' : ''}" data-name="${isForbid ? '__auto__' : '__forbid__'}" title="${isForbid ? 'Click to switch to Auto (auto-detect)' : 'Click to forbid transparent proxy'}">
+            Transparent Proxy<span class="ut-proxy-th-active">${isForbid ? '⊘ Forbid' : (isAuto ? '◉ Auto' : esc(proxyActiveName))}</span>
         </th>
         <th class="ut-th ut-col-active">Relay</th>
         <th class="ut-th ut-col-tier">${t('settings.tier_high')}</th>

@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub const AUTO_PROXY_UPSTREAM: &str = "__auto__";
+pub const FORBID_PROXY_UPSTREAM: &str = "__forbid__";
+
 /// Top-level application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -16,7 +19,7 @@ impl Default for AppConfig {
             model_pricing: Vec::new(),
             proxy: ProxyConfig {
                 active_upstream: String::new(),
-                active_proxy_upstream: String::new(),
+                active_proxy_upstream: default_proxy_upstream(),
                 active_effort: String::new(),
                 http_proxy: None,
                 providers: Vec::new(),
@@ -48,7 +51,7 @@ impl Default for AppConfig {
 pub struct ProxyConfig {
     #[serde(default)]
     pub active_upstream: String,
-    #[serde(default)]
+    #[serde(default = "default_proxy_upstream")]
     pub active_proxy_upstream: String,
     #[serde(default)]
     pub active_effort: String,
@@ -73,6 +76,10 @@ pub struct ProxyConfig {
     pub session_max_count: u32,
     #[serde(default)]
     pub session_delete_after_days: u32,
+}
+
+fn default_proxy_upstream() -> String {
+    FORBID_PROXY_UPSTREAM.into()
 }
 
 fn default_retry_count() -> u32 {

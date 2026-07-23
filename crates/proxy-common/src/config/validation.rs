@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
 
 impl AppConfig {
     /// Validate the configuration, returning a list of human-readable errors.
@@ -19,7 +19,8 @@ impl AppConfig {
             ));
         }
         if !self.proxy.active_proxy_upstream.is_empty()
-            && self.proxy.active_proxy_upstream != "__auto__"
+            && self.proxy.active_proxy_upstream != AUTO_PROXY_UPSTREAM
+            && self.proxy.active_proxy_upstream != FORBID_PROXY_UPSTREAM
             && !self
                 .proxy
                 .upstreams

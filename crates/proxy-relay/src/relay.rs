@@ -24,9 +24,9 @@ fn safe_truncate_bytes(s: &str, max_bytes: usize) -> &str {
     }
     &s[..end]
 }
-use proxy_common::ResolvedRoute;
 use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessage};
 use proxy_common::{ConfigStore, EventBus};
+use proxy_common::{ResolvedRoute, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
 use proxy_store::{NewSessionDefaults, NewTask, ProxyStore};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -126,6 +126,15 @@ async fn proxy_handler(
 ) -> Response<Body> {
     let method = request.method().clone();
     let uri = request.uri().clone();
+    let is_transparent = method == Method::CONNECT || uri.scheme().is_some();
+    if is_transparent
+        && relay.config.get().await.proxy.active_proxy_upstream == FORBID_PROXY_UPSTREAM
+    {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("Transparent proxy is forbidden"))
+            .unwrap();
+    }
     if method == Method::CONNECT {
         return handle_connect_tunnel(&mut request, uri).await;
     }
@@ -305,7 +314,8 @@ async fn proxy_request(
     };
 
     // ── Resolve route (auto-detect or tier routing) ──
-    let (route, provider_url, provider_token) = if upstream_name == "__auto__" && is_transparent {
+    let use_auto_route = upstream_name == AUTO_PROXY_UPSTREAM && is_transparent;
+    let (route, provider_url, provider_token) = if use_auto_route {
         // Auto-detect: find provider whose base URL matches the request URL
         let matched = config_snapshot.proxy.providers.iter().find(|p| {
             let base = p.url.trim_end_matches('/');
@@ -314,7 +324,7 @@ async fn proxy_request(
         match matched {
             Some(p) => (
                 ResolvedRoute {
-                    upstream: "__auto__".into(),
+                    upstream: AUTO_PROXY_UPSTREAM.into(),
                     provider: p.name.clone(),
                     configured_model: request_model.clone(),
                     resolved_model: request_model.clone(),

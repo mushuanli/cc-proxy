@@ -326,7 +326,9 @@
 .ut-proxy-th { cursor: pointer; user-select: none; text-align: center; }
 .ut-proxy-th:hover { background: rgba(74,144,164,0.12); }
 .ut-proxy-th-auto { color: var(--accent2); }
+.ut-proxy-th-forbid { color: var(--error); }
 .ut-proxy-th-active { display: block; font-size: 0.62rem; font-weight: 400; color: var(--accent2); margin-top: 1px; }
+.ut-proxy-th-forbid .ut-proxy-th-active { color: var(--error); }
 .ut-proxy-cell { cursor: pointer; user-select: none; text-align: center; }
 .ut-proxy-cell:hover { background: rgba(74,144,164,0.12); }
 .ut-proxy-off { color: var(--text-muted); opacity: 0.4; font-size: 0.85rem; }

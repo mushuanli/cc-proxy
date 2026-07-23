@@ -11,7 +11,9 @@ pub mod store;
 pub mod upstream;
 pub mod validation;
 
-pub use config::{AppConfig, LoggingConfig, ProxyConfig, ServerConfig};
+pub use config::{
+    AppConfig, LoggingConfig, ProxyConfig, ServerConfig, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM,
+};
 pub use error::{ConfigError, ConfigResult};
 pub use loader::load_config;
 pub use pricing::{BillingSnapshot, ModelPricing, ResolvedRoute};

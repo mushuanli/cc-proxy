@@ -52,9 +52,9 @@ mcp_proxy_port = 9999   # MCP traffic
 [proxy]
 active_upstream = "deepseek-only"
 # Transparent forward-proxy traffic can select a different upstream.
-# Transparent forward-proxy traffic can select a different upstream.
+# "__forbid__" = reject transparent proxy traffic (default).
 # "__auto__" = auto-detect provider by matching request URL host to provider URL.
-active_proxy_upstream = "__auto__"
+active_proxy_upstream = "__forbid__"
 # Global effort level. Options: auto | low | medium | high | xhigh | max | ultracode
 # "auto" = pass through client value unchanged. Can be overridden per-upstream.
 active_effort = "auto"
