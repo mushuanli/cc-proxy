@@ -178,7 +178,7 @@ pub fn extract_request_session_id(
     headers: &HeaderMap,
     body: &serde_json::Value,
 ) -> Option<String> {
-    for name in ["session_id", "x-session-id", "x-codex-session-id"] {
+    for name in ["x-claude-code-session-id", "session_id", "x-session-id", "x-codex-session-id"] {
         if let Some(value) = headers
             .get(name)
             .and_then(|v| v.to_str().ok())

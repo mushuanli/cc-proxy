@@ -15,4 +15,4 @@ pub use models::{
     SessionListItem, Task, TaskError, TaskListItem, TaskTiming,
 };
 pub use store::{ProxyStore, ProxyStoreConfig};
-pub use summary::analyzer::SessionSummary;
+pub use summary::analyzer::{extract_latest_user_prompt, summarize_task, SessionSummary};

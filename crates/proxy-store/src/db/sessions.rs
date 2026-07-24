@@ -254,6 +254,21 @@ pub fn get_session(conn: &Connection, id: &SessionId) -> StoreResult<Option<Sess
     }
 }
 
+/// Find the latest recording session — used as fallback when a request
+/// carries no explicit session_id.
+pub fn find_headless_session(conn: &Connection) -> StoreResult<Option<SessionId>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM sessions
+         WHERE status = 'recording'
+         ORDER BY last_activity_at DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map([], |row| Ok(row.get::<_, String>(0)?))?;
+    match rows.next() {
+        Some(Ok(id)) => Ok(Some(SessionId::from_trusted(id))),
+        _ => Ok(None),
+    }
+}
+
 /// List sessions with optional filters.
 pub fn list_sessions(
     conn: &Connection,

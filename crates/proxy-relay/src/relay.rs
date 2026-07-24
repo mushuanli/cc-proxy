@@ -32,6 +32,7 @@ use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessa
 use proxy_common::{ConfigStore, EventBus};
 use proxy_common::{ResolvedRoute, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
 use proxy_store::{NewSessionDefaults, NewTask, ProxyStore, StoreResult, Task};
+use proxy_store::summarize_task;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -290,23 +291,10 @@ async fn proxy_request(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let session_id_str = upstream::extract_request_session_id(protocol, &headers, &body_json)
-        .unwrap_or_else(|| format!("{}-{}", protocol.request_type(), TaskId::generate()));
-    let session_id = SessionId::new(session_id_str.clone()).unwrap_or_else(|_| {
-        SessionId::from_trusted(format!(
-            "{}-{}",
-            protocol.request_type(),
-            TaskId::generate()
-        ))
-    });
-
     let msg_count = upstream::message_count(protocol, &body_json);
     let prompt = request_prompt(&body_json);
 
-    // Extract session metadata (cwd, project_key) from headers and body
-    let session_meta = upstream::extract_session_metadata(&headers, &body_json);
-
-    // ── Resolve route via the upstream assigned to this ingress mode ──
+    // ── Resolve route config (needed before session_id for headless fallback) ──
     let config_snapshot = relay.config.get().await;
     let ws_include_bodies = config_snapshot.server.ws_include_bodies;
     let upstream_name = if is_transparent && !config_snapshot.proxy.active_proxy_upstream.is_empty()
@@ -315,6 +303,26 @@ async fn proxy_request(
     } else {
         &config_snapshot.proxy.active_upstream
     };
+
+    // ── Session ID: use header/body value, else fall back to latest recording session ──
+    let session_id_str = upstream::extract_request_session_id(protocol, &headers, &body_json);
+    let session_id_str = match session_id_str {
+        Some(sid) => sid,
+        None => relay
+            .store
+            .session_headless()
+            .await
+            .ok()
+            .flatten()
+            .map(|sid| sid.as_str().to_string())
+            .unwrap_or_else(|| format!("headless-{}", TaskId::generate())),
+    };
+    let session_id = SessionId::new(session_id_str.clone()).unwrap_or_else(|_| {
+        SessionId::from_trusted(format!("headless-{}", TaskId::generate()))
+    });
+
+    // Extract session metadata (cwd, project_key) from headers and body
+    let session_meta = upstream::extract_session_metadata(&headers, &body_json);
 
     // ── Resolve route (auto-detect or tier routing) ──
     let use_auto_route = upstream_name == AUTO_PROXY_UPSTREAM && is_transparent;
@@ -528,8 +536,7 @@ async fn proxy_request(
             let request_headers = upstream::redact_headers(&headers);
             let request_body = stored_request_body(is_transparent, &body, &body_json);
 
-            // Write failed task to store
-            let task = NewTask {
+            let mut task = NewTask {
                 id: Some(task_id.clone()),
                 session_defaults: NewSessionDefaults {
                     client_type: client_type(protocol),
@@ -568,8 +575,10 @@ async fn proxy_request(
                     "priced": priced,
                 }),
                 messages_count: msg_count,
+                summary_json: None,
             };
 
+            finalize_task(&mut task, session_id.as_str(), &relay.capture);
             let _ = write_and_publish(
                 &relay.store,
                 &relay.events,
@@ -665,7 +674,7 @@ async fn proxy_request(
                 Err(_) => return,
             };
 
-            let task = NewTask {
+            let mut task = NewTask {
                 id: Some(task_id.clone()),
                 session_defaults: NewSessionDefaults {
                     client_type: client_type(protocol),
@@ -728,7 +737,10 @@ async fn proxy_request(
                     "sse_events": meta.sse_events.clone(),
                 }),
                 messages_count: msg_count_val,
+                summary_json: None,
             };
+
+            finalize_task(&mut task, session_id_clone.as_str(), &capture);
 
             let mut proxied = proxy_common::models::ProxiedRequest {
                 id: task_id.as_str().to_string(),
@@ -858,7 +870,7 @@ async fn proxy_request(
     });
 
     // ── Write to store (store computes cost internally) ──
-    let task = NewTask {
+    let mut task = NewTask {
         id: Some(task_id.clone()),
         session_defaults: NewSessionDefaults {
             client_type: client_type(protocol),
@@ -909,6 +921,7 @@ async fn proxy_request(
             }),
         metadata: inspect_metadata,
         messages_count: msg_count,
+        summary_json: None,
     };
 
     // ── Build ProxiedRequest for WS event ──
@@ -953,6 +966,8 @@ async fn proxy_request(
         proxied.content_text = None;
         proxied.sse_events.clear();
     }
+
+    finalize_task(&mut task, session_id.as_str(), &relay.capture);
 
     let store_result = write_and_publish(
         &relay.store,
@@ -1050,7 +1065,44 @@ async fn proxy_request(
         })
 }
 
-/// Unified persistence + notification: write task, cache summary, publish event, emit cost stats.
+/// Generate summary and conditionally strip raw bodies.
+///
+/// Always generates a TaskSummaryV1 from the request/response bodies.
+/// When capture is off, the raw bodies are discarded — only the summary
+/// and metadata (tokens, timing, cost, etc.) are persisted.
+fn finalize_task(task: &mut NewTask, session_id: &str, capture: &CaptureControl) {
+    if let Some(ref body) = task.request_body {
+        task.summary_json = summarize_task(
+            body,
+            task.response_body.as_ref(),
+            task.id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+            session_id,
+            task.status.as_str(),
+            &task.billing.resolved_model,
+            &task.billing.provider,
+            task.upstream.as_deref(),
+            task.billing.pricing_model_id != "unknown",
+            task.started_at,
+            task.http_status_code,
+            task.timing.stop_reason.as_deref(),
+            task.usage.input_tokens,
+            task.usage.output_tokens,
+            task.usage.cache_read_tokens,
+            task.usage.cache_creation_tokens,
+            0, // cost is computed by the store during write
+            task.timing.duration_ms,
+            task.timing.ttft_ms,
+            task.error.as_ref().map(|e| e.error_type.as_str()),
+            task.error.as_ref().map(|e| e.error_message.as_str()),
+        );
+    }
+    if !capture.is_enabled() {
+        task.request_body = None;
+        task.response_body = None;
+    }
+}
+
+/// Unified persistence + notification: write task, publish event, emit cost stats.
 async fn write_and_publish(
     store: &ProxyStore,
     events: &EventBus,
@@ -1059,11 +1111,6 @@ async fn write_and_publish(
     ws_msg: WsMessage,
 ) -> StoreResult<Task> {
     let result = store.task_write(session_id, task).await;
-    if let Ok(ref t) = result {
-        if t.request_body.is_some() {
-            store.summary_cache(&t.id, &t.session_id);
-        }
-    }
     if let Ok(stats) = store.usage_cost_stats().await {
         events.publish(WsMessage::CostUpdated(stats));
     }

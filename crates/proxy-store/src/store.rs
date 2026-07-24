@@ -258,6 +258,16 @@ impl ProxyStore {
         .await
     }
 
+    /// Find the latest recording session — fallback when a request has no session_id.
+    pub async fn session_headless(&self) -> StoreResult<Option<SessionId>> {
+        let this = self.clone();
+        Self::blocking(move || {
+            let conn = this.inner.conn.lock().unwrap();
+            db::sessions::find_headless_session(&conn)
+        })
+        .await
+    }
+
     /// List tasks for a session.
     pub async fn task_list(
         &self,
@@ -689,6 +699,7 @@ mod tests {
             error: None,
             metadata: serde_json::json!({}),
             messages_count: 1,
+            summary_json: None,
         }
     }
 

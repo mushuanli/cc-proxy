@@ -55,7 +55,8 @@ pub fn insert_task(
             input_rate_microusd, output_rate_microusd,
             cache_write_rate_microusd, cache_read_rate_microusd,
             cost_microusd, currency,
-            messages_count, metadata_json, prompt_text
+            messages_count, metadata_json, prompt_text,
+            summary_json, summary_created_at
         ) VALUES (
             ?1, ?2, ?3,
             ?4, ?5, ?6, ?7,
@@ -70,7 +71,8 @@ pub fn insert_task(
             ?30, ?31,
             ?32, ?33, ?34, ?35,
             ?36, ?37,
-            ?38, ?39, ?40
+            ?38, ?39, ?40,
+            ?41, ?42
         )
         ON CONFLICT(id) DO NOTHING",
         params![
@@ -120,6 +122,8 @@ pub fn insert_task(
             task.messages_count as i64,
             metadata_json,
             prompt_text,
+            task.summary_json,
+            task.summary_json.as_ref().map(|_| now_ms),
         ],
     )?;
 

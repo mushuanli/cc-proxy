@@ -127,8 +127,107 @@ pub struct SessionStats {
 /// Analyze a task and extract a human-readable summary.
 /// Supports Anthropic `messages` and Codex `input` array formats.
 pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
-    let body_str = task.request_body.as_deref()?;
-    let body: Value = serde_json::from_str(body_str).ok()?;
+    analyze_body(
+        task.request_body.as_deref()?,
+        task.response_body.as_ref(),
+        task.id.as_str(),
+        task.session_id.as_str(),
+        task.status.as_str(),
+        &task.resolved_model,
+        &task.provider,
+        task.upstream.as_deref(),
+        task.pricing_model_id.as_deref().is_some_and(|id| id != "unknown"),
+        task.started_at,
+        task.http_status_code,
+        task.stop_reason.as_deref(),
+        task.input_tokens,
+        task.output_tokens,
+        task.cache_read_tokens,
+        task.cache_creation_tokens,
+        task.cost_microusd,
+        task.duration_ms,
+        task.ttft_ms,
+        task.error_type.as_deref().filter(|v| !v.is_empty()),
+        task.error_message.as_deref().filter(|v| !v.is_empty()),
+    )
+}
+
+/// Same as analyze_task but takes individual fields instead of a full Task.
+/// Used by relay.rs to summarize inline before writing to the store.
+#[allow(clippy::too_many_arguments)]
+pub fn summarize_task(
+    request_body: &str,
+    response_body: Option<&proxy_common::NormalizedResponse>,
+    task_id: &str,
+    session_id: &str,
+    status: &str,
+    model: &str,
+    provider: &str,
+    upstream: Option<&str>,
+    priced: bool,
+    started_at_ms: i64,
+    status_code: Option<u16>,
+    stop_reason: Option<&str>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    cost_microusd: i64,
+    duration_ms: Option<i64>,
+    ttft_ms: Option<i64>,
+    error_type: Option<&str>,
+    error_message: Option<&str>,
+) -> Option<String> {
+    analyze_body(
+        request_body,
+        response_body,
+        task_id,
+        session_id,
+        status,
+        model,
+        provider,
+        upstream,
+        priced,
+        started_at_ms,
+        status_code,
+        stop_reason,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        cost_microusd,
+        duration_ms,
+        ttft_ms,
+        error_type,
+        error_message,
+    )
+    .and_then(|s| serde_json::to_string(&s).ok())
+}
+
+fn analyze_body(
+    request_body: &str,
+    response_body: Option<&proxy_common::NormalizedResponse>,
+    task_id: &str,
+    session_id: &str,
+    status: &str,
+    model: &str,
+    provider: &str,
+    upstream: Option<&str>,
+    priced: bool,
+    started_at_ms: i64,
+    status_code: Option<u16>,
+    stop_reason: Option<&str>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    cost_microusd: i64,
+    duration_ms: Option<i64>,
+    ttft_ms: Option<i64>,
+    error_type: Option<&str>,
+    error_message: Option<&str>,
+) -> Option<SessionSummary> {
+    let body: Value = serde_json::from_str(request_body).ok()?;
 
     // Try Anthropic messages format first, then Codex input array
     let messages = body
@@ -237,9 +336,7 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
 
     // Final response: prefer the actual response body from this task,
     // fall back to the last assistant text in the request messages
-    let final_response = task
-        .response_body
-        .as_ref()
+    let final_response = response_body
         .map(|resp| resp.text.join(""))
         .filter(|t| !t.is_empty())
         .map(|t| truncate(&t, 3000))
@@ -247,30 +344,27 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
 
     Some(SessionSummary {
         version: 1,
-        task_id: task.id.as_str().to_string(),
-        session_id: task.session_id.to_string(),
-        status: task.status.as_str().to_string(),
-        model: task.resolved_model.clone(),
-        provider: task.provider.clone(),
-        upstream: task.upstream.clone(),
-        priced: task
-            .pricing_model_id
-            .as_deref()
-            .is_some_and(|id| id != "unknown"),
-        started_at: chrono::DateTime::from_timestamp(task.started_at / 1000, 0)
+        task_id: task_id.to_string(),
+        session_id: session_id.to_string(),
+        status: status.to_string(),
+        model: model.to_string(),
+        provider: provider.to_string(),
+        upstream: upstream.map(|s| s.to_string()),
+        priced,
+        started_at: chrono::DateTime::from_timestamp(started_at_ms / 1000, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default(),
-        status_code: task.http_status_code,
-        stop_reason: task.stop_reason.clone(),
-        input_tokens: task.input_tokens,
-        output_tokens: task.output_tokens,
-        cache_read_tokens: task.cache_read_tokens,
-        cache_creation_tokens: task.cache_creation_tokens,
-        cost_microusd: task.cost_microusd,
-        duration_ms: task.duration_ms,
-        ttft_ms: task.ttft_ms,
-        error_type: task.error_type.clone().filter(|v| !v.is_empty()),
-        error_message: task.error_message.clone().filter(|v| !v.is_empty()),
+        status_code: status_code,
+        stop_reason: stop_reason.map(|s| s.to_string()),
+        input_tokens: input_tokens,
+        output_tokens: output_tokens,
+        cache_read_tokens: cache_read_tokens,
+        cache_creation_tokens: cache_creation_tokens,
+        cost_microusd: cost_microusd,
+        duration_ms: duration_ms,
+        ttft_ms: ttft_ms,
+        error_type: error_type.map(|s| s.to_string()),
+        error_message: error_message.map(|s| s.to_string()),
         user_prompts,
         assistant_actions,
         touched_files,

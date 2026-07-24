@@ -157,6 +157,9 @@ pub struct NewTask {
 
     /// Number of messages in the request body (for display in list views).
     pub messages_count: u32,
+
+    /// Pre-computed summary JSON. Written directly to tasks.summary_json.
+    pub summary_json: Option<String>,
 }
 
 /// Defaults for creating a new session.
