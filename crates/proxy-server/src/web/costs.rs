@@ -33,7 +33,7 @@ pub async fn get_costs(
         .into_response();
     }
 
-    match state.store.query_daily_usage_range(&from, &to).await {
+    match state.store.usage_query_range(&from, &to).await {
         Ok(rows) => {
             let data = aggregate_costs(&rows, &from, &to);
             Json(json!(data)).into_response()

@@ -49,16 +49,6 @@ impl CaptureControl {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    /// Return the output directory path.
-    pub fn output_dir(&self) -> &PathBuf {
-        &self.output_dir
-    }
-
-    /// Return a clone of the enabled flag (for TeeWriter).
-    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
-        self.enabled.clone()
-    }
-
     /// Record a proxied request/response exchange to disk.
     /// Creates `captures/YYYY-MM-DD/session_<sid>.txt` with timestamped entries.
     pub fn record_exchange(&self, session_id: &str, info: &ExchangeInfo) {

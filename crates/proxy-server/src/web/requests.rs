@@ -44,7 +44,7 @@ pub(crate) fn task_to_json(
         "duration_ms": task.duration_ms,
         "time_to_first_token_ms": task.ttft_ms,
         "ttft_ms": task.ttft_ms,
-        "last_msg_summary": task.summary_json,
+        "prompt": task.prompt_text,
         "messages_count": task.messages_count,
     })
 }
@@ -113,7 +113,7 @@ fn task_to_full_json(task: &proxy_store::Task) -> Value {
         "sse_events": sse_events,
         "request_type": task.metadata.get("protocol").and_then(|v| v.as_str()).unwrap_or("anthropic"),
         "messages_count": task.messages_count,
-        "last_msg_summary": task.summary_json
+        "prompt": task.prompt_text
     })
 }
 
@@ -129,7 +129,7 @@ pub async fn list(
                     return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
                 }
             };
-            match state.store.list_tasks(&sid, None).await {
+            match state.store.task_list(&sid, None).await {
                 Ok(tasks) => {
                     let items: Vec<Value> =
                         tasks.iter().map(|t| task_to_json(t, Some(&sid))).collect();
@@ -142,7 +142,7 @@ pub async fn list(
                     .into_response(),
             }
         }
-        None => match state.store.list_sessions(Default::default()).await {
+        None => match state.store.session_list(Default::default()).await {
             Ok(list) => {
                 let limit = q.limit.unwrap_or(2000) as usize;
                 let mut all_tasks = Vec::new();
@@ -150,7 +150,7 @@ pub async fn list(
                     if all_tasks.len() >= limit {
                         break;
                     }
-                    if let Ok(tasks) = state.store.list_tasks(&s.id, None).await {
+                    if let Ok(tasks) = state.store.task_list(&s.id, None).await {
                         all_tasks.extend(tasks.into_iter().map(|t| task_to_json(&t, Some(&s.id))));
                     }
                 }
@@ -168,7 +168,7 @@ pub async fn list(
 
 pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
     let tid = TaskId::new(id);
-    match state.store.info(&tid).await {
+    match state.store.task_info(&tid).await {
         Ok(task) => Json(task_to_full_json(&task)).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -179,7 +179,7 @@ pub async fn delete_one(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let tid = TaskId::new(id);
-    match state.store.delete_task(&tid).await {
+    match state.store.task_delete(&tid).await {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(proxy_store::StoreError::NotFound(_)) => (
             StatusCode::NOT_FOUND,
@@ -223,7 +223,7 @@ pub async fn delete_batch(
         };
         task_ids.push(TaskId::new(id.to_string()));
     }
-    match state.store.delete_tasks(&task_ids).await {
+    match state.store.task_delete_batch(&task_ids).await {
         Ok(deleted) => Json(json!({"ok": true, "deleted": deleted})).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -238,7 +238,7 @@ pub async fn summary(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let tid = TaskId::new(id);
-    match state.store.summary(&tid).await {
+    match state.store.summary_get(&tid).await {
         Ok(s) => Json(json!(s)).into_response(),
         Err(proxy_store::StoreError::NotFound(e)) => {
             (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response()

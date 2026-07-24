@@ -94,7 +94,7 @@ config:  AppConfig, ModelPricing, Provider, TierRule, UpstreamConfig,
 models:  ProxiedRequest, Session, SessionStatus, HookEvent, McpRequest,
          SseEvent, WsMessage, HasId, CostData, ModelCost, ProviderCost,
          SessionCost, DailyCost, ProviderInfo, UpstreamInfo, TierRuleInfo
-db:      Database, DbError, db_error, extract_last_msg_summary
+db:      Database, DbError, db_error, extract_latest_user_prompt
 sse:     SseParser
 export:  export_json, export_har, export_markdown, export_yaml,
          flush_yaml, read_yaml_meta

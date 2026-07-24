@@ -36,7 +36,7 @@ fn session_to_json(s: &proxy_store::SessionListItem) -> serde_json::Value {
 }
 
 pub async fn list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let result = state.store.list_sessions(SessionFilter::default()).await;
+    let result = state.store.session_list(SessionFilter::default()).await;
     match result {
         Ok(sessions) => {
             let count = sessions.len();
@@ -57,8 +57,8 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
         Ok(v) => v,
         Err(e) => return e,
     };
-    let session = state.store.get_session(&sid).await;
-    let tasks = state.store.list_tasks(&sid, None).await;
+    let session = state.store.session_get(&sid).await;
+    let tasks = state.store.task_list(&sid, None).await;
 
     match (session, tasks) {
         (Ok(Some(s)), Ok(task_list)) => {
@@ -122,7 +122,7 @@ pub async fn rename(
         Err(e) => return e,
     };
     let name = body.get("label").and_then(|v| v.as_str());
-    match state.store.name(&sid, name).await {
+    match state.store.session_rename(&sid, name).await {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(proxy_store::StoreError::NotFound(e)) => {
             (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response()
@@ -143,7 +143,7 @@ pub async fn delete(
         Ok(v) => v,
         Err(e) => return e,
     };
-    match state.store.delete_session(&sid).await {
+    match state.store.session_delete(&sid).await {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(proxy_store::StoreError::NotFound(_)) => (
             StatusCode::NOT_FOUND,
@@ -168,7 +168,7 @@ pub async fn summary(
     };
 
     // Get session aggregates (survives task cleanup)
-    let session = state.store.get_session(&sid).await;
+    let session = state.store.session_get(&sid).await;
     let session = match session {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -188,11 +188,11 @@ pub async fn summary(
     };
 
     // Try to get the latest task's detailed summary
-    let tasks = state.store.list_tasks(&sid, None).await;
+    let tasks = state.store.task_list(&sid, None).await;
     if let Ok(ref list) = tasks {
         if !list.is_empty() {
             let latest_id = list[0].id.clone();
-            if let Ok(s) = state.store.summary(&latest_id).await {
+            if let Ok(s) = state.store.summary_get(&latest_id).await {
                 let mut value = serde_json::to_value(&s).unwrap_or_default();
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert("task_input_tokens".into(), json!(s.input_tokens));
@@ -265,7 +265,7 @@ pub async fn export_(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let tasks = state.store.list_tasks(&sid, None).await;
+    let tasks = state.store.task_list(&sid, None).await;
     let format = q.get("format").map(|s| s.as_str()).unwrap_or("json");
 
     match tasks {

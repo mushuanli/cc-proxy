@@ -5,7 +5,7 @@
 //! 2. Forward proxy (absolute URI in request line)
 //! 3. Reverse proxy (path-based, e.g. /v1/messages)
 //!
-//! Flow: resolve route → dispatch upstream → store.write() → events.publish()
+//! Flow: resolve route → dispatch upstream → store.task_write() → events.publish()
 
 use axum::body::Body;
 use axum::extract::State;
@@ -24,13 +24,19 @@ fn safe_truncate_bytes(s: &str, max_bytes: usize) -> &str {
     }
     &s[..end]
 }
+
+fn request_prompt(body: &serde_json::Value) -> Option<String> {
+    proxy_store::summary::analyzer::extract_latest_user_prompt(body)
+}
 use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessage};
 use proxy_common::{ConfigStore, EventBus};
 use proxy_common::{ResolvedRoute, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
-use proxy_store::{NewSessionDefaults, NewTask, ProxyStore};
+use proxy_store::{NewSessionDefaults, NewTask, ProxyStore, StoreResult, Task};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
+
+use dashmap::DashMap;
 
 use crate::upstream;
 use crate::CaptureControl;
@@ -54,7 +60,7 @@ pub struct RelayHandler {
     store: ProxyStore,
     events: EventBus,
     http_client: reqwest::Client,
-    proxy_clients: Arc<Mutex<HashMap<String, reqwest::Client>>>,
+    proxy_clients: Arc<DashMap<String, reqwest::Client>>,
     retry_count: u32,
     request_timeout_secs: u64,
     capture: CaptureControl,
@@ -74,7 +80,7 @@ impl RelayHandler {
             store,
             events,
             http_client: client,
-            proxy_clients: Arc::new(Mutex::new(HashMap::new())),
+            proxy_clients: Arc::new(DashMap::new()),
             retry_count: 3,
             request_timeout_secs: 120,
             capture,
@@ -86,12 +92,10 @@ impl RelayHandler {
     fn client_for_proxy(&self, proxy_url: Option<&str>) -> reqwest::Client {
         match proxy_url {
             None | Some("") => self.http_client.clone(),
-            Some(url) => {
-                let mut cache = self.proxy_clients.lock().unwrap();
-                if let Some(client) = cache.get(url) {
-                    return client.clone();
-                }
-                let client = match reqwest::Proxy::all(url) {
+            Some(url) => self
+                .proxy_clients
+                .entry(url.to_string())
+                .or_insert_with(|| match reqwest::Proxy::all(url) {
                     Ok(proxy) => reqwest::Client::builder()
                         .proxy(proxy)
                         .connect_timeout(std::time::Duration::from_secs(30))
@@ -99,10 +103,8 @@ impl RelayHandler {
                         .build()
                         .unwrap_or_else(|_| self.http_client.clone()),
                     Err(_) => self.http_client.clone(),
-                };
-                cache.insert(url.to_string(), client.clone());
-                client
-            }
+                })
+                .clone(),
         }
     }
 
@@ -299,6 +301,7 @@ async fn proxy_request(
     });
 
     let msg_count = upstream::message_count(protocol, &body_json);
+    let prompt = request_prompt(&body_json);
 
     // Extract session metadata (cwd, project_key) from headers and body
     let session_meta = upstream::extract_session_metadata(&headers, &body_json);
@@ -567,32 +570,31 @@ async fn proxy_request(
                 messages_count: msg_count,
             };
 
-            if let Err(store_err) = relay.store.write(&session_id, task).await {
-                tracing::error!("[relay] failed to write failed task: {}", store_err);
-            }
-
-            if let Ok(stats) = relay.store.get_cost_stats().await {
-                relay.events.publish(WsMessage::CostUpdated(stats));
-            }
-
-            let err_msg = WsMessage::RequestUpdated(proxy_common::models::ProxiedRequest {
-                id: task_id.as_str().to_string(),
-                timestamp: failed_at,
-                method: method.to_string(),
-                path: path_or_url.to_string(),
-                request_headers,
-                request_body: Some(request_body),
-                error: Some(e.clone()),
-                model: Some(effective_model.clone()),
-                provider: Some(route.provider.clone()),
-                duration_ms: Some(duration_ms),
-                session_id: Some(session_id.as_str().to_string()),
-                request_type: protocol.request_type().into(),
-                messages_count: Some(msg_count),
-                priced: Some(priced),
-                ..Default::default()
-            });
-            relay.events.publish(err_msg);
+            let _ = write_and_publish(
+                &relay.store,
+                &relay.events,
+                &session_id,
+                task,
+                WsMessage::RequestUpdated(proxy_common::models::ProxiedRequest {
+                    id: task_id.as_str().to_string(),
+                    timestamp: failed_at,
+                    method: method.to_string(),
+                    path: path_or_url.to_string(),
+                    request_headers,
+                    request_body: Some(request_body),
+                    error: Some(e.clone()),
+                    model: Some(effective_model.clone()),
+                    provider: Some(route.provider.clone()),
+                    duration_ms: Some(duration_ms),
+                    session_id: Some(session_id.as_str().to_string()),
+                    request_type: protocol.request_type().into(),
+                    messages_count: Some(msg_count),
+                    prompt,
+                    priced: Some(priced),
+                    ..Default::default()
+                }),
+            )
+            .await;
 
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -604,11 +606,34 @@ async fn proxy_request(
     // ── Parse response ──
     #[allow(clippy::needless_late_init)]
     let upstream_response: upstream::UpstreamResponse;
+    let task_id = TaskId::generate();
+    let task_started_at =
+        chrono::Utc::now().timestamp_millis() - start.elapsed().as_millis() as i64;
 
     if !is_streaming {
         upstream_response =
             upstream::handle_non_streaming_response(response, start, protocol).await;
     } else {
+        relay.events.publish(WsMessage::NewRequest(
+            proxy_common::models::ProxiedRequest {
+                id: task_id.as_str().to_string(),
+                timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
+                    .unwrap_or_else(chrono::Utc::now),
+                method: method.to_string(),
+                path: path_or_url.to_string(),
+                model: Some(effective_model.clone()),
+                provider: Some(route.provider.clone()),
+                is_streaming: true,
+                status_code: Some(response.status().as_u16()),
+                session_id: Some(session_id.as_str().to_string()),
+                request_type: protocol.request_type().into(),
+                messages_count: Some(msg_count),
+                prompt: prompt.clone(),
+                priced: Some(priced),
+                ..Default::default()
+            },
+        ));
+
         let stream = upstream::stream_upstream_response(response, start, protocol);
         let client_resp = Response::builder()
             .status(stream.status_code)
@@ -632,6 +657,7 @@ async fn proxy_request(
         let ws_include_bodies_val = ws_include_bodies;
         let capture = relay.capture.clone();
         let session_meta_clone = session_meta.clone();
+        let prompt_clone = prompt.clone();
 
         tokio::spawn(async move {
             let meta = match stream_meta.await {
@@ -639,8 +665,6 @@ async fn proxy_request(
                 Err(_) => return,
             };
 
-            let task_id = TaskId::generate();
-            let task_started_at = chrono::Utc::now().timestamp_millis() - meta.duration_ms as i64;
             let task = NewTask {
                 id: Some(task_id.clone()),
                 session_defaults: NewSessionDefaults {
@@ -706,39 +730,15 @@ async fn proxy_request(
                 messages_count: msg_count_val,
             };
 
-            let store_result = store.write(&session_id_clone, task).await;
-            if let Ok(ref t) = store_result {
-                let tid = t.id.clone();
-                let sid = t.session_id.clone();
-                store.cache_summary_if_analyzable(&tid, &sid);
-            }
-
-            // Capture recording
-            capture.record_exchange(
-                session_id_clone.as_str(),
-                &crate::ExchangeInfo {
-                    method: method_str.clone(),
-                    path: path_str.clone(),
-                    status_code: meta.status_code,
-                    request_body: stored_request_body(is_transparent, &body, &body_json),
-                    response_body: meta.content_text.as_deref().unwrap_or("").to_string(),
-                    duration_ms: meta.duration_ms,
-                },
-            );
-
-            if let Ok(stats) = store.get_cost_stats().await {
-                events.publish(WsMessage::CostUpdated(stats));
-            }
-
             let mut proxied = proxy_common::models::ProxiedRequest {
                 id: task_id.as_str().to_string(),
                 timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
                     .unwrap_or_else(chrono::Utc::now),
-                method: method_str,
-                path: path_str,
+                method: method_str.clone(),
+                path: path_str.clone(),
                 request_headers: upstream::redact_headers(&headers),
                 request_body: Some(stored_request_body(is_transparent, &body, &body_json)),
-                model: Some(effective_model_clone),
+                model: Some(effective_model_clone.clone()),
                 provider: Some(route.provider.clone()),
                 response_headers: meta
                     .response_headers
@@ -755,6 +755,7 @@ async fn proxy_request(
                 error: meta.error.clone(),
                 request_type: protocol.request_type().into(),
                 messages_count: Some(msg_count_val),
+                prompt: prompt_clone,
                 priced: Some(priced_val),
                 ..Default::default()
             };
@@ -764,7 +765,27 @@ async fn proxy_request(
                 proxied.content_text = None;
                 proxied.sse_events.clear();
             }
-            events.publish(WsMessage::NewRequest(proxied));
+
+            let _ = write_and_publish(
+                &store,
+                &events,
+                &session_id_clone,
+                task,
+                WsMessage::RequestUpdated(proxied),
+            )
+            .await;
+
+            capture.record_exchange(
+                session_id_clone.as_str(),
+                &crate::ExchangeInfo {
+                    method: method_str.clone(),
+                    path: path_str.clone(),
+                    status_code: meta.status_code,
+                    request_body: stored_request_body(is_transparent, &body, &body_json),
+                    response_body: meta.content_text.as_deref().unwrap_or("").to_string(),
+                    duration_ms: meta.duration_ms,
+                },
+            );
 
             if meta.status_code >= 400 {
                 let err_detail = meta.error.as_deref().unwrap_or("no body");
@@ -818,9 +839,6 @@ async fn proxy_request(
 
     // Build one complete task snapshot for both the event and persistence.
     // The event is not reconstructed by querying the store.
-    let task_id = TaskId::generate();
-    let task_started_at =
-        chrono::Utc::now().timestamp_millis() - upstream_response.duration_ms as i64;
     let request_headers = upstream::redact_headers(&headers);
     let request_body = stored_request_body(is_transparent, &body, &body_json);
     let response_headers: HashMap<String, String> = upstream_response
@@ -893,16 +911,57 @@ async fn proxy_request(
         messages_count: msg_count,
     };
 
-    let store_result = relay.store.write(&session_id, task).await;
-
-    // ── Generate summary cache (async, fire-and-forget) ──
-    if let Ok(ref t) = store_result {
-        if t.status == TaskStatus::Completed && t.request_body.is_some() {
-            relay
-                .store
-                .cache_summary_if_analyzable(&t.id, &t.session_id);
-        }
+    // ── Build ProxiedRequest for WS event ──
+    let mut proxied = proxy_common::models::ProxiedRequest {
+        id: task_id.as_str().to_string(),
+        timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
+            .unwrap_or_else(chrono::Utc::now),
+        method: method.to_string(),
+        path: path_or_url.to_string(),
+        request_headers,
+        request_body: Some(request_body.clone()),
+        model: Some(effective_model.clone()),
+        provider: Some(route.provider.clone()),
+        response_headers,
+        response_body: normalized_response
+            .as_ref()
+            .and_then(|body| serde_json::to_string(body).ok()),
+        content_text: upstream_response.content_text.clone(),
+        input_tokens: Some(upstream_response.input_tokens),
+        output_tokens: Some(upstream_response.output_tokens),
+        cache_creation_input_tokens: Some(upstream_response.cache_creation_tokens),
+        cache_read_input_tokens: Some(upstream_response.cache_read_tokens),
+        status_code: Some(upstream_response.status_code),
+        duration_ms: Some(upstream_response.duration_ms),
+        time_to_first_token_ms: upstream_response.ttft_ms,
+        stop_reason: upstream_response.stop_reason.clone(),
+        message_id: upstream_response.message_id.clone(),
+        session_id: Some(session_id.as_str().to_string()),
+        is_streaming,
+        error: upstream_response.error.clone(),
+        messages_count: Some(msg_count as u32),
+        prompt,
+        cost: None, // filled after store write below
+        priced: Some(priced),
+        request_type: protocol.request_type().into(),
+        sse_events: upstream_response.sse_events.clone(),
+        ..Default::default()
+    };
+    if !ws_include_bodies {
+        proxied.request_body = None;
+        proxied.response_body = None;
+        proxied.content_text = None;
+        proxied.sse_events.clear();
     }
+
+    let store_result = write_and_publish(
+        &relay.store,
+        &relay.events,
+        &session_id,
+        task,
+        WsMessage::NewRequest(proxied),
+    )
+    .await;
 
     // ── Capture recording ──
     relay.capture.record_exchange(
@@ -911,7 +970,7 @@ async fn proxy_request(
             method: method.to_string(),
             path: path_or_url.to_string(),
             status_code: upstream_response.status_code,
-            request_body: request_body.clone(),
+            request_body,
             response_body: upstream_response
                 .content_text
                 .as_deref()
@@ -948,59 +1007,6 @@ async fn proxy_request(
                 upstream_response.duration_ms,
             );
         }
-    }
-
-    // ── Publish event ──
-    let mut proxied = proxy_common::models::ProxiedRequest {
-        id: task_id.as_str().to_string(),
-        timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
-            .unwrap_or_else(chrono::Utc::now),
-        method: method.to_string(),
-        path: path_or_url.to_string(),
-        request_headers,
-        request_body: Some(request_body),
-        // Use resolved model so frontend can look up pricing correctly
-        model: Some(effective_model.clone()),
-        provider: Some(route.provider.clone()),
-        response_headers,
-        response_body: normalized_response
-            .as_ref()
-            .and_then(|body| serde_json::to_string(body).ok()),
-        content_text: upstream_response.content_text.clone(),
-        input_tokens: Some(upstream_response.input_tokens),
-        output_tokens: Some(upstream_response.output_tokens),
-        cache_creation_input_tokens: Some(upstream_response.cache_creation_tokens),
-        cache_read_input_tokens: Some(upstream_response.cache_read_tokens),
-        status_code: Some(upstream_response.status_code),
-        duration_ms: Some(upstream_response.duration_ms),
-        time_to_first_token_ms: upstream_response.ttft_ms,
-        stop_reason: upstream_response.stop_reason.clone(),
-        message_id: upstream_response.message_id.clone(),
-        session_id: Some(session_id.as_str().to_string()),
-        is_streaming,
-        error: upstream_response.error.clone(),
-        messages_count: Some(msg_count as u32),
-        cost: store_result
-            .as_ref()
-            .ok()
-            .map(|task| task.cost_microusd as f64 / 1_000_000.0),
-        priced: Some(priced),
-        request_type: protocol.request_type().into(),
-        sse_events: upstream_response.sse_events.clone(),
-        ..Default::default()
-    };
-    if !ws_include_bodies {
-        proxied.request_body = None;
-        proxied.response_body = None;
-        proxied.content_text = None;
-        proxied.sse_events.clear();
-    }
-
-    relay.events.publish(WsMessage::NewRequest(proxied));
-
-    // Push real-time cost stats so frontend can update inspector without separate API call
-    if let Ok(stats) = relay.store.get_cost_stats().await {
-        relay.events.publish(WsMessage::CostUpdated(stats));
     }
 
     // ── Build client response ──
@@ -1042,6 +1048,27 @@ async fn proxy_request(
                 .body(Body::from("Failed to build response"))
                 .unwrap()
         })
+}
+
+/// Unified persistence + notification: write task, cache summary, publish event, emit cost stats.
+async fn write_and_publish(
+    store: &ProxyStore,
+    events: &EventBus,
+    session_id: &SessionId,
+    task: NewTask,
+    ws_msg: WsMessage,
+) -> StoreResult<Task> {
+    let result = store.task_write(session_id, task).await;
+    if let Ok(ref t) = result {
+        if t.request_body.is_some() {
+            store.summary_cache(&t.id, &t.session_id);
+        }
+    }
+    if let Ok(stats) = store.usage_cost_stats().await {
+        events.publish(WsMessage::CostUpdated(stats));
+    }
+    events.publish(ws_msg);
+    result
 }
 
 fn client_type(protocol: upstream::ApiProtocol) -> ClientType {

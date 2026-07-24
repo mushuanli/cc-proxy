@@ -112,6 +112,7 @@ pub struct Task {
 
     pub summary_json: Option<String>,
     pub summary_created_at: Option<i64>,
+    pub prompt_text: Option<String>,
 
     pub metadata: serde_json::Value,
 
@@ -225,6 +226,7 @@ pub struct TaskListItem {
     pub duration_ms: Option<i64>,
     pub ttft_ms: Option<i64>,
     pub summary_json: Option<String>,
+    pub prompt_text: Option<String>,
     /// Number of messages in the request body.
     pub messages_count: u32,
 }

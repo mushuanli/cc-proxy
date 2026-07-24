@@ -92,7 +92,7 @@ impl ProxyStore {
     ///
     /// Cost is computed internally from `task.billing.rates` and `task.usage` —
     /// the caller does not need to calculate cost.
-    pub async fn write(&self, session_id: &SessionId, task: NewTask) -> StoreResult<Task> {
+    pub async fn task_write(&self, session_id: &SessionId, task: NewTask) -> StoreResult<Task> {
         let sid_short: String = session_id
             .as_str()
             .chars()
@@ -226,7 +226,7 @@ impl ProxyStore {
     // ── Read ──
 
     /// Get full task details by id.
-    pub async fn info(&self, task_id: &TaskId) -> StoreResult<Task> {
+    pub async fn task_info(&self, task_id: &TaskId) -> StoreResult<Task> {
         let this = self.clone();
         let tid = task_id.clone();
         Self::blocking(move || {
@@ -238,7 +238,7 @@ impl ProxyStore {
     }
 
     /// List sessions with optional filters.
-    pub async fn list_sessions(&self, filter: SessionFilter) -> StoreResult<Vec<SessionListItem>> {
+    pub async fn session_list(&self, filter: SessionFilter) -> StoreResult<Vec<SessionListItem>> {
         let this = self.clone();
         Self::blocking(move || {
             let conn = this.inner.conn.lock().unwrap();
@@ -248,7 +248,7 @@ impl ProxyStore {
     }
 
     /// Get a single session by exact ID.
-    pub async fn get_session(&self, id: &SessionId) -> StoreResult<Option<Session>> {
+    pub async fn session_get(&self, id: &SessionId) -> StoreResult<Option<Session>> {
         let this = self.clone();
         let sid = id.clone();
         Self::blocking(move || {
@@ -259,7 +259,7 @@ impl ProxyStore {
     }
 
     /// List tasks for a session.
-    pub async fn list_tasks(
+    pub async fn task_list(
         &self,
         session_id: &SessionId,
         time_range: Option<TimeRange>,
@@ -275,7 +275,7 @@ impl ProxyStore {
     }
 
     /// Rename a session.
-    pub async fn name(
+    pub async fn session_rename(
         &self,
         session_id: &SessionId,
         new_name: Option<&str>,
@@ -296,7 +296,7 @@ impl ProxyStore {
     }
 
     /// Delete task detail while preserving the session's historical aggregates.
-    pub async fn delete_task(&self, task_id: &TaskId) -> StoreResult<()> {
+    pub async fn task_delete(&self, task_id: &TaskId) -> StoreResult<()> {
         let this = self.clone();
         let tid = task_id.clone();
         Self::blocking(move || {
@@ -309,7 +309,7 @@ impl ProxyStore {
         .await
     }
 
-    pub async fn delete_tasks(&self, task_ids: &[TaskId]) -> StoreResult<usize> {
+    pub async fn task_delete_batch(&self, task_ids: &[TaskId]) -> StoreResult<usize> {
         let this = self.clone();
         let tids = task_ids.to_vec();
         Self::blocking(move || {
@@ -322,7 +322,7 @@ impl ProxyStore {
         .await
     }
 
-    pub async fn delete_session(&self, session_id: &SessionId) -> StoreResult<()> {
+    pub async fn session_delete(&self, session_id: &SessionId) -> StoreResult<()> {
         let this = self.clone();
         let sid = session_id.clone();
         Self::blocking(move || {
@@ -335,7 +335,7 @@ impl ProxyStore {
         .await
     }
 
-    pub async fn stop_session(&self, session_id: &SessionId, ended_at: i64) -> StoreResult<bool> {
+    pub async fn session_stop(&self, session_id: &SessionId, ended_at: i64) -> StoreResult<bool> {
         let this = self.clone();
         let sid = session_id.clone();
         Self::blocking(move || {
@@ -348,7 +348,7 @@ impl ProxyStore {
     // ── Archive ──
 
     /// Archive sessions. If session_ids is None, archives all dirty sessions.
-    pub async fn archive(
+    pub async fn archive_create(
         &self,
         session_ids: Option<&[SessionId]>,
         options: ArchiveOptions,
@@ -364,7 +364,7 @@ impl ProxyStore {
                     let sessions = db::sessions::list_sessions(&conn, &filter)?;
                     sessions
                         .into_iter()
-                        .filter(|s| s.archive_dirty)
+                        .filter(|s| options.force || s.archive_dirty)
                         .map(|s| s.id)
                         .collect()
                 }
@@ -379,21 +379,21 @@ impl ProxyStore {
     }
 
     /// List archive files on disk.
-    pub async fn list_archives(&self, filter: Option<&str>) -> StoreResult<Vec<ArchiveInfo>> {
+    pub async fn archive_list(&self, filter: Option<&str>) -> StoreResult<Vec<ArchiveInfo>> {
         let this = self.clone();
         let f = filter.map(String::from);
         Self::blocking(move || this.inner.archive.list_archives(f.as_deref())).await
     }
 
     /// Read the raw content of an archive YAML file.
-    pub async fn read_archive_file(&self, filename: &str) -> StoreResult<String> {
+    pub async fn archive_read(&self, filename: &str) -> StoreResult<String> {
         let this = self.clone();
         let name = filename.to_string();
         Self::blocking(move || this.inner.archive.read_file(&name)).await
     }
 
     /// Full-text search across archive YAML files.
-    pub async fn search_archives(
+    pub async fn archive_search(
         &self,
         query: &str,
         role_filter: Option<&str>,
@@ -405,7 +405,7 @@ impl ProxyStore {
     }
 
     /// Rename a session in both the DB and the archive YAML file.
-    pub async fn rename_archive_session(
+    pub async fn archive_rename_session(
         &self,
         session_id: &SessionId,
         new_name: Option<&str>,
@@ -428,7 +428,7 @@ impl ProxyStore {
     }
 
     /// Clean up tasks older than retention for all archived sessions.
-    pub async fn cleanup(&self, retention_hours: u64) -> StoreResult<u64> {
+    pub async fn cleanup_tasks(&self, retention_hours: u64) -> StoreResult<u64> {
         let this = self.clone();
         Self::blocking(move || {
             let conn = this.inner.conn.lock().unwrap();
@@ -490,7 +490,7 @@ impl ProxyStore {
     // ── Summary ──
 
     /// Get task summary with full analysis (SessionSummary).
-    pub async fn summary(&self, task_id: &TaskId) -> StoreResult<SessionSummary> {
+    pub async fn summary_get(&self, task_id: &TaskId) -> StoreResult<SessionSummary> {
         let this = self.clone();
         let tid = task_id.clone();
         Self::blocking(move || {
@@ -505,7 +505,7 @@ impl ProxyStore {
 
     /// Generate and cache a task summary in one atomic operation.
     /// Fire-and-forget: errors are logged but not returned.
-    pub fn cache_summary_if_analyzable(&self, task_id: &TaskId, session_id: &SessionId) {
+    pub fn summary_cache(&self, task_id: &TaskId, session_id: &SessionId) {
         let this = self.clone();
         let tid = task_id.clone();
         let sid = session_id.clone();
@@ -525,7 +525,7 @@ impl ProxyStore {
     }
 
     /// Query daily usage for a date range.
-    pub async fn query_daily_usage_range(
+    pub async fn usage_query_range(
         &self,
         from: &str,
         to: &str,
@@ -541,7 +541,7 @@ impl ProxyStore {
     }
 
     /// Get aggregated cost stats for today and current month.
-    pub async fn get_cost_stats(&self) -> StoreResult<proxy_common::models::CostStats> {
+    pub async fn usage_cost_stats(&self) -> StoreResult<proxy_common::models::CostStats> {
         let this = self.clone();
         Self::blocking(move || {
             let conn = this.inner.conn.lock().unwrap();
@@ -559,7 +559,7 @@ impl ProxyStore {
                 session_ids,
                 options,
             } => {
-                let results = self.archive(session_ids.as_deref(), options).await?;
+                let results = self.archive_create(session_ids.as_deref(), options).await?;
                 Ok(RunResult::Archive(results))
             }
             RunCommand::Summary { task_ids } => {
@@ -705,7 +705,7 @@ mod tests {
         }
         let sid = SessionId::new("session-test".into()).unwrap();
         assert!(store
-            .write(&sid, task("task-rollback", 1_700_000_000_000))
+            .task_write(&sid, task("task-rollback", 1_700_000_000_000))
             .await
             .is_err());
         let conn = store.inner.conn.lock().unwrap();
@@ -729,12 +729,12 @@ mod tests {
         let (store, root) = temp_store();
         let sid = SessionId::new("session-test".into()).unwrap();
         let written = store
-            .write(&sid, task("task-preserve", 1_700_000_000_000))
+            .task_write(&sid, task("task-preserve", 1_700_000_000_000))
             .await
             .unwrap();
-        store.delete_task(&written.id).await.unwrap();
-        assert!(store.info(&written.id).await.is_err());
-        let session = store.get_session(&sid).await.unwrap().unwrap();
+        store.task_delete(&written.id).await.unwrap();
+        assert!(store.task_info(&written.id).await.is_err());
+        let session = store.session_get(&sid).await.unwrap().unwrap();
         assert_eq!(session.task_count, 1);
         assert_eq!(session.total_input_tokens, 10);
         assert_eq!(session.total_output_tokens, 20);
@@ -749,11 +749,11 @@ mod tests {
         let (store, root) = temp_store();
         let sid = SessionId::new("session-test".into()).unwrap();
         store
-            .write(&sid, task("task-archive-delete", 1_700_000_000_000))
+            .task_write(&sid, task("task-archive-delete", 1_700_000_000_000))
             .await
             .unwrap();
         store
-            .archive(
+            .archive_create(
                 Some(std::slice::from_ref(&sid)),
                 ArchiveOptions {
                     task_retention_hours: 0,
@@ -764,9 +764,58 @@ mod tests {
             .unwrap();
         let archive_path = root.join("archives").join("session-test.yaml");
         assert!(archive_path.exists());
-        store.delete_session(&sid).await.unwrap();
+        store.session_delete(&sid).await.unwrap();
         assert!(!archive_path.exists());
-        assert!(store.get_session(&sid).await.unwrap().is_none());
+        assert!(store.session_get(&sid).await.unwrap().is_none());
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn persisted_summary_contains_all_tasks_without_raw_messages() {
+        let (store, root) = temp_store();
+        let sid = SessionId::new("session-test".into()).unwrap();
+        store
+            .task_write(&sid, task("task-summary-1", 1_700_000_000_000))
+            .await
+            .unwrap();
+        store
+            .task_write(&sid, task("task-summary-2", 1_700_000_001_000))
+            .await
+            .unwrap();
+
+        store
+            .archive_create(
+                Some(std::slice::from_ref(&sid)),
+                ArchiveOptions {
+                    task_retention_hours: 1,
+                    force: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(store.task_list(&sid, None).await.unwrap().is_empty());
+        store
+            .archive_create(
+                Some(std::slice::from_ref(&sid)),
+                ArchiveOptions {
+                    task_retention_hours: 0,
+                    force: true,
+                },
+            )
+            .await
+            .unwrap();
+
+        let yaml = std::fs::read_to_string(root.join("archives/session-test.yaml")).unwrap();
+        let document: crate::archive::format::ArchiveDocument =
+            serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(document.version, 3);
+        assert_eq!(document.statistics.task_count, 2);
+        assert_eq!(document.tasks.len(), 2);
+        assert!(document.tasks.iter().all(|task| task.summary.is_some()));
+        assert!(!yaml.contains("request_body:"));
+        assert!(!yaml.contains("response_body:"));
+        assert!(!yaml.contains("\n    messages:"));
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }

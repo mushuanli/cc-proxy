@@ -168,20 +168,13 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // Capture
         .route("/api/capture", post(settings::toggle_capture))
         .route("/api/capture/status", get(settings::capture_status))
-        // MCP destination
-        .route(
-            "/api/mcp-destination",
-            get(settings::get_mcp).put(settings::set_mcp),
-        )
+        // Summaries (generate + persist)
+        .route("/api/summaries", post(settings::summarize))
+        .route("/api/summaries/all", post(settings::summarize_all))
         // Clear
         .route("/api/clear", post(settings::clear_all))
-        .route("/api/clear-mcp", post(settings::clear_mcp))
-        .route("/api/clear-hooks", post(settings::clear_hooks))
-        // Hook
+        // Hook (session lifecycle from Claude Code)
         .route("/api/hook-event", post(settings::hook_event))
-        // Flush
-        .route("/api/flush", post(settings::flush))
-        .route("/api/flush-all", post(settings::flush_all))
         // Cleanup
         .route("/api/cleanup", post(settings::trigger_cleanup))
         // Global proxy

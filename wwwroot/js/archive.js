@@ -102,7 +102,7 @@ export async function loadArchiveList() {
     const status = document.getElementById('archive-search-status');
     status.textContent = t('archive.loading');
     try {
-        const resp = await fetch('/api/archive/list');
+        const resp = await fetch('/api/summaries/list');
         state.archiveFiles = await resp.json();
         renderArchiveList(state.archiveFiles);
     } catch (e) {
@@ -113,7 +113,7 @@ export async function loadArchiveList() {
 
 // Keys whose child block is collapsed by default
 const YAML_AUTO_COLLAPSE = new Set([
-    'request_body', 'messages', 'content', 'sse_events', 'content_text', 'session', 'request_headers',
+    'pricing', 'daily_usage', 'assistant_actions', 'touched_files', 'stats',
 ]);
 
 /**
@@ -222,7 +222,7 @@ export async function loadArchiveFile(filename) {
     nameEl.textContent = meta.name || archiveSid(filename).slice(-8);
 
     try {
-        const resp = await fetch(`/api/archive/file/${encodeURIComponent(filename)}`);
+        const resp = await fetch(`/api/summaries/file/${encodeURIComponent(filename)}`);
         const text = await resp.text();
         renderYamlFoldable(text, body);
     } catch (e) {
@@ -235,7 +235,7 @@ export async function runArchiveSearch(q) {
     const status = document.getElementById('archive-search-status');
     status.textContent = t('archive.loading');
     try {
-        const resp = await fetch(`/api/archive/search?q=${encodeURIComponent(q)}`);
+        const resp = await fetch(`/api/summaries/search?q=${encodeURIComponent(q)}`);
         const results = await resp.json();
         renderArchiveSearch(results, q);
     } catch (e) {
@@ -262,7 +262,7 @@ export function startArchiveRename() {
     async function commit() {
         const newName = input.value.trim();
         try {
-            await fetch(`/api/archive/name/${encodeURIComponent(sid)}`, {
+            await fetch(`/api/summaries/name/${encodeURIComponent(sid)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: newName }),

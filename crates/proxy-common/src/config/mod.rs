@@ -1,22 +1,23 @@
 #[allow(clippy::module_inception)]
-pub mod config;
-pub mod error;
-pub mod loader;
-pub mod migration;
-pub mod persist;
-pub mod pricing;
-pub mod provider;
-pub mod routing;
-pub mod store;
-pub mod upstream;
-pub mod validation;
+pub(crate) mod config;
+pub(crate) mod error;
+pub(crate) mod loader;
+pub(crate) mod migration;
+pub(crate) mod persist;
+pub(crate) mod pricing;
+pub(crate) mod provider;
+pub(crate) mod routing;
+pub(crate) mod store;
+pub(crate) mod upstream;
+pub(crate) mod validation;
 
-pub use config::{
-    AppConfig, LoggingConfig, ProxyConfig, ServerConfig, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM,
-};
-pub use error::{ConfigError, ConfigResult};
-pub use loader::load_config;
-pub use pricing::{BillingSnapshot, ModelPricing, ResolvedRoute};
+// Only re-export what external callers actually use.
+// Internal types (AppConfig, TierRule, BillingSnapshot, etc.) stay accessible
+// via crate::config::X but are not visible outside proxy-common.
+pub use config::{AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
+pub(crate) use config::{AppConfig, ProxyConfig};
+pub use error::ConfigError;
+pub use pricing::{ModelPricing, ResolvedRoute};
 pub use provider::Provider;
 pub use store::ConfigStore;
-pub use upstream::{TierRule, UpstreamConfig};
+pub use upstream::UpstreamConfig;

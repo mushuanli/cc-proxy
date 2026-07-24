@@ -19,9 +19,7 @@
             <a href="#" data-view="cost" data-i18n="nav.cost">Cost</a>
             <a href="#" data-view="settings" data-i18n="nav.settings">Settings</a>
             <a href="#" data-view="conversation" data-i18n="nav.conversation">Conversation</a>
-            <a href="#" data-view="mcp" data-i18n="nav.mcp">MCP Observer</a>
-            <a href="#" data-view="hooks" data-i18n="nav.hooks">Hooks</a>
-            <a href="#" data-view="archive" data-i18n="nav.archive">Archive</a>
+            <a href="#" data-view="summaries" data-i18n="nav.summaries">Summaries</a>
         </nav>
         <div class="status-bar">
             <span id="connection-status" class="disconnected" data-i18n="status.disconnected">Disconnected</span>
@@ -36,7 +34,7 @@
             <div class="toolbar">
                 <button id="btn-toggle-capture" data-i18n="inspector.record" data-i18n-title="inspector.record" title="Toggle live traffic recording">Record</button>
                 <button id="btn-export-selected" class="hidden" data-i18n="inspector.export_selected">Export Selected</button>
-                <button id="btn-flush-selected" class="hidden" data-i18n="inspector.export_to_disk" data-i18n-title="inspector.export_to_disk" title="Export selected sessions to sessions/ directory as YAML files">Export to Disk</button>
+                <button id="btn-summary-selected" class="hidden" data-i18n="inspector.save_summaries" data-i18n-title="inspector.save_summaries" title="Save readable summaries for selected sessions">Save Summaries</button>
                 <button id="btn-delete-selected" class="hidden" style="background:var(--error)">Delete Selected (<span id="selected-count">0</span>)</button>
                 <span class="sep">|</span>
                 <button id="btn-toggle-expand" data-i18n="inspector.expand_all" title="Expand/Collapse all sessions">+ All</button>
@@ -279,7 +277,7 @@
                         <div class="form-actions">
                             <button id="btn-retention-save" class="btn-primary" data-i18n="settings.save">Save</button>
                             <button id="btn-cleanup-now" data-i18n="settings.clean_up_now">Clean Up Now</button>
-                            <button id="btn-flush-now" data-i18n="settings.export_all_now" title="Export all sessions to sessions/ directory">Export All Now</button>
+                            <button id="btn-summary-all" data-i18n="settings.summarize_all_now" data-i18n-title="settings.summarize_all_now" title="Generate readable summaries for all sessions">Generate All Summaries</button>
                         </div>
                         <div id="ret-cleanup-result" class="cleanup-result hidden"></div>
                     </div>
@@ -317,56 +315,12 @@
             <div id="conversation-timeline" class="timeline"></div>
         </section>
 
-        <!-- ── MCP Observer View ── -->
-        <section id="view-mcp" class="view">
-            <div class="toolbar">
-                <label data-i18n="mcp.destination">MCP Destination:</label>
-                <input type="text" id="mcp-destination" data-i18n-placeholder="mcp.destination_placeholder" placeholder="e.g. https://gitmcp.io/user/repo" size="50">
-                <button id="btn-set-mcp" data-i18n="mcp.set">Set</button>
-                <button id="btn-clear-mcp-view" data-i18n="mcp.clear">Clear</button>
-            </div>
-            <div class="table-container">
-                <table id="mcp-table">
-                    <thead>
-                        <tr>
-                            <th data-i18n="table.time">Time</th>
-                            <th data-i18n="table.method">Method</th>
-                            <th data-i18n="table.status">Status</th>
-                            <th data-i18n="table.request_body">Request Body</th>
-                            <th data-i18n="table.response_body">Response Body</th>
-                        </tr>
-                    </thead>
-                    <tbody id="mcp-tbody"></tbody>
-                </table>
-            </div>
-        </section>
-
-        <!-- ── Hooks View ── -->
-        <section id="view-hooks" class="view">
-            <div class="toolbar">
-                <button id="btn-clear-hooks" data-i18n="hooks.clear_hooks">Clear Hooks</button>
-            </div>
-            <div class="table-container">
-                <table id="hooks-table">
-                    <thead>
-                        <tr>
-                            <th data-i18n="table.time">Time</th>
-                            <th data-i18n="table.event">Event</th>
-                            <th data-i18n="table.session">Session</th>
-                            <th data-i18n="table.cwd">CWD</th>
-                            <th data-i18n="table.exit_code">Exit Code</th>
-                        </tr>
-                    </thead>
-                    <tbody id="hooks-tbody"></tbody>
-                </table>
-            </div>
-        </section>
-        <!-- ── Archive View ── -->
-        <section id="view-archive" class="view">
+        <!-- ── Persisted Summaries View ── -->
+        <section id="view-summaries" class="view">
             <div class="toolbar">
                 <input type="search" id="archive-search-input" class="archive-search-input"
                        data-i18n-placeholder="archive.search_placeholder"
-                       placeholder="Search archived sessions...">
+                       placeholder="Search saved summaries...">
                 <span id="archive-search-status" style="font-size:0.82rem;color:var(--text-muted)"></span>
                 <button id="btn-archive-refresh" data-i18n="archive.refresh">Refresh</button>
             </div>

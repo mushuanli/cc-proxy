@@ -128,7 +128,7 @@ export async function openSummaryPanel(sid) {
             document.getElementById('summary-title').textContent = shortId;
             // Wire up the link to switch to Archive tab and load the file
             content.querySelector('.summary-archive-link').addEventListener('click', () => {
-                document.querySelector('[data-view="archive"]')?.click();
+                document.querySelector('[data-view="summaries"]')?.click();
                 // Slight delay so the view switches before loading
                 setTimeout(() => {
                     import('./archive.js').then(m => m.loadArchiveFile(`${sid}.yaml`));

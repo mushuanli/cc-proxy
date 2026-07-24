@@ -37,40 +37,48 @@ impl ArchiveManager {
         })?;
 
         if !options.force && !session.archive_dirty {
-            return Ok(ArchiveInfo {
-                session_id: session.id.clone(),
-                name: session.name.clone(),
-                file_path: self.session_archive_path(session_id)?,
-                archived_at: session.last_archived_at,
-                task_count: session.task_count,
-            });
+            return self.archive_info(&session, session.last_archived_at);
         }
 
-        let mut latest_task = tasks::get_latest_completed_task(conn, session_id)?;
-        if let Some(task) = latest_task.as_mut() {
-            if task.summary_json.is_none() {
-                if let Some(summary) = crate::summary::analyzer::analyze_task(task) {
-                    let json = serde_json::to_string(&summary)?;
-                    tasks::update_summary(conn, &task.id, &json)?;
-                    task.summary_json = Some(json);
-                }
-            }
-        }
+        let (file_path, latest_task) = self.persist_summary(conn, &session)?;
+        let now_ms = Self::checkpoint_and_cleanup(conn, session_id, latest_task.as_ref(), options)?;
+        Ok(ArchiveInfo {
+            session_id: session.id,
+            name: session.name,
+            file_path,
+            archived_at: Some(now_ms),
+            task_count: session.task_count,
+        })
+    }
+
+    fn persist_summary(
+        &self,
+        conn: &Connection,
+        session: &crate::models::Session,
+    ) -> StoreResult<(String, Option<crate::models::Task>)> {
+        let session_id = &session.id;
+        let summary_tasks = Self::load_summary_tasks(conn, session_id)?;
+        let latest_task = tasks::get_latest_completed_task(conn, session_id)?;
         let daily_usage = crate::db::usage::get_session_daily_usage(conn, session_id)?;
-
-        let doc = build_archive(&session, latest_task.as_ref(), &daily_usage);
-        let yaml = serde_yaml::to_string(&doc)?;
-
         let file_path = self.session_archive_path(session_id)?;
+        let mut doc = build_archive(&session, &summary_tasks, &daily_usage);
+        Self::merge_existing_tasks(&file_path, &mut doc);
+        let yaml = serde_yaml::to_string(&doc)?;
         file::atomic_write(&std::path::PathBuf::from(&file_path), &yaml)?;
+        Ok((file_path, latest_task))
+    }
 
+    fn checkpoint_and_cleanup(
+        conn: &Connection,
+        session_id: &SessionId,
+        latest_task: Option<&crate::models::Task>,
+        options: &ArchiveOptions,
+    ) -> StoreResult<i64> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let checkpoint_task_id = latest_task
-            .as_ref()
             .map(|t| t.id.as_str().to_string())
             .unwrap_or_default();
-        let checkpoint_seq = latest_task.as_ref().map(|t| t.sequence_no).unwrap_or(0);
-
+        let checkpoint_seq = latest_task.map(|t| t.sequence_no).unwrap_or(0);
         sessions::update_archive_checkpoint(
             conn,
             session_id,
@@ -78,20 +86,80 @@ impl ArchiveManager {
             &checkpoint_task_id,
             checkpoint_seq,
         )?;
-
-        // Clean up old tasks past retention
         if options.task_retention_hours > 0 {
             let cutoff_ms = now_ms - (options.task_retention_hours as i64 * 3600 * 1000);
             tasks::cleanup_old_tasks(conn, session_id, checkpoint_seq, cutoff_ms)?;
         }
+        Ok(now_ms)
+    }
 
+    fn archive_info(
+        &self,
+        session: &crate::models::Session,
+        archived_at: Option<i64>,
+    ) -> StoreResult<ArchiveInfo> {
         Ok(ArchiveInfo {
             session_id: session.id.clone(),
             name: session.name.clone(),
-            file_path,
-            archived_at: Some(now_ms),
+            file_path: self.session_archive_path(&session.id)?,
+            archived_at,
             task_count: session.task_count,
         })
+    }
+
+    fn load_summary_tasks(
+        conn: &Connection,
+        session_id: &SessionId,
+    ) -> StoreResult<Vec<crate::models::Task>> {
+        let items = tasks::list_tasks(conn, session_id, None)?;
+        let mut result = Vec::with_capacity(items.len());
+        for item in items {
+            if let Some(mut task) = tasks::get_task(conn, &item.id)? {
+                Self::ensure_task_summary(conn, &mut task)?;
+                result.push(task);
+            }
+        }
+        Ok(result)
+    }
+
+    fn ensure_task_summary(conn: &Connection, task: &mut crate::models::Task) -> StoreResult<()> {
+        if task.summary_json.is_some() {
+            return Ok(());
+        }
+        let Some(summary) = crate::summary::analyzer::analyze_task(task) else {
+            return Ok(());
+        };
+        let json = serde_json::to_string(&summary)?;
+        tasks::update_summary(conn, &task.id, &json)?;
+        task.summary_json = Some(json);
+        Ok(())
+    }
+
+    fn merge_existing_tasks(
+        file_path: &str,
+        document: &mut crate::archive::format::ArchiveDocument,
+    ) {
+        let Ok(yaml) = std::fs::read_to_string(file_path) else {
+            return;
+        };
+        let Ok(existing) = serde_yaml::from_str::<crate::archive::format::ArchiveDocument>(&yaml)
+        else {
+            return;
+        };
+        let current_ids = document
+            .tasks
+            .iter()
+            .map(|task| task.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        document.tasks.extend(
+            existing
+                .tasks
+                .into_iter()
+                .filter(|task| !current_ids.contains(&task.id)),
+        );
+        document
+            .tasks
+            .sort_by(|left, right| right.sequence_no.cmp(&left.sequence_no));
     }
 
     /// List all archive files on disk.

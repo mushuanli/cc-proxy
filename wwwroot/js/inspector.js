@@ -372,6 +372,11 @@ function findLastUserText(messages) {
     return '';
 }
 
+function renderPromptSummary(prompt) {
+    return `<span class="req-summary-prompt" title="${esc(prompt)}">`
+        + `💬 ${esc(truncate(prompt, 40))}</span>`;
+}
+
 function buildRequestSummary(req) {
     const bodyJson = req.request_body ? tryParseJson(req.request_body) : null;
     const msgCount = req.messages_count
@@ -381,25 +386,9 @@ function buildRequestSummary(req) {
         ? `<span class="req-msg-count">[${msgCount}]</span> `
         : '';
 
-    // ── Fast path: use pre-computed summary stored in DB ──
-    if (req.last_msg_summary && !bodyJson) {
-        const s = tryParseJson(req.last_msg_summary);
-        if (s) {
-            // New format: TaskSummary { user_request, assistant_result }
-            if (s.user_request) {
-                return `${countChip}<span class="req-summary-text">${esc(truncate(s.user_request, 80))}</span>`;
-            }
-            // Legacy format: { t: 'text', v } or { t: 'tools', tools }
-            if (s.t === 'text' && s.v) {
-                return `${countChip}<span class="req-summary-text">${esc(s.v)}</span>`;
-            }
-            if (s.t === 'tools' && Array.isArray(s.tools)) {
-                const promptPart = s.prompt
-                    ? `<span class="req-summary-prompt" title="${esc(s.prompt)}">💬 ${esc(truncate(s.prompt, 40))}</span> `
-                    : '';
-                return `${countChip}${promptPart}${renderToolChips(s.tools, req.id)}`;
-            }
-        }
+    // ── Fast path: prompt is loaded directly without the full request body ──
+    if (req.prompt && !bodyJson) {
+        return `${countChip}${renderPromptSummary(req.prompt)}`;
     }
 
     // ── Full path: body available (after row click) ──
@@ -546,18 +535,38 @@ export function renderPage() {
             tbody.appendChild(archivedTr);
 
         } else if (group.requests.length === 1) {
-            // Case 1: single request — render flat, no session header needed
+            // Single request — render as foldable session header + child row
+            const isExpanded = state.expandedSessions.has(group.session_id);
             const req = group.requests[0];
-            const tr = document.createElement('tr');
-            tr.id = `req-${req.id}`;
-            tr.dataset.session = group.session_id;
-            tr.innerHTML = buildRequestRowHTML(req);
-            tr.addEventListener('click', (e) => {
-                if (e.target.closest('.row-chk') || e.target.closest('.btn-delete-row')) return;
+
+            const headerTr = document.createElement('tr');
+            headerTr.className = 'session-header' + (state.currentSelectedSession === group.session_id ? ' session-selected' : '');
+            headerTr.dataset.session = group.session_id;
+            headerTr.innerHTML = buildSessionHeaderHTML(group, isExpanded);
+            headerTr.addEventListener('click', (e) => {
+                if (e.target.closest('.session-chk')) return;
+                if (e.target.closest('.session-expand-icon')) {
+                    toggleSession(group.session_id);
+                    return;
+                }
                 selectSession(group.session_id);
                 if (req.id) showRequestDetail(req);
             });
-            tbody.appendChild(tr);
+            tbody.appendChild(headerTr);
+
+            if (isExpanded) {
+                const tr = document.createElement('tr');
+                tr.id = `req-${req.id}`;
+                tr.className = 'session-child';
+                tr.dataset.session = group.session_id;
+                tr.innerHTML = buildRequestRowHTML(req, true);
+                tr.addEventListener('click', (e) => {
+                    if (!req.id || e.target.closest('.row-chk') || e.target.closest('.btn-delete-row')) return;
+                    showRequestDetail(req);
+                    if (_openRequestSummaryPanel) _openRequestSummaryPanel(req.id, group.session_id);
+                });
+                tbody.appendChild(tr);
+            }
 
         } else {
             // Case 2: multiple requests — expandable session group
@@ -577,10 +586,11 @@ export function renderPage() {
             });
             tbody.appendChild(headerTr);
 
-            group.requests.forEach(req => {
+            if (isExpanded) {
+                group.requests.forEach(req => {
                 const tr = document.createElement('tr');
                 tr.id = `req-${req.id}`;
-                tr.className = 'session-child' + (isExpanded ? '' : ' collapsed');
+                tr.className = 'session-child';
                 tr.dataset.session = group.session_id;
                 tr.innerHTML = buildRequestRowHTML(req, true);
                 tr.addEventListener('click', (e) => {
@@ -590,6 +600,7 @@ export function renderPage() {
                 });
                 tbody.appendChild(tr);
             });
+            }
         }
 
         // Spacer between groups
@@ -693,7 +704,7 @@ export function showDetailTab(tab, req) {
             content.innerHTML = renderDetailBody(formatHeaders(req.response_headers), req.response_body);
             break;
         case 'sse':
-            content.textContent = formatSseContent(req);
+            content.innerHTML = `<pre style="width:100%;white-space:pre-wrap;word-break:break-all;margin:0;font:inherit;color:inherit;">${esc(formatSseContent(req))}</pre>`;
             break;
     }
 }
@@ -773,12 +784,15 @@ export function appendSseEvent(event) {
     const activeTab = document.querySelector('.detail-tabs .tab.active')?.dataset.tab;
     if (activeTab === 'sse') {
         const content = document.getElementById('detail-content');
-        if (!content.dataset.streamStarted) {
-            content.dataset.streamStarted = '1';
-            content.textContent = '(streaming…)\n\n';
+        const pre = content.querySelector('pre');
+        if (pre) {
+            if (!content.dataset.streamStarted) {
+                content.dataset.streamStarted = '1';
+                pre.textContent = '(streaming…)\n\n';
+            }
+            pre.textContent += `event: ${event.event_type || '—'}\ndata: ${event.data || '—'}\n\n`;
+            content.scrollTop = content.scrollHeight;
         }
-        content.textContent += `event: ${event.event_type || '—'}\ndata: ${event.data || '—'}\n\n`;
-        content.scrollTop = content.scrollHeight;
     }
 }
 
@@ -804,7 +818,7 @@ export function renderFullscreenTab(tab, req) {
     switch (tab) {
         case 'request': body.innerHTML = renderDetailBody(formatHeaders(req.request_headers), req.request_body); break;
         case 'response': body.innerHTML = renderDetailBody(formatHeaders(req.response_headers), req.response_body); break;
-        case 'sse': body.textContent = formatSseContent(req); break;
+        case 'sse': body.innerHTML = `<pre style="width:100%;white-space:pre-wrap;word-break:break-all;margin:0;font:inherit;color:inherit;">${esc(formatSseContent(req))}</pre>`; break;
     }
 }
 
@@ -872,8 +886,8 @@ export function updateSelectionUI() {
     btn.innerHTML = label;
     btn.classList.toggle('hidden', total === 0);
     document.getElementById('btn-export-selected').classList.toggle('hidden', total === 0);
-    // Flush only makes sense for sessions (not individual requests)
-    document.getElementById('btn-flush-selected').classList.toggle('hidden', sessionCount === 0);
+    // Persisted summaries are session-level documents.
+    document.getElementById('btn-summary-selected').classList.toggle('hidden', sessionCount === 0);
 
     const allChkCount = document.querySelectorAll('.session-chk, .row-chk').length;
     const selectAll = document.getElementById('select-all');
@@ -1063,35 +1077,34 @@ document.getElementById('btn-delete-selected').addEventListener('click', async (
     renderPage(); updateFilterOptions(); updateRequestCount();
 });
 
-// Flush selected sessions to disk
-document.getElementById('btn-flush-selected').addEventListener('click', async () => {
+// Generate readable summaries for selected sessions.
+document.getElementById('btn-summary-selected').addEventListener('click', async () => {
     const sids = Array.from(state.selectedSessionIds);
     if (sids.length === 0) return;
 
     const isSingle = sids.length === 1;
     const confirmMsg = isSingle
-        ? t('common.export_session_single')
-        : t('common.export_session_multi', { n: sids.length });
+        ? t('common.summarize_session_single')
+        : t('common.summarize_session_multi', { n: sids.length });
     if (!confirm(confirmMsg)) return;
 
-    const resp = await fetch('/api/flush', {
+    const resp = await fetch('/api/summaries', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_ids: sids }),
     });
     const data = await resp.json();
     if (!resp.ok) {
-        alert(data.error || t('common.export_fail_alert'));
+        alert(data.error || t('common.summary_fail_alert'));
         return;
     }
 
-    if (data.flushed && data.flushed.length > 0) {
-        const fileList = data.flushed.join(', ');
-        alert(t('common.exported_sessions_alert', { files: fileList }));
+    if (data.summarized && data.summarized.length > 0) {
+        alert(t('common.summarized_sessions_alert', { n: data.summarized.length }));
     }
 
     if (data.errors && data.errors.length > 0) {
-        alert(t('common.export_fail_alert') + '\n' + data.errors.join('\n'));
+        alert(t('common.summary_fail_alert') + '\n' + data.errors.join('\n'));
     }
 });
 

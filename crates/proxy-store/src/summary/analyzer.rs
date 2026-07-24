@@ -54,6 +54,37 @@ fn summary_version() -> u32 {
     1
 }
 
+/// Extract the latest real user prompt from a request payload.
+///
+/// This lightweight path is used while a response is still streaming, so the
+/// UI can display the prompt without retaining response chunks.
+pub fn extract_latest_user_prompt(body: &Value) -> Option<String> {
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .or_else(|| body.get("input").and_then(Value::as_array))?;
+
+    messages.iter().rev().find_map(|message| {
+        let is_user = message.get("role").and_then(Value::as_str) == Some("user");
+        if !is_user || !is_real_user_prompt(message) {
+            return None;
+        }
+        let prompt = extract_user_text(message);
+        (!prompt.trim().is_empty()).then(|| prompt_preview(&prompt))
+    })
+}
+
+fn prompt_preview(prompt: &str) -> String {
+    const MAX_CHARS: usize = 1_000;
+    let mut chars = prompt.trim().chars();
+    let preview = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPrompt {
     pub msg_index: usize,
@@ -602,6 +633,7 @@ mod tests {
             currency: "USD".into(),
             summary_json: None,
             summary_created_at: None,
+            prompt_text: None,
             metadata: serde_json::Value::Null,
             messages_count: 0,
         }
@@ -624,6 +656,19 @@ mod tests {
         let summary = analyze_task(&task).unwrap();
         assert_eq!(summary.user_prompts.len(), 1);
         assert_eq!(summary.user_prompts[0].text, "Hello, world!");
+    }
+
+    #[test]
+    fn extracts_latest_prompt_before_tool_results() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "commit"}]},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "done"}]}
+            ]
+        });
+
+        assert_eq!(extract_latest_user_prompt(&body).as_deref(), Some("commit"));
     }
 
     #[test]

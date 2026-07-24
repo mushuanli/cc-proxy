@@ -11,6 +11,69 @@ pub fn migrate(conn: &Connection) -> StoreResult<()> {
     migrate_v3_session_authority(conn)?;
     migrate_v4_session_status(conn)?;
     migrate_v5_session_diagnostics(conn)?;
+    migrate_v6_prompt_text(conn)?;
+    Ok(())
+}
+
+/// Migration v6: separate the list prompt from the full task summary.
+fn migrate_v6_prompt_text(conn: &Connection) -> StoreResult<()> {
+    if conn
+        .prepare("SELECT prompt_text FROM tasks LIMIT 0")
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("ALTER TABLE tasks ADD COLUMN prompt_text TEXT;")?;
+    let mut stmt = tx.prepare(
+        "SELECT id, request_body, summary_json FROM tasks
+         WHERE request_body IS NOT NULL OR summary_json IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let records = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    for (id, request_body, summary_json) in records {
+        backfill_prompt(&tx, &id, request_body.as_deref())?;
+        remove_legacy_summary(&tx, &id, summary_json.as_deref())?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn backfill_prompt(conn: &Connection, id: &str, request_body: Option<&str>) -> StoreResult<()> {
+    let prompt = request_body
+        .and_then(|body| serde_json::from_str(body).ok())
+        .and_then(|body| crate::summary::analyzer::extract_latest_user_prompt(&body));
+    conn.execute(
+        "UPDATE tasks SET prompt_text = ?2 WHERE id = ?1",
+        rusqlite::params![id, prompt],
+    )?;
+    Ok(())
+}
+
+fn remove_legacy_summary(
+    conn: &Connection,
+    id: &str,
+    summary_json: Option<&str>,
+) -> StoreResult<()> {
+    let is_v1 = summary_json
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| value.get("version").and_then(|v| v.as_u64()))
+        == Some(1);
+    if summary_json.is_some() && !is_v1 {
+        conn.execute(
+            "UPDATE tasks SET summary_json = NULL, summary_created_at = NULL WHERE id = ?1",
+            [id],
+        )?;
+    }
     Ok(())
 }
 
@@ -220,6 +283,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
     summary_json                TEXT,
     summary_created_at          INTEGER,
+    prompt_text                 TEXT,
 
     metadata_json               TEXT NOT NULL DEFAULT '{}',
 
@@ -317,3 +381,43 @@ CREATE INDEX IF NOT EXISTS idx_daily_usage_model_date
 CREATE INDEX IF NOT EXISTS idx_daily_usage_session_provider_date
     ON session_daily_usage(session_id, provider, usage_date DESC);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v6_backfills_prompt_and_removes_legacy_summary() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                request_body TEXT,
+                summary_json TEXT,
+                summary_created_at INTEGER
+            );
+            INSERT INTO tasks VALUES (
+                'task-1',
+                '{\"messages\":[
+                    {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"commit\"}]},
+                    {\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}
+                ]}',
+                '{\"t\":\"tools\"}',
+                1
+            );",
+        )
+        .unwrap();
+
+        migrate_v6_prompt_text(&conn).unwrap();
+        migrate_v6_prompt_text(&conn).unwrap();
+
+        let migrated: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT prompt_text, summary_json FROM tasks WHERE id = 'task-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated, (Some("commit".into()), None));
+    }
+}

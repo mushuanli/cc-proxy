@@ -82,14 +82,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // ── Send initial snapshot ──
     send_json(
         &mut sender,
-        &WsMessage::McpConfigChanged {
-            destination_url: state.mcp.get_destination().await,
-        },
-    )
-    .await;
-
-    send_json(
-        &mut sender,
         &WsMessage::TeeStatusChanged {
             enabled: state.capture.is_enabled(),
         },

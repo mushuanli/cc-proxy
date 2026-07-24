@@ -8,7 +8,7 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/requests?session_id=&q=&from=&to=&limit=` | 请求列表（不含 body，用 messages_count + last_msg_summary 替代） |
+| GET | `/api/requests?session_id=&q=&from=&to=&limit=` | 请求列表（不含 body，用 `messages_count` + `prompt` 替代） |
 | DELETE | `/api/requests` | 批量删除 `{ids: []}` |
 | GET | `/api/request/:id` | 单条请求详情（含 body） |
 | DELETE | `/api/request/:id` | 单条删除 |
@@ -94,22 +94,26 @@
 | PUT | `/api/retention` | 更新保留设置 → persist_config |
 | POST | `/api/cleanup` | 手动触发清理 |
 
-### Flush & 清空
+### 摘要持久化与清空
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/flush` | 导出指定 session(s) 到 `sessions/` 目录（YAML） `{session_ids: []}` |
-| POST | `/api/flush-all` | 导出所有有请求的 session 到 `sessions/` 目录 |
+| POST | `/api/summaries` | 生成指定 session(s) 的可读 YAML 摘要 `{session_ids: []}` |
+| POST | `/api/summaries/all` | 重新生成全部 session 的可读 YAML 摘要 |
 | POST | `/api/clear` | 清空所有 requests + hooks + sse_events → broadcast Cleared |
 
-### Archive
+摘要文档保存 session 元信息、聚合统计、每日用量，以及会话内全部 task
+的提示词、工具行为、文件变更、最终响应、用量、耗时和错误；不保存原始
+request/response messages。
+
+### 已保存摘要
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/archive/list` | 列出 `sessions/` 目录下的 YAML 文件 |
-| GET | `/api/archive/search?q=` | 全文搜索 archive 文件（按 role 过滤 + 多关键词 AND） |
-| GET | `/api/archive/file/:name` | 读取单个 archive 文件内容 |
-| PUT | `/api/archive/name/:sid` | 重命名 archive 文件 |
+| GET | `/api/summaries/list` | 列出已保存的 YAML 摘要 |
+| GET | `/api/summaries/search?q=` | 全文搜索摘要文件 |
+| GET | `/api/summaries/file/:name` | 读取单个摘要文件 |
+| PUT | `/api/summaries/name/:sid` | 重命名摘要对应的会话 |
 
 ### 其他
 

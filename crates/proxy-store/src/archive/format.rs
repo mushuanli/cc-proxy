@@ -11,7 +11,7 @@ pub struct ArchiveDocument {
     pub version: u32,
     pub session: ArchiveSession,
     pub statistics: ArchiveStatistics,
-    pub latest_task: Option<ArchiveTask>,
+    pub tasks: Vec<ArchiveTask>,
     pub daily_usage: Vec<ArchiveDailyUsage>,
 }
 
@@ -70,12 +70,13 @@ pub struct ArchiveTask {
     pub pricing_model_id: Option<String>,
     pub requested_model: Option<String>,
     pub resolved_model: String,
+    pub upstream: Option<String>,
 
     pub pricing: ArchivePricing,
     pub usage: ArchiveUsage,
-
-    pub request: ArchiveRequest,
-    pub response: Option<ArchiveResponse>,
+    pub timing: ArchiveTiming,
+    pub error: Option<ArchiveError>,
+    pub prompt: Option<String>,
     pub summary: Option<SessionSummary>,
 }
 
@@ -98,15 +99,16 @@ pub struct ArchiveUsage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ArchiveRequest {
-    pub method: String,
-    pub path: String,
-    pub body: Option<String>,
+pub struct ArchiveTiming {
+    pub duration_ms: Option<i64>,
+    pub ttft_ms: Option<i64>,
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ArchiveResponse {
-    pub body: Option<serde_json::Value>,
+pub struct ArchiveError {
+    pub error_type: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,13 +122,23 @@ pub struct ArchiveDailyUsage {
     pub cost_microusd: i64,
 }
 
-/// Build an ArchiveDocument from session, latest task, and daily usage.
+/// Build a readable summary document without raw request messages.
 pub fn build_archive(
     session: &Session,
-    latest_task: Option<&Task>,
+    tasks: &[Task],
     daily_usage: &[DailyUsageRow],
 ) -> ArchiveDocument {
-    let statistics = ArchiveStatistics {
+    ArchiveDocument {
+        version: 3,
+        session: build_session(session),
+        statistics: build_statistics(session),
+        tasks: tasks.iter().map(build_task_summary).collect(),
+        daily_usage: daily_usage.iter().map(build_daily_usage).collect(),
+    }
+}
+
+fn build_statistics(session: &Session) -> ArchiveStatistics {
+    ArchiveStatistics {
         task_count: session.task_count,
         completed_task_count: session.completed_task_count,
         failed_task_count: session.failed_task_count,
@@ -141,83 +153,103 @@ pub fn build_archive(
         total_duration_ms: session.total_duration_ms,
         total_ttft_ms: session.total_ttft_ms,
         ttft_task_count: session.ttft_task_count,
-    };
+    }
+}
 
-    let latest = latest_task.map(|t| ArchiveTask {
-        id: t.id.clone(),
-        sequence_no: t.sequence_no,
-        started_at: t.started_at,
-        ended_at: t.ended_at,
-        status: t.status.as_str().to_string(),
-        provider: t.provider.clone(),
-        pricing_model_id: t.pricing_model_id.clone(),
-        requested_model: t.requested_model.clone(),
-        resolved_model: t.resolved_model.clone(),
-        pricing: ArchivePricing {
-            input_rate_microusd: t.input_rate_microusd,
-            output_rate_microusd: t.output_rate_microusd,
-            cache_write_rate_microusd: t.cache_write_rate_microusd,
-            cache_read_rate_microusd: t.cache_read_rate_microusd,
-        },
-        usage: ArchiveUsage {
-            input_tokens: t.input_tokens,
-            output_tokens: t.output_tokens,
-            cache_creation_tokens: t.cache_creation_tokens,
-            cache_read_tokens: t.cache_read_tokens,
-            cost_microusd: t.cost_microusd,
-            currency: t.currency.clone(),
-        },
-        request: ArchiveRequest {
-            method: t.method.clone(),
-            path: t.path.clone(),
-            body: t.request_body.clone(),
-        },
-        response: t.response_body.as_ref().map(|body| ArchiveResponse {
-            body: Some(serde_json::to_value(body).unwrap_or_default()),
-        }),
-        summary: t
+fn build_session(session: &Session) -> ArchiveSession {
+    ArchiveSession {
+        id: session.id.clone(),
+        name: session.name.clone(),
+        client_type: session.client_type.as_str().to_string(),
+        client_session_id: session.client_session_id.clone(),
+        cwd: session.cwd.clone(),
+        project_key: session.project_key.clone(),
+        created_at: session.created_at,
+        last_activity_at: session.last_activity_at,
+        status: session.status.clone(),
+        ended_at: session.ended_at,
+        latest_provider: session.latest_provider.clone(),
+        latest_model: session.latest_model.clone(),
+        latest_upstream: session.latest_upstream.clone(),
+        last_task_id: session.last_task_id.clone(),
+        last_task_status: session.last_task_status.clone(),
+        last_stop_reason: session.last_stop_reason.clone(),
+        last_error_type: session.last_error_type.clone(),
+        last_error_message: session.last_error_message.clone(),
+    }
+}
+
+fn build_daily_usage(usage: &DailyUsageRow) -> ArchiveDailyUsage {
+    ArchiveDailyUsage {
+        date: usage.usage_date.clone(),
+        provider: usage.provider.clone(),
+        model: usage.model.clone(),
+        task_count: usage.task_count,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cost_microusd: usage.cost_microusd,
+    }
+}
+
+fn build_task_summary(task: &Task) -> ArchiveTask {
+    ArchiveTask {
+        id: task.id.clone(),
+        sequence_no: task.sequence_no,
+        started_at: task.started_at,
+        ended_at: task.ended_at,
+        status: task.status.as_str().to_string(),
+        provider: task.provider.clone(),
+        pricing_model_id: task.pricing_model_id.clone(),
+        requested_model: task.requested_model.clone(),
+        resolved_model: task.resolved_model.clone(),
+        upstream: task.upstream.clone(),
+        pricing: build_pricing(task),
+        usage: build_usage(task),
+        timing: build_timing(task),
+        error: build_error(task),
+        prompt: task.prompt_text.clone(),
+        summary: task
             .summary_json
             .as_ref()
-            .and_then(|s| serde_json::from_str::<SessionSummary>(s).ok()),
-    });
-
-    let daily: Vec<ArchiveDailyUsage> = daily_usage
-        .iter()
-        .map(|d| ArchiveDailyUsage {
-            date: d.usage_date.clone(),
-            provider: d.provider.clone(),
-            model: d.model.clone(),
-            task_count: d.task_count,
-            input_tokens: d.input_tokens,
-            output_tokens: d.output_tokens,
-            cost_microusd: d.cost_microusd,
-        })
-        .collect();
-
-    ArchiveDocument {
-        version: 2,
-        session: ArchiveSession {
-            id: session.id.clone(),
-            name: session.name.clone(),
-            client_type: session.client_type.as_str().to_string(),
-            client_session_id: session.client_session_id.clone(),
-            cwd: session.cwd.clone(),
-            project_key: session.project_key.clone(),
-            created_at: session.created_at,
-            last_activity_at: session.last_activity_at,
-            status: session.status.clone(),
-            ended_at: session.ended_at,
-            latest_provider: session.latest_provider.clone(),
-            latest_model: session.latest_model.clone(),
-            latest_upstream: session.latest_upstream.clone(),
-            last_task_id: session.last_task_id.clone(),
-            last_task_status: session.last_task_status.clone(),
-            last_stop_reason: session.last_stop_reason.clone(),
-            last_error_type: session.last_error_type.clone(),
-            last_error_message: session.last_error_message.clone(),
-        },
-        statistics,
-        latest_task: latest,
-        daily_usage: daily,
+            .and_then(|json| serde_json::from_str(json).ok()),
     }
+}
+
+fn build_pricing(task: &Task) -> ArchivePricing {
+    ArchivePricing {
+        input_rate_microusd: task.input_rate_microusd,
+        output_rate_microusd: task.output_rate_microusd,
+        cache_write_rate_microusd: task.cache_write_rate_microusd,
+        cache_read_rate_microusd: task.cache_read_rate_microusd,
+    }
+}
+
+fn build_usage(task: &Task) -> ArchiveUsage {
+    ArchiveUsage {
+        input_tokens: task.input_tokens,
+        output_tokens: task.output_tokens,
+        cache_creation_tokens: task.cache_creation_tokens,
+        cache_read_tokens: task.cache_read_tokens,
+        cost_microusd: task.cost_microusd,
+        currency: task.currency.clone(),
+    }
+}
+
+fn build_timing(task: &Task) -> ArchiveTiming {
+    ArchiveTiming {
+        duration_ms: task.duration_ms,
+        ttft_ms: task.ttft_ms,
+        stop_reason: task.stop_reason.clone(),
+    }
+}
+
+fn build_error(task: &Task) -> Option<ArchiveError> {
+    let error_type = task
+        .error_type
+        .as_deref()
+        .filter(|value| !value.is_empty())?;
+    Some(ArchiveError {
+        error_type: error_type.to_string(),
+        message: task.error_message.clone().unwrap_or_default(),
+    })
 }

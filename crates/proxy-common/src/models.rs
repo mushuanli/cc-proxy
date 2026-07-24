@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 // ── Shared domain types for proxy-config & proxy-store ──
 
@@ -242,29 +241,6 @@ impl TryFrom<&str> for ClientType {
     }
 }
 
-// ── Existing types (kept for proxy-server backward compat) ──
-
-/// Trait for items that have a string id (used by RingBuffer::get_by_id).
-pub trait HasId {
-    fn id(&self) -> &str;
-}
-
-impl HasId for ProxiedRequest {
-    fn id(&self) -> &str {
-        &self.id
-    }
-}
-
-impl HasId for HookEvent {
-    fn id(&self) -> &str {
-        &self.id
-    }
-}
-
-fn short_id() -> String {
-    Uuid::new_v4().to_string()[..12].to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProxiedRequest {
     pub id: String,
@@ -303,9 +279,9 @@ pub struct ProxiedRequest {
     // Derived: number of messages in request body (populated in list queries, not stored)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages_count: Option<u32>,
-    // Stored: compact summary of last message for fast list display, no body needed
+    // Latest real user prompt for lightweight list and streaming updates.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_msg_summary: Option<String>,
+    pub prompt: Option<String>,
     /// Computed cost in USD (set after response, used to increment session total).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
@@ -314,132 +290,10 @@ pub struct ProxiedRequest {
     pub priced: Option<bool>,
 }
 
-impl ProxiedRequest {
-    pub fn new(method: &str, path: &str) -> Self {
-        Self {
-            id: short_id(),
-            timestamp: Utc::now(),
-            method: method.to_string(),
-            path: path.to_string(),
-            request_type: "anthropic".to_string(),
-            ..Default::default()
-        }
-    }
-
-    pub fn new_mcp(method: &str, path: &str) -> Self {
-        Self {
-            id: short_id(),
-            timestamp: Utc::now(),
-            method: method.to_string(),
-            path: path.to_string(),
-            request_type: "mcp".to_string(),
-            ..Default::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SseEvent {
     pub event_type: Option<String>,
     pub data: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HookEvent {
-    pub id: String,
-    pub timestamp: DateTime<Utc>,
-    pub hook_event_name: String,
-    pub session_id: String,
-    pub cwd: String,
-    pub permission_mode: String,
-    pub transcript_path: String,
-    pub hook_input: serde_json::Value,
-    pub environment_variables: HashMap<String, String>,
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl HookEvent {
-    pub fn new(hook_event_name: String, session_id: String, cwd: String) -> Self {
-        Self {
-            id: short_id(),
-            timestamp: Utc::now(),
-            hook_event_name,
-            session_id,
-            cwd,
-            permission_mode: String::new(),
-            transcript_path: String::new(),
-            hook_input: serde_json::Value::Null,
-            environment_variables: HashMap::new(),
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpRequest {
-    pub jsonrpc: String,
-    pub method: String,
-    pub params: Option<serde_json::Value>,
-    pub id: Option<serde_json::Value>,
-}
-
-// ── Session model ──
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum SessionStatus {
-    Recording,
-    Stopped,
-    /// Requests have been cleaned up, only the tombstone + aggregates remain.
-    Archived,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session {
-    pub id: String,
-    pub label: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub ended_at: Option<DateTime<Utc>>,
-    /// IDs of requests currently alive in DB.
-    pub request_ids: Vec<String>,
-    pub status: SessionStatus,
-    /// Aggregated input tokens (includes deleted requests, updated on cleanup).
-    pub total_input_tokens: u64,
-    /// Aggregated output tokens (includes deleted requests, updated on cleanup).
-    pub total_output_tokens: u64,
-    /// Total historical request count (includes deleted requests).
-    pub request_count: u64,
-    /// Accumulated cost in USD (updated per-request, survives cleanup).
-    #[serde(default)]
-    pub total_cost: f64,
-}
-
-impl Session {
-    pub fn new(label: Option<String>) -> Self {
-        let label = label
-            .filter(|l| !l.is_empty())
-            .unwrap_or_else(|| Utc::now().format("Recording %Y-%m-%d %H:%M").to_string());
-        Self {
-            id: short_id(),
-            label: Some(label),
-            started_at: Utc::now(),
-            ended_at: None,
-            request_ids: Vec::new(),
-            status: SessionStatus::Recording,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            request_count: 0,
-            total_cost: 0.0,
-        }
-    }
-
-    pub fn stop(&mut self) {
-        self.ended_at = Some(Utc::now());
-        self.status = SessionStatus::Stopped;
-    }
 }
 
 // ── Provider info (for frontend) ──
@@ -460,6 +314,16 @@ pub struct TierRuleInfo {
     pub keywords: Vec<String>,
     pub provider: String,
     pub model: String,
+}
+
+impl From<&crate::config::upstream::TierRule> for TierRuleInfo {
+    fn from(t: &crate::config::upstream::TierRule) -> Self {
+        Self {
+            keywords: t.keywords.clone(),
+            provider: t.provider.clone(),
+            model: t.model.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,13 +354,7 @@ pub enum WsMessage {
         event: SseEvent,
     },
     RequestUpdated(ProxiedRequest),
-    NewHook(HookEvent),
-    NewMcp(ProxiedRequest),
     Cleared,
-    McpCleared,
-    McpConfigChanged {
-        destination_url: Option<String>,
-    },
     UpstreamChanged {
         active_upstream: String,
         active_proxy_upstream: String,
@@ -505,20 +363,6 @@ pub enum WsMessage {
         active_effort: String,
         model_pricing: Vec<crate::config::ModelPricing>,
         http_proxy: Option<String>,
-    },
-    History {
-        requests: Vec<ProxiedRequest>,
-    },
-    HookHistory {
-        events: Vec<HookEvent>,
-    },
-    McpHistory {
-        requests: Vec<ProxiedRequest>,
-    },
-    SessionStarted(Session),
-    SessionStopped(Session),
-    SessionUpdated {
-        request_id: String,
     },
     TeeStatusChanged {
         enabled: bool,

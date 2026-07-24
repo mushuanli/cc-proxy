@@ -17,8 +17,7 @@ import {
 } from './settings.js';
 import { loadCosts, updateInspectorCostStats, refreshInspectorCostStatsNow } from './cost.js';import { loadArchiveList, loadArchiveFile, startArchiveRename } from './archive.js';
 import {
-    addToTimeline, addMcpRow, renderMcpTable,
-    addHookRow, renderHookTable,
+    addToTimeline,
 } from './timeline.js';
 
 // Optional dashboard auth. Open `/?token=...` once; keep the token only for
@@ -98,9 +97,6 @@ function handleMessage(msg) {
     state._lastMsgTime = Date.now();
     console.debug('[ws] msg type=' + msg.type);
     switch (msg.type) {
-        case 'History':
-            // Requests are loaded via REST GET /api/requests — kept for backward compat
-            break;
         case 'NewRequest':
         case 'RequestUpdated':
             upsertRequestRow(msg.payload);
@@ -115,39 +111,9 @@ function handleMessage(msg) {
         case 'SseEvent':
             if (msg.payload.request_id === state.selectedRequestId) appendSseEvent(msg.payload.event);
             break;
-        case 'HookHistory':
-            renderHookTable(msg.payload.events);
-            break;
-        case 'NewHook':
-            addHookRow(msg.payload);
-            addToTimeline(msg.payload);
-            break;
-        case 'McpHistory':
-            renderMcpTable(msg.payload.requests);
-            break;
-        case 'NewMcp':
-            addMcpRow(msg.payload);
-            addToTimeline(msg.payload);
-            break;
         case 'Cleared':
             clearAllTables();
             updateRequestCount();
-            break;
-        case 'McpCleared':
-            document.getElementById('mcp-tbody').innerHTML = '';
-            break;
-        case 'McpConfigChanged':
-            if (msg.payload.destination_url) document.getElementById('mcp-destination').value = msg.payload.destination_url;
-            break;
-        case 'UpstreamChanged':
-            applyUpstreamState(msg.payload.active_upstream, msg.payload.active_proxy_upstream, msg.payload.upstreams, msg.payload.providers, msg.payload.active_effort, msg.payload.model_pricing, msg.payload.http_proxy);
-            break;
-        case 'TeeStatusChanged':
-            state.captureEnabled = msg.payload.enabled;
-            updateCaptureButton();
-            break;
-        case 'CostUpdated':
-            if (typeof window._applyCostStats === 'function') window._applyCostStats(msg.payload);
             break;
         case 'Resync':
             // The server dropped some messages (broadcast buffer overflow).
@@ -257,20 +223,10 @@ document.querySelectorAll('nav a').forEach(link => {
             inspector.classList.remove('summary-open', 'summary-collapsed');
         }
 
-        if (view === 'archive') loadArchiveList();
+        if (view === 'summaries') loadArchiveList();
         if (view === 'cost') loadCosts();
     });
 });
-
-// ── MCP destination ──
-document.getElementById('btn-set-mcp').addEventListener('click', async () => {
-    const url = document.getElementById('mcp-destination').value.trim();
-    await fetch('/api/mcp-destination', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ destinationUrl: url || null }) });
-});
-
-// ── Clear ──
-document.getElementById('btn-clear-mcp-view').addEventListener('click', () => fetch('/api/clear-mcp', { method: 'POST' }));
-document.getElementById('btn-clear-hooks').addEventListener('click', () => fetch('/api/clear', { method: 'POST' }));
 
 // ── Capture ──
 document.getElementById('btn-toggle-capture').addEventListener('click', async () => {
@@ -339,9 +295,7 @@ Object.assign(window, {
                     const existing = state.requestRows.get(req.id);
                     state.requestRows.set(req.id, { ...(existing || {}), ...req });
                 });
-                // Expand latest session only on initial load
-                const groups = getSessionGroups();
-                if (groups.length > 0) state.expandedSessions.add(groups[0].session_id);
+                // All sessions start collapsed — user expands on demand
                 state.currentPage = 1;
                 renderPage(); updateRequestCount();
                 updateFilterOptions();
@@ -353,10 +307,6 @@ Object.assign(window, {
             refreshInspectorCostStatsNow();
         })
         .catch(err => console.error('Failed to load requests:', err));
-
-    fetch('/api/mcp-destination')
-        .then(r => r.json())
-        .then(data => { if (data.destinationUrl) document.getElementById('mcp-destination').value = data.destinationUrl; });
 
     fetch('/api/capture/status')
         .then(r => r.json())
@@ -413,21 +363,22 @@ Object.assign(window, {
         btn.textContent = t('settings.clean_up_now');
     });
 
-    document.getElementById('btn-flush-now').addEventListener('click', async () => {
-        if (!confirm(t('settings.confirm_export_all'))) return;
-        const btn = document.getElementById('btn-flush-now');
+    document.getElementById('btn-summary-all').addEventListener('click', async () => {
+        if (!confirm(t('settings.confirm_summarize_all'))) return;
+        const btn = document.getElementById('btn-summary-all');
         btn.disabled = true;
-        btn.textContent = t('settings.exporting');
+        btn.textContent = t('settings.summarizing');
         try {
-            const resp = await fetch('/api/flush-all', { method: 'POST' });
+            const resp = await fetch('/api/summaries/all', { method: 'POST' });
             const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || 'summary generation failed');
             const result = document.getElementById('ret-cleanup-result');
-            if (data.flushed && data.flushed.length > 0) {
+            if (data.summarized && data.summarized.length > 0) {
                 result.className = 'cleanup-result success';
-                result.textContent = t('settings.exported_sessions', { n: data.flushed.length });
+                result.textContent = t('settings.summarized_sessions', { n: data.summarized.length });
             } else {
                 result.className = 'cleanup-result success';
-                result.textContent = t('settings.nothing_export');
+                result.textContent = t('settings.nothing_summarize');
             }
             if (data.errors && data.errors.length > 0) {
                 result.textContent += ` (${data.errors.length} error(s))`;
@@ -437,11 +388,11 @@ Object.assign(window, {
         } catch (e) {
             const result = document.getElementById('ret-cleanup-result');
             result.className = 'cleanup-result';
-            result.textContent = t('settings.export_failed');
+            result.textContent = t('settings.summary_failed');
             result.classList.remove('hidden');
         }
         btn.disabled = false;
-        btn.textContent = t('settings.flush_all_now');
+        btn.textContent = t('settings.summarize_all_now');
     });
 
 })(); // end init

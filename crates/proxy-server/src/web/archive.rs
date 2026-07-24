@@ -69,7 +69,7 @@ pub async fn list(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let filter = q.get("q").map(|s| s.as_str());
-    match state.store.list_archives(filter).await {
+    match state.store.archive_list(filter).await {
         Ok(archives) => {
             let items = tokio::task::spawn_blocking(move || {
                 archives.iter().map(archive_to_json).collect::<Vec<_>>()
@@ -93,7 +93,7 @@ pub async fn search(
     let query = q.get("q").map(|s| s.as_str()).unwrap_or("");
     if query.is_empty() {
         // No query → return all archives (same as list)
-        match state.store.list_archives(None).await {
+        match state.store.archive_list(None).await {
             Ok(archives) => {
                 let items = tokio::task::spawn_blocking(move || {
                     archives.iter().map(archive_to_json).collect::<Vec<_>>()
@@ -113,7 +113,7 @@ pub async fn search(
     }
 
     let role_filter = q.get("role").map(|s| s.as_str());
-    match state.store.search_archives(query, role_filter).await {
+    match state.store.archive_search(query, role_filter).await {
         Ok(results) => Json(json!(results)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -127,7 +127,7 @@ pub async fn file(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match state.store.read_archive_file(&name).await {
+    match state.store.archive_read(&name).await {
         Ok(content) => axum::response::Response::builder()
             .header("content-type", "text/plain; charset=utf-8")
             .body(axum::body::Body::from(content))
@@ -166,7 +166,7 @@ pub async fn set_name(
     };
     match state
         .store
-        .rename_archive_session(&session_id, new_name)
+        .archive_rename_session(&session_id, new_name)
         .await
     {
         Ok(()) => {

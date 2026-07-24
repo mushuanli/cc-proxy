@@ -4,20 +4,16 @@
 //! 不对外暴露查询 API，不计算费用（store 内部计费），不做 UI 决策（前端自行判断）。
 //!
 //! ```text
-//! 上游 API ←── HTTP ──→ proxy-relay ──→ store.write(sid, NewTask { billing, usage })
+//! 上游 API ←── HTTP ──→ proxy-relay ──→ store.task_write(sid, NewTask { billing, usage })
 //!                               │
 //!                               └──→ events.publish(WsMessage) ──→ WS → 浏览器
 //! ```
 
-pub mod capture;
-pub mod hook;
-pub mod mcp;
-pub mod relay;
-pub mod sse;
-pub mod upstream;
+pub(crate) mod capture;
+pub(crate) mod relay;
+pub(crate) mod sse;
+pub(crate) mod upstream;
 
-pub use capture::{CaptureControl, ExchangeInfo};
-pub use hook::HookReceiver;
-pub use mcp::McpRelay;
+pub use capture::CaptureControl;
+pub(crate) use capture::ExchangeInfo;
 pub use relay::RelayHandler;
-pub use sse::SseParser;

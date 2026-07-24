@@ -3,7 +3,6 @@ use std::path::Path;
 use crate::config::AppConfig;
 use crate::error::{ConfigError, ConfigResult};
 use crate::pricing::ModelPricing;
-use crate::provider::Provider;
 use crate::upstream::TierRule;
 
 /// Persist the current AppConfig to config.toml using toml_edit for format preservation.
@@ -196,15 +195,8 @@ fn write_server_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         "proxy_port",
         toml_edit::value(config.server.proxy_port as i64),
     );
-    tbl.insert(
-        "mcp_proxy_port",
-        toml_edit::value(config.server.mcp_proxy_port as i64),
-    );
     if let Some(ref token) = config.server.auth_token {
         tbl.insert("auth_token", toml_edit::value(token.as_str()));
-    }
-    if let Some(ref dest) = config.server.mcp_destination {
-        tbl.insert("mcp_destination", toml_edit::value(dest.as_str()));
     }
     tbl.insert(
         "ws_include_bodies",
@@ -217,53 +209,4 @@ fn write_logging_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
     let mut tbl = toml_edit::Table::new();
     tbl.insert("level", toml_edit::value(config.logging.level.as_str()));
     doc["logging"] = toml_edit::Item::Table(tbl);
-}
-
-/// Persist a single model pricing change.
-pub async fn persist_model_pricing(path: &Path, pricing: &[ModelPricing]) -> ConfigResult<()> {
-    let content = if path.exists() {
-        tokio::fs::read_to_string(path).await?
-    } else {
-        String::new()
-    };
-    let mut doc: toml_edit::DocumentMut = if content.is_empty() {
-        toml_edit::DocumentMut::new()
-    } else {
-        content.parse().map_err(ConfigError::TomlEdit)?
-    };
-
-    write_model_pricing(&mut doc, pricing);
-
-    atomic_write(path, &doc.to_string()).await
-}
-
-/// Persist providers changes.
-pub async fn persist_providers(path: &Path, providers: &[Provider]) -> ConfigResult<()> {
-    let content = if path.exists() {
-        tokio::fs::read_to_string(path).await?
-    } else {
-        String::new()
-    };
-    let mut doc: toml_edit::DocumentMut = if content.is_empty() {
-        toml_edit::DocumentMut::new()
-    } else {
-        content.parse().map_err(ConfigError::TomlEdit)?
-    };
-
-    let mut providers_arr = toml_edit::ArrayOfTables::new();
-    for p in providers {
-        let mut pt = toml_edit::Table::new();
-        pt.insert("name", toml_edit::value(p.name.as_str()));
-        pt.insert("url", toml_edit::value(p.url.as_str()));
-        if let Some(ref token) = p.token {
-            pt.insert("token", toml_edit::value(token.as_str()));
-        }
-        if let Some(ref proxy_val) = p.proxy {
-            pt.insert("proxy", toml_edit::value(proxy_val.as_str()));
-        }
-        providers_arr.push(pt);
-    }
-
-    doc["proxy"]["providers"] = toml_edit::Item::ArrayOfTables(providers_arr);
-    atomic_write(path, &doc.to_string()).await
 }

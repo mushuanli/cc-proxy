@@ -5,7 +5,6 @@ members = [
     "crates/proxy-relay",
     "crates/proxy-server",
     "crates/proxy-store",
-    "crates/proxy-hook-agent",
 ]
 
 [workspace.package]

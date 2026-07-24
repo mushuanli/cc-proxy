@@ -33,12 +33,6 @@ export function addToTimeline(item) {
             state.convSessions.add(item.session_id);
             updateConvFilter();
         }
-    }
-    if (item.hook_event_name) {
-        div.classList.add('hook');
-        div.innerHTML = `
-            <div class="timeline-header"><span>Hook: ${esc(item.hook_event_name)}</span><span>${formatTime(item.timestamp)}</span></div>
-            <div class="timeline-body">${esc(JSON.stringify(item.hook_input, null, 2))}</div>`;
     } else {
         const model = item.model || '—';
         const tokens = item.input_tokens != null ? `${item.input_tokens}→${item.output_tokens || 0}t` : '';
@@ -74,36 +68,4 @@ export function applyConvFilter() {
         el.style.display = (!sid || el.dataset.session === sid) ? '' : 'none';
     });
 }
-
-// ── MCP table ──
-
-export function addMcpRow(req) {
-    const tbody = document.getElementById('mcp-tbody');
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${formatTime(req.timestamp)}</td><td>${esc(req.model || '—')}</td><td>${req.status_code || '—'}</td><td>${esc(truncate(req.request_body, 100))}</td><td>${esc(truncate(req.response_body, 100))}</td>`;
-    tbody.prepend(tr);
-    while (tbody.children.length > 100) tbody.lastChild.remove();
-}
-
-export function renderMcpTable(requests) {
-    document.getElementById('mcp-tbody').innerHTML = '';
-    requests.forEach(req => addMcpRow(req));
-}
-
-// ── Hook table ──
-
-export function addHookRow(event) {
-    const tbody = document.getElementById('hooks-tbody');
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${formatTime(event.timestamp)}</td><td>${esc(event.hook_event_name)}</td><td>${esc(event.session_id)}</td><td>${esc(event.cwd)}</td><td>${event.exit_code}</td>`;
-    tbody.prepend(tr);
-    while (tbody.children.length > 200) tbody.lastChild.remove();
-}
-
-export function renderHookTable(events) {
-    document.getElementById('hooks-tbody').innerHTML = '';
-    events.forEach(e => addHookRow(e));
-}
-
-// Event listener for conversation filter
 document.getElementById('conv-filter').addEventListener('change', applyConvFilter);

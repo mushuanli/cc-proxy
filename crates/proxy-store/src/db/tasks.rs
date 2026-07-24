@@ -33,6 +33,11 @@ pub fn insert_task(
         .transpose()?;
 
     let metadata_json = serde_json::to_string(&task.metadata)?;
+    let prompt_text = task
+        .request_body
+        .as_deref()
+        .and_then(|body| serde_json::from_str(body).ok())
+        .and_then(|body| crate::summary::analyzer::extract_latest_user_prompt(&body));
 
     let rows = conn.execute(
         "INSERT INTO tasks (
@@ -50,7 +55,7 @@ pub fn insert_task(
             input_rate_microusd, output_rate_microusd,
             cache_write_rate_microusd, cache_read_rate_microusd,
             cost_microusd, currency,
-            messages_count, metadata_json
+            messages_count, metadata_json, prompt_text
         ) VALUES (
             ?1, ?2, ?3,
             ?4, ?5, ?6, ?7,
@@ -65,7 +70,7 @@ pub fn insert_task(
             ?30, ?31,
             ?32, ?33, ?34, ?35,
             ?36, ?37,
-            ?38, ?39
+            ?38, ?39, ?40
         )
         ON CONFLICT(id) DO NOTHING",
         params![
@@ -114,6 +119,7 @@ pub fn insert_task(
             task.billing.currency,
             task.messages_count as i64,
             metadata_json,
+            prompt_text,
         ],
     )?;
 
@@ -137,7 +143,7 @@ pub fn get_task(conn: &Connection, id: &TaskId) -> StoreResult<Option<Task>> {
          input_rate_microusd, output_rate_microusd,
          cache_write_rate_microusd, cache_read_rate_microusd,
          cost_microusd, currency,
-         summary_json, summary_created_at, metadata_json, messages_count
+         summary_json, summary_created_at, metadata_json, messages_count, prompt_text
          FROM tasks WHERE id = ?1",
     )?;
 
@@ -159,7 +165,7 @@ pub fn list_tasks(
          method, path,
          provider, resolved_model, http_status_code,
          input_tokens, output_tokens, cost_microusd, pricing_model_id,
-         duration_ms, ttft_ms, summary_json, messages_count
+         duration_ms, ttft_ms, summary_json, messages_count, prompt_text
          FROM tasks WHERE session_id = ?1",
     );
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -219,7 +225,7 @@ pub fn get_latest_completed_task(
          input_rate_microusd, output_rate_microusd,
          cache_write_rate_microusd, cache_read_rate_microusd,
          cost_microusd, currency,
-         summary_json, summary_created_at, metadata_json, messages_count
+         summary_json, summary_created_at, metadata_json, messages_count, prompt_text
          FROM tasks
          WHERE session_id = ?1 AND ended_at IS NOT NULL AND status != 'recording'
          ORDER BY sequence_no DESC LIMIT 1",
@@ -319,6 +325,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         currency: row.get::<_, String>("currency")?,
         summary_json: row.get("summary_json")?,
         summary_created_at: row.get("summary_created_at")?,
+        prompt_text: row.get("prompt_text")?,
         metadata: row
             .get::<_, String>("metadata_json")
             .ok()
@@ -351,6 +358,7 @@ fn row_to_task_list_item(row: &rusqlite::Row) -> rusqlite::Result<TaskListItem> 
         duration_ms: row.get("duration_ms")?,
         ttft_ms: row.get("ttft_ms")?,
         summary_json: row.get("summary_json")?,
+        prompt_text: row.get("prompt_text")?,
         messages_count: row.get::<_, i64>("messages_count")? as u32,
     })
 }

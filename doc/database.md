@@ -42,7 +42,7 @@
 | `content_text` | TEXT | 合并后的响应文本 |
 | `is_streaming` | INTEGER | NOT NULL DEFAULT 0 |
 | `provider` | TEXT | 路由决策写入的 provider 名（migration 追加） |
-| `last_msg_summary` | TEXT | 最后一条消息的紧凑摘要（migration 追加，startup backfill） |
+| `prompt_text` | TEXT | 最新真实用户提示词（migration v6 追加并回填） |
 
 索引：`idx_requests_session`（session_id）、`idx_requests_timestamp`（timestamp）
 
@@ -173,9 +173,12 @@ PRAGMA foreign_keys=ON;
 
 返回所有有请求的 session ID 列表，按最新请求时间降序。供 flush-all 遍历 session 组使用。
 
-### `backfill_last_msg_summary()`
+### `migrate_v6_prompt_text()`
 
-启动时调用，为 `last_msg_summary` 为 NULL 的历史请求回填摘要（最多 2000 条）。
+启动时在事务中一次性从历史 `request_body` 回填 `prompt_text`（最多
+保留 1000 个字符），并清理非
+`TaskSummaryV1` 格式的旧 `summary_json`。列表接口只读取该轻量字段，
+不加载完整请求体。
 
 ### `sessions_with_old_requests(hours, keep_session_id) -> Vec<String>`
 

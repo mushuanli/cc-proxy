@@ -34,9 +34,7 @@ impl Default for AppConfig {
                 listen_address: "127.0.0.1".into(),
                 http_port: 5000,
                 proxy_port: 8888,
-                mcp_proxy_port: 9999,
                 auth_token: None,
-                mcp_destination: None,
                 ws_include_bodies: false,
             },
             logging: LoggingConfig {
@@ -104,14 +102,9 @@ pub struct ServerConfig {
     pub http_port: u16,
     #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
-    #[serde(default = "default_mcp_proxy_port")]
-    pub mcp_proxy_port: u16,
     /// Auth token for Dashboard/WebSocket. Required when listen_address is not loopback.
     #[serde(default)]
     pub auth_token: Option<String>,
-    /// MCP forwarding destination (persisted across restarts).
-    #[serde(default)]
-    pub mcp_destination: Option<String>,
     /// Include prompt/response bodies in WebSocket events (off by default).
     #[serde(default)]
     pub ws_include_bodies: bool,
@@ -125,9 +118,6 @@ fn default_http_port() -> u16 {
 }
 fn default_proxy_port() -> u16 {
     8888
-}
-fn default_mcp_proxy_port() -> u16 {
-    9999
 }
 
 /// Logging configuration.
@@ -144,4 +134,4 @@ fn default_log_level() -> String {
 // Re-export types that are in their own modules for convenience
 pub use super::pricing::ModelPricing;
 pub use super::provider::Provider;
-pub use super::upstream::{TierRule, UpstreamConfig};
+pub use super::upstream::UpstreamConfig;

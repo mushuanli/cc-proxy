@@ -6,7 +6,7 @@
     "hooks": "钩子",
     "cost": "费用",
     "settings": "设置",
-    "archive": "归档"
+    "summaries": "摘要"
   },
 
   "status": {
@@ -41,7 +41,7 @@
     "recording": "录制中…",
     "rec_dot": "录制",
     "export_selected": "导出选中",
-    "export_to_disk": "导出到磁盘",
+    "save_summaries": "保存摘要",
     "delete_selected": "删除选中",
     "expand_all": "+ 展开",
     "collapse_all": "− 收起",
@@ -185,19 +185,18 @@
     "last_cleanup": "上次清理",
     "hours_hint": "0=永不清除",
     "sessions_hint": "0=无限制",
-    "days_hint": "0=永久保留 — 仅删除 SQLite 记录，sessions/ 目录文件保留",
+    "days_hint": "0=永久保留 — 仅删除 SQLite 记录，已保存摘要文件保留",
     "clean_up_now": "立即清理",
-    "flush_all_now": "导出全部",
-    "export_all_now": "导出全部会话到 sessions/ 目录",
+    "summarize_all_now": "生成全部会话摘要",
     "cleaning": "清理中…",
     "cleaning_result": "已清理：{reqs} 条请求，{sessions} 个会话",
     "failed_clean": "清理失败",
-    "exporting": "导出中…",
-    "export_failed": "导出失败",
-    "nothing_export": "没有可导出的内容",
+    "summarizing": "正在生成摘要…",
+    "summary_failed": "摘要生成失败",
+    "nothing_summarize": "没有可生成摘要的会话",
     "saved": "已保存",
-    "exported_sessions": "已导出 {n} 个会话到 sessions/",
-    "confirm_export_all": "确认导出所有会话到 sessions/ 目录？",
+    "summarized_sessions": "已保存 {n} 个会话摘要",
+    "confirm_summarize_all": "确认重新生成所有会话的可读摘要？",
 
     "global_proxy": "全局代理",
     "global_proxy_label": "HTTP 代理地址",
@@ -241,8 +240,8 @@
     "confirm_delete_session": "确认删除会话「{label}」？",
     "collapse_panel": "收起面板",
     "expand_panel": "展开面板",
-    "archived_no_summary": "此会话已归档，摘要数据不可用。",
-    "open_in_archive": "在归档中查看 →"
+    "archived_no_summary": "此会话的在线明细已清理，请查看已保存摘要。",
+    "open_in_archive": "在摘要中查看 →"
   },
 
   "conversation": {
@@ -280,19 +279,18 @@
     "delete_button_mixed": "删除选中（{sessions}S+{reqs}R）",
     "delete_button_requests": "删除选中（<span id=\"selected-count\">{n}</span>）",
     "confirm_delete_request": "确认删除请求 {id}？",
-    "export_session_single": "导出会话到 data/archives/<id>.yaml？",
-    "export_session_multi": "导出 {n} 个会话到 data/archives/<id>.yaml？",
-    "exported_sessions_alert": "已导出到 data/archives/{files}",
-    "export_fail_alert": "部分会话导出失败：",
-    "confirm_flush_all": "确认导出所有会话到 data/archives/ 目录？",
+    "summarize_session_single": "生成所选会话的可读摘要？",
+    "summarize_session_multi": "生成所选 {n} 个会话的可读摘要？",
+    "summarized_sessions_alert": "已保存 {n} 个会话摘要",
+    "summary_fail_alert": "部分会话摘要生成失败：",
     "invalid_effort": "无效的 Effort 值「{val}」。可选：{valid}",
     "mcp_config_dest": "配置 MCP 目标"
   },
 
   "archive": {
-    "search_placeholder": "搜索会话 (空格=AND, \"短语\", user:=仅用户消息)",
-    "file_count": "{n} 个文件",
-    "no_files": "暂无归档文件，将在下次清理时自动生成",
+    "search_placeholder": "搜索会话摘要",
+    "file_count": "{n} 个摘要",
+    "no_files": "暂无已保存摘要，可在设置中生成",
     "no_results": "未找到匹配内容",
     "matches": "{n} 处匹配",
     "refresh": "刷新",

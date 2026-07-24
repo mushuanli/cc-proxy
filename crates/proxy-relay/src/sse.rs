@@ -149,6 +149,7 @@ impl SseParser {
     }
 
     /// Extract model name from message_start event.
+    #[allow(dead_code)]
     pub fn model_from_start<'a>(&self, data: &'a Value) -> Option<&'a str> {
         data.get("message")
             .and_then(|m| m.get("model"))

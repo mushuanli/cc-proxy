@@ -11,6 +11,7 @@ proxy-store = { path = "../proxy-store" }
 axum = { version = "0.7", features = ["ws"] }
 bytes = "1"
 chrono = "0.4"
+dashmap = "6"
 futures = "0.3"
 http = "1"
 http-body-util = "0.1"

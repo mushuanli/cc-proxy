@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use proxy_common::{ConfigStore, ProviderInfo, TierRuleInfo, UpstreamInfo, WsMessage};
+use proxy_common::{ConfigStore, ProviderInfo, UpstreamInfo, WsMessage};
 use serde_json::json;
 
 use crate::AppState;
@@ -585,57 +585,6 @@ pub async fn set_global_proxy(
     }
 }
 
-// ── MCP destination ──
-
-pub async fn get_mcp(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let dest = state.mcp.get_destination().await;
-    Json(json!({"destination_url": dest})).into_response()
-}
-
-pub async fn set_mcp(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let url = body
-        .get("destinationUrl")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    if let Some(ref value) = url {
-        let parsed = match reqwest::Url::parse(value) {
-            Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
-            _ => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "destinationUrl must be an http(s) URL"})),
-                )
-                    .into_response()
-            }
-        };
-        if parsed.host_str().is_none() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "destinationUrl must include a host"})),
-            )
-                .into_response();
-        }
-    }
-    let persisted_url = url.clone();
-    if let Err(e) = state
-        .config
-        .update(move |c| {
-            c.server.mcp_destination = persisted_url;
-            Ok(())
-        })
-        .await
-    {
-        return err_response(&e.to_string());
-    }
-    state.mcp.set_destination(url.clone()).await;
-    tracing::info!("[api] set_mcp: destination={:?}", url);
-    Json(json!({"ok": true, "destination_url": url})).into_response()
-}
-
 // ── Clear ──
 
 pub async fn clear_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -644,25 +593,13 @@ pub async fn clear_all(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     Json(json!({"ok": true})).into_response()
 }
 
-pub async fn clear_mcp(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.events.publish(WsMessage::McpCleared);
-    tracing::info!("[api] clear_mcp");
-    Json(json!({"ok": true})).into_response()
-}
 
-pub async fn clear_hooks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.events.publish(WsMessage::Cleared);
-    tracing::info!("[api] clear_hooks");
-    Json(json!({"ok": true})).into_response()
-}
-
-// ── Hook ──
+// ── Hook (session lifecycle signals from proxy-hook-agent) ──
 
 pub async fn hook_event(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    state.hook_receiver.receive(&body);
     let event_name = body
         .get("hook_event_name")
         .or_else(|| body.get("hookEventName"))
@@ -677,114 +614,89 @@ pub async fn hook_event(
             if let Ok(sid) = proxy_common::SessionId::new(raw_sid.to_string()) {
                 if let Err(e) = state
                     .store
-                    .stop_session(&sid, chrono::Utc::now().timestamp_millis())
+                    .session_stop(&sid, chrono::Utc::now().timestamp_millis())
                     .await
                 {
-                    tracing::warn!("[api] failed to stop hook session {}: {}", sid, e);
+                    tracing::warn!("[api] failed to stop session {}: {}", sid, e);
                 }
             }
         }
     }
-    tracing::info!("[api] hook_event: {}", event_name);
     Json(json!({"ok": true})).into_response()
 }
 
-// ── Flush ──
+// ── Persisted summaries ──
 
-/// Flush selected sessions to archive YAML files.
-pub async fn flush(
+pub async fn summarize(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let session_ids: Vec<proxy_common::SessionId> = match body.get("session_ids") {
-        Some(serde_json::Value::Array(arr)) => {
-            let mut ids = Vec::new();
-            for v in arr {
-                match v.as_str() {
-                    Some(s) => match proxy_common::SessionId::new(s.to_string()) {
-                        Ok(id) => ids.push(id),
-                        Err(e) => {
-                            return (StatusCode::BAD_REQUEST, Json(json!({"error": e})))
-                                .into_response()
-                        }
-                    },
-                    None => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(json!({"error": "invalid session_id type"})),
-                        )
-                            .into_response()
-                    }
-                }
-            }
-            if ids.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "no valid session_ids"})),
-                )
-                    .into_response();
-            }
-            ids
-        }
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "expected session_ids array"})),
-            )
-                .into_response()
-        }
+    let session_ids = match parse_summary_session_ids(&body) {
+        Ok(ids) => ids,
+        Err(response) => return response,
     };
+    generate_summaries(&state, Some(&session_ids)).await
+}
 
+pub async fn summarize_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    generate_summaries(&state, None).await
+}
+
+fn parse_summary_session_ids(
+    body: &serde_json::Value,
+) -> Result<Vec<proxy_common::SessionId>, axum::response::Response> {
+    let values = body
+        .get("session_ids")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| bad_request("expected session_ids array"))?;
+    let ids = values
+        .iter()
+        .map(parse_summary_session_id)
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Err(bad_request("no valid session_ids"));
+    }
+    Ok(ids)
+}
+
+fn parse_summary_session_id(
+    value: &serde_json::Value,
+) -> Result<proxy_common::SessionId, axum::response::Response> {
+    let raw = value
+        .as_str()
+        .ok_or_else(|| bad_request("invalid session_id type"))?;
+    proxy_common::SessionId::new(raw.to_string()).map_err(|error| bad_request(&error))
+}
+
+fn bad_request(error: &str) -> axum::response::Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response()
+}
+
+async fn generate_summaries(
+    state: &Arc<AppState>,
+    session_ids: Option<&[proxy_common::SessionId]>,
+) -> axum::response::Response {
     let config = state.config.get().await;
     let options = proxy_store::ArchiveOptions {
         task_retention_hours: config.proxy.request_retention_hours,
         force: true,
     };
-
-    match state.store.archive(Some(&session_ids), options).await {
+    match state.store.archive_create(session_ids, options).await {
         Ok(results) => {
-            let flushed: Vec<String> = results
+            let summarized: Vec<String> = results
                 .iter()
                 .map(|a| a.session_id.as_str().to_string())
                 .collect();
-            let count = flushed.len();
-            tracing::info!("[api] flush: {} sessions exported", count);
-            let errors: Vec<String> = Vec::new();
-            Json(json!({"flushed": flushed, "errors": errors})).into_response()
+            tracing::info!("[api] generated {} session summaries", summarized.len());
+            Json(json!({"summarized": summarized, "errors": []})).into_response()
         }
         Err(e) => {
-            tracing::error!("[api] flush failed: {}", e);
+            tracing::error!("[api] summary generation failed: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e.to_string()})),
             )
                 .into_response()
-        }
-    }
-}
-
-pub async fn flush_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let config = state.config.get().await;
-    let options = proxy_store::ArchiveOptions {
-        task_retention_hours: config.proxy.request_retention_hours,
-        force: true,
-    };
-
-    match state.store.archive(None, options).await {
-        Ok(results) => {
-            let flushed: Vec<String> = results
-                .iter()
-                .map(|a| a.session_id.as_str().to_string())
-                .collect();
-            let count = flushed.len();
-            tracing::info!("[api] flush_all: {} sessions exported", count);
-            let errors: Vec<String> = Vec::new();
-            Json(json!({"flushed": flushed, "errors": errors})).into_response()
-        }
-        Err(e) => {
-            tracing::error!("[api] flush_all failed: {}", e);
-            let flushed: Vec<String> = Vec::new();
-            Json(json!({"flushed": flushed, "errors": [e.to_string()]})).into_response()
         }
     }
 }
@@ -806,7 +718,7 @@ pub async fn trigger_cleanup(State(state): State<Arc<AppState>>) -> impl IntoRes
     }
 
     let deleted_requests = if retention_hours > 0 {
-        match state.store.cleanup(retention_hours as u64).await {
+        match state.store.cleanup_tasks(retention_hours as u64).await {
             Ok(deleted) => deleted,
             Err(e) => {
                 tracing::error!("[api] task cleanup failed: {}", e);
@@ -866,26 +778,10 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
                 name: u.name.clone(),
                 active: u.name == *active,
                 proxy_active: u.name == c.proxy.active_proxy_upstream,
-                high: u.high.clone().map(|t| TierRuleInfo {
-                    keywords: t.keywords,
-                    provider: t.provider,
-                    model: t.model,
-                }),
-                mid: u.mid.clone().map(|t| TierRuleInfo {
-                    keywords: t.keywords,
-                    provider: t.provider,
-                    model: t.model,
-                }),
-                low: u.low.clone().map(|t| TierRuleInfo {
-                    keywords: t.keywords,
-                    provider: t.provider,
-                    model: t.model,
-                }),
-                default: u.default.clone().map(|t| TierRuleInfo {
-                    keywords: t.keywords,
-                    provider: t.provider,
-                    model: t.model,
-                }),
+                high: u.high.as_ref().map(|t| t.into()),
+                mid: u.mid.as_ref().map(|t| t.into()),
+                low: u.low.as_ref().map(|t| t.into()),
+                default: u.default.as_ref().map(|t| t.into()),
                 effort: u.effort.clone(),
             })
             .collect(),
