@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { loadI18n, applyI18n, t } from './i18n.js';
 import {
     renderPage, upsertRequestRow, updateRequestCount, clearAllTables,
-    appendSseEvent, showRequestDetail, updateFilterOptions, getSessionGroups,
+    showRequestDetail, updateFilterOptions, getSessionGroups,
     setSessionPanelFns, applyFiltersAndRender, updatePagination,
     toggleSession, selectSession, expandAllSessions, collapseAllSessions,
 } from './inspector.js';
@@ -107,9 +107,6 @@ function handleMessage(msg) {
                 const sid = msg.payload.session_id;
                 fetchSessionMeta(sid);
             }
-            break;
-        case 'SseEvent':
-            if (msg.payload.request_id === state.selectedRequestId) appendSseEvent(msg.payload.event);
             break;
         case 'Cleared':
             clearAllTables();

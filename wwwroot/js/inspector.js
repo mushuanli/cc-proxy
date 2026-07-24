@@ -782,22 +782,6 @@ export function formatSseContent(req) {
     return parts.join('\n');
 }
 
-export function appendSseEvent(event) {
-    const activeTab = document.querySelector('.detail-tabs .tab.active')?.dataset.tab;
-    if (activeTab === 'sse') {
-        const content = document.getElementById('detail-content');
-        const pre = content.querySelector('pre');
-        if (pre) {
-            if (!content.dataset.streamStarted) {
-                content.dataset.streamStarted = '1';
-                pre.textContent = '(streaming…)\n\n';
-            }
-            pre.textContent += `event: ${event.event_type || '—'}\ndata: ${event.data || '—'}\n\n`;
-            content.scrollTop = content.scrollHeight;
-        }
-    }
-}
-
 // ── Fullscreen ──
 
 export function renderDetailFullscreen(req, activeTab) {

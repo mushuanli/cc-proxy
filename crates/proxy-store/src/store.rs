@@ -518,27 +518,6 @@ impl ProxyStore {
         .await
     }
 
-    /// Generate and cache a task summary in one atomic operation.
-    /// Fire-and-forget: errors are logged but not returned.
-    pub fn summary_cache(&self, task_id: &TaskId, session_id: &SessionId) {
-        let this = self.clone();
-        let tid = task_id.clone();
-        let sid = session_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.inner.conn.lock().unwrap();
-            let task = match db::tasks::get_task(&conn, &tid) {
-                Ok(Some(t)) => t,
-                _ => return,
-            };
-            if let Some(summary) = crate::summary::analyzer::analyze_task(&task) {
-                if let Ok(json) = serde_json::to_string(&summary) {
-                    let _ = db::tasks::update_summary(&conn, &tid, &json);
-                    let _ = db::sessions::set_archive_dirty(&conn, &sid);
-                }
-            }
-        });
-    }
-
     /// Query daily usage for a date range.
     pub async fn usage_query_range(
         &self,

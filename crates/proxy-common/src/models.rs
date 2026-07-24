@@ -253,7 +253,6 @@ pub struct ProxiedRequest {
     pub model: Option<String>,
     pub provider: Option<String>, // routing decision writes the provider name here
     pub is_streaming: bool,
-    pub max_tokens: Option<u32>,
     // Response
     pub status_code: Option<u16>,
     pub response_headers: HashMap<String, String>,
@@ -282,9 +281,6 @@ pub struct ProxiedRequest {
     // Latest real user prompt for lightweight list and streaming updates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// Computed cost in USD (set after response, used to increment session total).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<f64>,
     /// Whether a configured pricing rule matched this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priced: Option<bool>,
@@ -349,10 +345,6 @@ pub struct UpstreamInfo {
 #[serde(tag = "type", content = "payload")]
 pub enum WsMessage {
     NewRequest(ProxiedRequest),
-    SseEvent {
-        request_id: String,
-        event: SseEvent,
-    },
     RequestUpdated(ProxiedRequest),
     Cleared,
     UpstreamChanged {

@@ -2,7 +2,7 @@ use crate::models::{NormalizedResponse, ToolCallRecord, ToolResultRecord};
 use serde_json::Value;
 
 /// Sanitize text by removing control characters except \n, \r, \t.
-pub fn sanitize_text(input: &str) -> String {
+fn sanitize_text(input: &str) -> String {
     input
         .chars()
         .filter(|ch| matches!(ch, '\n' | '\r' | '\t') || !ch.is_control())
@@ -96,16 +96,6 @@ pub fn normalize_response(raw: &Value) -> NormalizedResponse {
 }
 
 /// Sanitize every string field in a NormalizedResponse.
-pub fn sanitize_response(resp: &mut NormalizedResponse) {
-    resp.thinking = resp.thinking.iter().map(|t| sanitize_text(t)).collect();
-    resp.text = resp.text.iter().map(|t| sanitize_text(t)).collect();
-    for tc in &mut resp.tool_calls {
-        tc.name = sanitize_text(&tc.name);
-    }
-    for tr in &mut resp.tool_results {
-        tr.content = sanitize_text(&tr.content);
-    }
-}
 
 #[cfg(test)]
 mod tests {

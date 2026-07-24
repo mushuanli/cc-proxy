@@ -954,7 +954,6 @@ async fn proxy_request(
         error: upstream_response.error.clone(),
         messages_count: Some(msg_count as u32),
         prompt,
-        cost: None, // filled after store write below
         priced: Some(priced),
         request_type: protocol.request_type().into(),
         sse_events: upstream_response.sse_events.clone(),
