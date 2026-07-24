@@ -10,11 +10,11 @@ function formatDate(ts) {
 
 // Forward reference — set by main.js after all modules are loaded
 let _openSummaryPanel = null;
-let _openRequestSummaryPanel = null;
+let _renderSummaryFromCache = null;
 
-export function setSessionPanelFns(openSummary, openRequestSummary) {
+export function setSessionPanelFns(openSummary, _openReqSummary, renderSummaryCache) {
     _openSummaryPanel = openSummary;
-    _openRequestSummaryPanel = openRequestSummary;
+    _renderSummaryFromCache = renderSummaryCache;
 }
 
 // ── Price lookup ──
@@ -563,7 +563,6 @@ export function renderPage() {
                 tr.addEventListener('click', (e) => {
                     if (!req.id || e.target.closest('.row-chk') || e.target.closest('.btn-delete-row')) return;
                     showRequestDetail(req);
-                    if (_openRequestSummaryPanel) _openRequestSummaryPanel(req.id, group.session_id);
                 });
                 tbody.appendChild(tr);
             }
@@ -596,7 +595,6 @@ export function renderPage() {
                 tr.addEventListener('click', (e) => {
                     if (!req.id || e.target.closest('.row-chk') || e.target.closest('.btn-delete-row')) return;
                     showRequestDetail(req);
-                    if (_openRequestSummaryPanel) _openRequestSummaryPanel(req.id, group.session_id);
                 });
                 tbody.appendChild(tr);
             });
@@ -683,6 +681,10 @@ export async function showRequestDetail(req) {
             const row = document.getElementById(`req-${fullReq.id}`);
             if (row) row.innerHTML = buildRequestRowHTML(fullReq, row.classList.contains('session-child'));
             updateDetailView(fullReq);
+            // Cascade pre-computed summary to sidebar — no second API call needed
+            if (fullReq.summary_json && _renderSummaryFromCache) {
+                _renderSummaryFromCache(fullReq.summary_json, req.session_id);
+            }
             return;
         }
     } catch (_) {}

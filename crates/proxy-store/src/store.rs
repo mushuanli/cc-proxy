@@ -499,7 +499,8 @@ impl ProxyStore {
 
     // ── Summary ──
 
-    /// Get task summary with full analysis (SessionSummary).
+    /// Get task summary — returns stored summary_json if present,
+    /// falls back to full re-analysis for legacy tasks.
     pub async fn summary_get(&self, task_id: &TaskId) -> StoreResult<SessionSummary> {
         let this = self.clone();
         let tid = task_id.clone();
@@ -507,6 +508,10 @@ impl ProxyStore {
             let conn = this.inner.conn.lock().unwrap();
             let task = db::tasks::get_task(&conn, &tid)?
                 .ok_or_else(|| StoreError::NotFound(format!("task '{}' not found", tid)))?;
+            if let Some(ref json) = task.summary_json {
+                return serde_json::from_str::<SessionSummary>(json)
+                    .map_err(|e| StoreError::InvalidArgument(format!("invalid summary_json: {}", e)));
+            }
             crate::summary::analyzer::analyze_task(&task)
                 .ok_or_else(|| StoreError::NotFound(format!("could not analyze task '{}'", tid)))
         })

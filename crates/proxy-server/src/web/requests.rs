@@ -113,7 +113,8 @@ fn task_to_full_json(task: &proxy_store::Task) -> Value {
         "sse_events": sse_events,
         "request_type": task.metadata.get("protocol").and_then(|v| v.as_str()).unwrap_or("anthropic"),
         "messages_count": task.messages_count,
-        "prompt": task.prompt_text
+        "prompt": task.prompt_text,
+        "summary_json": task.summary_json
     })
 }
 

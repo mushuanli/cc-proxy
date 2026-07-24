@@ -8,7 +8,7 @@ import {
 } from './inspector.js';
 import {
     toggleSummaryPanel, openSummaryPanel, openRequestSummaryPanel,
-    normalizeRequestBody,
+    renderSummaryFromCache, normalizeRequestBody,
 } from './session.js';
 import {
     applyUpstreamState, updateCaptureButton,
@@ -43,7 +43,7 @@ window.fetch = (input, init = {}) => {
 
 // ── Wire up circular-dep bridge for inspector.js ──
 // inspector.js needs openSummaryPanel/openRequestSummaryPanel from session.js
-setSessionPanelFns(openSummaryPanel, openRequestSummaryPanel);
+setSessionPanelFns(openSummaryPanel, openRequestSummaryPanel, renderSummaryFromCache);
 
 // Also expose updateInspectorCostStats via window bridge (used by inspector.js and settings.js)
 window._updateInspectorCostStats = updateInspectorCostStats;

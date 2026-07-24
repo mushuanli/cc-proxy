@@ -74,6 +74,23 @@ export function bindSummarySidebarActions(sid) {
     };
 }
 
+export function renderSummaryFromCache(summaryJson, sid) {
+    const content = document.getElementById('summary-content');
+    let data;
+    try { data = JSON.parse(summaryJson); } catch (e) {
+        content.innerHTML = `<div class="summary-error">${esc(String(e))}</div>`;
+        return;
+    }
+    document.getElementById('summary-title').textContent =
+        t('summary.summary_of', { label: (state.sessionCache[sid] || sid).slice(-20) });
+    content.innerHTML = renderSummaryHTML(data);
+    bindSummaryEvents(content);
+    document.getElementById('summary-panel').classList.remove('hidden');
+    document.getElementById('view-inspector').classList.add('summary-open');
+    bindSummarySidebarActions(sid);
+    if (state.summaryCollapsed) toggleSummaryPanel();
+}
+
 export async function openRequestSummaryPanel(reqId, sid) {
     const content = document.getElementById('summary-content');
     document.getElementById('summary-title').textContent = t('summary.loading');
