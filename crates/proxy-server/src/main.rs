@@ -100,6 +100,10 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState::new(&config_path).await?);
     let config = state.config.get().await;
 
+    // ── Recover interrupted tasks from previous run ──
+    let process_start_ms = chrono::Utc::now().timestamp_millis();
+    let _ = state.store.recover_interrupted_tasks(process_start_ms).await;
+
     // ── Providers table ──
     let (pw, uw) = (20usize, 52usize);
     tracing::info!("{} provider(s):", config.proxy.providers.len());

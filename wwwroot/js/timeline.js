@@ -2,70 +2,136 @@ import { state } from './state.js';
 import { t } from './i18n.js';
 import { esc, shortSid, formatTime, truncate } from './utils.js';
 
-function responsePreview(item) {
-    if (item.content_text) return item.content_text;
-    const body = item.response_body;
-    if (!body || typeof body !== 'object') return body || item.request_body || '';
+// ── Timeline derived from requestRows ──
 
-    const parts = [];
-    if (Array.isArray(body.thinking)) parts.push(...body.thinking.map(v => `[Thinking] ${v}`));
-    if (Array.isArray(body.text)) parts.push(...body.text);
-    if (Array.isArray(body.tool_calls)) {
-        parts.push(...body.tool_calls.map(call =>
-            `[Tool Use] ${call.name || 'tool'} ${JSON.stringify(call.input ?? {})}`));
+const MAX_ITEMS = 100;
+
+function statusClass(status) {
+    switch (status) {
+        case 'recording': return 'tl-recording';
+        case 'failed': return 'tl-failed';
+        case 'interrupted': return 'tl-interrupted';
+        case 'completed': return 'tl-completed';
+        default: return '';
     }
-    if (Array.isArray(body.tool_results)) {
-        parts.push(...body.tool_results.map(result =>
-            `[Tool Result] ${result.content ?? ''}`));
-    }
-    return parts.join('\n') || JSON.stringify(body, null, 2);
 }
 
-// ── Timeline ──
+function statusLabel(status) {
+    switch (status) {
+        case 'recording': return '⏳';
+        case 'completed': return '✓';
+        case 'failed': return '✗';
+        case 'interrupted': return '⊘';
+        case 'cancelled': return '✕';
+        default: return '';
+    }
+}
 
-export function addToTimeline(item) {
+export function renderTimeline() {
     const timeline = document.getElementById('conversation-timeline');
-    const div = document.createElement('div');
-    div.className = 'timeline-item';
-    if (item.session_id) {
-        div.dataset.session = item.session_id;
-        if (!state.convSessions.has(item.session_id)) {
-            state.convSessions.add(item.session_id);
-            updateConvFilter();
-        }
-    } else {
-        const model = item.model || '—';
-        const tokens = item.input_tokens != null ? `${item.input_tokens}→${item.output_tokens || 0}t` : '';
-        const content = responsePreview(item);
-        const formatted = esc(content)
-            .replace(/\[Thinking\]/g, '<span class="tl-thinking">[Thinking]</span>')
-            .replace(/\[Tool Use\]/g, '<span class="tl-tool">[Tool Use]</span>');
-        div.innerHTML = `
-            <div class="timeline-header">
-                <span>${esc(item.method)} ${esc(item.path)} — ${item.status_code || '...'} | ${esc(model)} | ${tokens} | ${esc(shortSid(item.session_id) || '—')}</span>
-                <span>${formatTime(item.timestamp)} | ${item.duration_ms || 0}ms</span>
-            </div>
-            <div class="timeline-body">${formatted}</div>`;
+    const filterSid = document.getElementById('conv-filter')?.value || '';
+
+    // Collect all items from requestRows, sorted by timestamp DESC
+    const items = [];
+    for (const req of state.requestRows.values()) {
+        if (!req.session_id) continue;
+        if (filterSid && req.session_id !== filterSid) continue;
+        items.push(req);
     }
-    timeline.prepend(div);
-    while (timeline.children.length > 100) timeline.lastChild.remove();
+    items.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    const visible = items.slice(0, MAX_ITEMS);
+
+    // Rebuild DOM
+    timeline.innerHTML = '';
+    for (const item of visible) {
+        const div = document.createElement('div');
+        div.className = 'timeline-item ' + statusClass(item.status);
+        div.dataset.requestId = item.id;
+        div.dataset.session = item.session_id || '';
+        div.setAttribute('tabindex', '0');
+        div.setAttribute('role', 'button');
+
+        const promptText = item.prompt
+            || (item.request_body ? tryParsePrompt(item.request_body) : null)
+            || `${item.method} ${item.path}`;
+        const truncated = truncate(promptText, 80);
+        const time = formatTime(item.timestamp);
+        const statusCode = item.status_code != null ? `HTTP ${item.status_code}` : '';
+        const model = item.model || '—';
+        const tokens = item.input_tokens != null
+            ? `${item.input_tokens}→${item.output_tokens || 0}t`
+            : '';
+        const dur = item.duration_ms != null ? `${item.duration_ms}ms` : '';
+
+        div.innerHTML = `
+            <div class="timeline-row1">${esc(truncated)}</div>
+            <div class="timeline-row2">
+                <span class="tl-status">${statusLabel(item.status)}</span>
+                <span>${esc(time)}</span>
+                ${statusCode ? `<span>${esc(statusCode)}</span>` : ''}
+                <span>${esc(model)}</span>
+                ${tokens ? `<span>${esc(tokens)}</span>` : ''}
+                ${dur ? `<span>${esc(dur)}</span>` : ''}
+            </div>`;
+        timeline.appendChild(div);
+    }
 }
+
+function tryParsePrompt(body) {
+    if (typeof body !== 'string') return null;
+    try {
+        const parsed = JSON.parse(body);
+        if (parsed.messages && Array.isArray(parsed.messages)) {
+            for (let i = parsed.messages.length - 1; i >= 0; i--) {
+                const m = parsed.messages[i];
+                if (m.role === 'user' && m.content) {
+                    if (typeof m.content === 'string') return m.content;
+                    if (Array.isArray(m.content)) {
+                        const textParts = m.content.filter(c => c.type === 'text').map(c => c.text);
+                        if (textParts.length) return textParts.join(' ');
+                    }
+                }
+            }
+        }
+    } catch (_) {}
+    return null;
+}
+
+// ── Session filter ──
 
 export function updateConvFilter() {
     const select = document.getElementById('conv-filter');
     const current = select.value;
     select.innerHTML = '<option value="">All</option>';
-    state.convSessions.forEach(s => {
-        select.innerHTML += `<option value="${esc(s)}">${esc(shortSid(s))}</option>`;
+    const sorted = [...state.convSessions].sort();
+    sorted.forEach(s => {
+        const label = state.sessionCache[s] || shortSid(s);
+        select.innerHTML += `<option value="${esc(s)}">${esc(label)}</option>`;
     });
     select.value = current;
     applyConvFilter();
 }
 
 export function applyConvFilter() {
-    const sid = document.getElementById('conv-filter').value;
-    document.querySelectorAll('#conversation-timeline .timeline-item').forEach(el => {
-        el.style.display = (!sid || el.dataset.session === sid) ? '' : 'none';
-    });
+    renderTimeline();
 }
+
+// Event delegation for timeline clicks (including fullscreen)
+document.getElementById('conversation-timeline').addEventListener('click', (e) => {
+    const item = e.target.closest('.timeline-item');
+    if (item && item.dataset.requestId) {
+        if (typeof window._navigateToRequest === 'function') {
+            window._navigateToRequest(item.dataset.requestId);
+        }
+    }
+});
+document.getElementById('fullscreen-content').addEventListener('click', (e) => {
+    const item = e.target.closest('.timeline-item');
+    if (item && item.dataset.requestId) {
+        if (typeof window._navigateToRequest === 'function') {
+            window._navigateToRequest(item.dataset.requestId);
+        }
+    }
+});
+
 document.getElementById('conv-filter').addEventListener('change', applyConvFilter);

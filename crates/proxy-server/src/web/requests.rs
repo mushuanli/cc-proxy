@@ -38,6 +38,8 @@ pub(crate) fn task_to_json(
         "status_code": task.http_status_code,
         "input_tokens": task.input_tokens,
         "output_tokens": task.output_tokens,
+        "cache_creation_input_tokens": task.cache_creation_tokens,
+        "cache_read_input_tokens": task.cache_read_tokens,
         "cost_microusd": task.cost_microusd,
         "cost": task.cost_microusd as f64 / 1_000_000.0,
         "priced": task.priced,

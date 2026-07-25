@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { t } from './i18n.js';
-import { esc, shortSid, formatTime, formatHeaders, tryParseJson, jsonTreeHTML, truncate } from './utils.js';
+import { esc, shortSid, formatTime, formatHeaders, tryParseJson, jsonTreeHTML, truncate, formatTokens, cacheHitRate } from './utils.js';
 
 function formatDate(ts) {
     if (!ts) return '';
@@ -159,6 +159,8 @@ export function getSessionGroups() {
                 requests: [],
                 totalIn: meta.total_input_tokens || 0,
                 totalOut: meta.total_output_tokens || 0,
+                totalCacheCreate: meta.total_cache_creation_tokens || 0,
+                totalCacheRead: meta.total_cache_read_tokens || 0,
                 totalCost: meta.total_cost || 0,
                 unpricedCount: 0,
                 firstTime: meta.started_at,
@@ -183,6 +185,8 @@ export function getSessionGroups() {
             g.requests.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
             g.totalIn = g.requests.reduce((s, r) => s + (r.input_tokens || 0), 0);
             g.totalOut = g.requests.reduce((s, r) => s + (r.output_tokens || 0), 0);
+            g.totalCacheCreate = g.requests.reduce((s, r) => s + (r.cache_creation_input_tokens || 0), 0);
+            g.totalCacheRead = g.requests.reduce((s, r) => s + (r.cache_read_input_tokens || 0), 0);
             g.totalCost = g.requests.reduce((s, r) => s + formatCostNum(r), 0);
             g.unpricedCount = g.requests.filter(r => r.priced === false).length;
             g.models = Array.from(g.models);
@@ -196,10 +200,8 @@ export function getSessionGroups() {
 // ── Session header HTML builders ──
 
 export function buildArchivedSessionHTML(group) {
-    const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${group.totalIn}/${group.totalOut}t` : '—';
-    const reqCount = group.request_count || 0;
-    const dateStr = group.firstTime ? formatDate(group.firstTime) : '';
-    const timeStr = group.lastTime ? formatTime(group.lastTime) : '—';
+    const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${formatTokens(group.totalIn)}/${formatTokens(group.totalOut)}` : '—';
+    const cacheRate = cacheHitRate(group.totalCacheRead, group.totalCacheCreate, group.totalIn);
     const cost = group.totalCost > 0 ? `¥${group.totalCost.toFixed(4)}` : '—';
     const checked = state.selectedSessionIds.has(group.session_id) ? 'checked' : '';
     return `
@@ -213,6 +215,7 @@ export function buildArchivedSessionHTML(group) {
                     <span class="session-summary-item archived-badge">${t('common.archived')}</span>
                     <span class="session-summary-item">${timeStr}</span>
                     <span class="session-summary-item">${tokens}</span>
+                    ${cacheRate !== '—' ? `<span class="session-summary-item cache-rate" title="${t('inspector.cache_hit_rate')}">⚡${esc(cacheRate)}</span>` : ''}
                     <span class="session-summary-item cost">${cost}</span>
                 </span>
             </div>
@@ -223,7 +226,8 @@ export function buildSessionHeaderHTML(group, isExpanded) {
     const reqCount = group.requests.length;
     const dateStr = group.firstTime ? formatDate(group.firstTime) : '';
     const timeRange = formatTime(group.lastTime);
-    const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${group.totalIn}/${group.totalOut}` : '—';
+    const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${formatTokens(group.totalIn)}/${formatTokens(group.totalOut)}` : '—';
+    const cacheRate = cacheHitRate(group.totalCacheRead, group.totalCacheCreate, group.totalIn);
     const cost = group.totalCost > 0 ? `¥${group.totalCost.toFixed(4)}` : '—';
     const pricingHint = group.unpricedCount > 0
         ? `<span class="session-summary-item unpriced-badge">${group.unpricedCount} ${t('inspector.unpriced')}</span>`
@@ -241,7 +245,8 @@ export function buildSessionHeaderHTML(group, isExpanded) {
                     <span class="session-summary-item">${reqCount} ${reqCount > 1 ? t('common.req_plural', { n: reqCount }) : t('common.req_singular', { n: reqCount })}</span>
                     ${models ? `<span class="session-summary-item">${esc(models)}</span>` : ''}
                     <span class="session-summary-item">${timeRange}</span>
-                    <span class="session-summary-item">${tokens}t</span>
+                    <span class="session-summary-item">${tokens}</span>
+                    ${cacheRate !== '—' ? `<span class="session-summary-item cache-rate" title="${t('inspector.cache_hit_rate')}">⚡${esc(cacheRate)}</span>` : ''}
                     <span class="session-summary-item cost">${cost}</span>
                     ${pricingHint}
                 </span>
@@ -465,9 +470,10 @@ export function buildRequestRowHTML(req, hideSession) {
     const checked = state.selectedIds.has(req.id) ? 'checked' : '';
 
     const inOut = (req.input_tokens != null || req.output_tokens != null)
-        ? `${req.input_tokens ?? 0}/${req.output_tokens ?? 0}`
+        ? `${formatTokens(req.input_tokens ?? 0)}/${formatTokens(req.output_tokens ?? 0)}`
         : '—';
-    const costStr = formatCost(req);
+    const cacheCostStr = formatCost(req);
+    const cacheRateStr = cacheHitRate(req.cache_read_input_tokens, req.cache_creation_input_tokens, req.input_tokens);
     const summary = buildRequestSummary(req);
     const dur = req.duration_ms != null ? req.duration_ms + 'ms' : '—';
     const ttft = req.time_to_first_token_ms != null ? req.time_to_first_token_ms + 'ms' : '—';
@@ -477,11 +483,12 @@ export function buildRequestRowHTML(req, hideSession) {
         `<span class="rq-meta-time">${formatTime(req.timestamp)}</span>`,
         `<span class="rq-meta-status ${statusClass}">${req.status_code || '—'}</span>`,
         `<span class="rq-meta-model" title="${esc(req.model || '')}">${esc(req.model || '—')}</span>`,
-        `<span class="rq-meta-inout">${inOut}t</span>`,
-        `<span class="rq-meta-cost${req.priced === false ? ' unpriced' : ''}">${costStr}</span>`,
+        `<span class="rq-meta-inout">${inOut}</span>`,
+        cacheRateStr !== '—' ? `<span class="rq-meta-cache" title="${t('inspector.cache_hit_rate')}">⚡${esc(cacheRateStr)}</span>` : '',
+        `<span class="rq-meta-cost${req.priced === false ? ' unpriced' : ''}">${cacheCostStr}</span>`,
         `<span class="rq-meta-dur">${dur}</span>`,
         `<span class="rq-meta-ttft">${ttft}</span>`,
-    ].join('<span class="rq-meta-sep">·</span>');
+    ].filter(Boolean).join('<span class="rq-meta-sep">·</span>');
 
     return `
         <td class="col-chk"><input type="checkbox" class="row-chk" data-id="${req.id}" ${checked}></td>
@@ -650,6 +657,10 @@ export function upsertRequestRow(req) {
 
 // ── Request detail ──
 
+function cacheKey(req) {
+    return `${req.id}:${req.status || 'unknown'}`;
+}
+
 export async function showRequestDetail(req) {
     state.selectedRequestId = req.id;
     // Auto-expand the session containing this request
@@ -670,25 +681,69 @@ export async function showRequestDetail(req) {
     }
     renderPage();
 
-    // Fetch full request (with body) from API, since list_requests omits body for performance
-    try {
-        const resp = await fetch(`/api/request/${encodeURIComponent(req.id)}`);
-        if (resp.ok) {
-            const fullReq = await resp.json();
-            // Write back to state so the summary column reflects the full body
-            const existing = state.requestRows.get(fullReq.id);
-            state.requestRows.set(fullReq.id, { ...(existing || {}), ...fullReq });
-            const row = document.getElementById(`req-${fullReq.id}`);
-            if (row) row.innerHTML = buildRequestRowHTML(fullReq, row.classList.contains('session-child'));
+    // Check if WS payload includes full body — write to detail cache
+    const key = cacheKey(req);
+    if (req.request_body != null || req.response_body != null) {
+        state.detailCache.set(key, req);
+    }
+
+    // Hit detail cache
+    const cached = state.detailCache.get(key);
+    if (cached) {
+        // Update requestRows with cached full detail
+        const existing = state.requestRows.get(cached.id);
+        state.requestRows.set(cached.id, { ...(existing || {}), ...cached });
+        updateDetailView(cached);
+        if (cached.summary_json && _renderSummaryFromCache) {
+            _renderSummaryFromCache(cached.summary_json, req.session_id);
+        }
+        return;
+    }
+
+    // Dedup in-flight fetches
+    const inFlight = state.detailFetches.get(key);
+    if (inFlight) {
+        try {
+            const fullReq = await inFlight;
             updateDetailView(fullReq);
-            // Cascade pre-computed summary to sidebar — no second API call needed
             if (fullReq.summary_json && _renderSummaryFromCache) {
                 _renderSummaryFromCache(fullReq.summary_json, req.session_id);
             }
-            return;
+        } catch (_) {
+            updateDetailView(req);
         }
-    } catch (_) {}
-    updateDetailView(req);
+        return;
+    }
+
+    // Fetch full request detail from API
+    const promise = fetch(`/api/request/${encodeURIComponent(req.id)}`)
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        })
+        .then(fullReq => {
+            state.detailCache.set(key, fullReq);
+            const existing = state.requestRows.get(fullReq.id);
+            state.requestRows.set(fullReq.id, { ...(existing || {}), ...fullReq });
+            return fullReq;
+        });
+    state.detailFetches.set(key, promise);
+
+    try {
+        const fullReq = await promise;
+        const row = document.getElementById(`req-${fullReq.id}`);
+        if (row) row.innerHTML = buildRequestRowHTML(fullReq, row.classList.contains('session-child'));
+        updateDetailView(fullReq);
+        // Cascade pre-computed summary to sidebar — no second API call needed
+        if (fullReq.summary_json && _renderSummaryFromCache) {
+            _renderSummaryFromCache(fullReq.summary_json, req.session_id);
+        }
+    } catch (e) {
+        console.error('Failed to load request detail:', e);
+        updateDetailView(req);
+    } finally {
+        state.detailFetches.delete(key);
+    }
 }
 
 export function updateDetailView(req) {

@@ -1,4 +1,4 @@
-use proxy_common::{SessionId, TaskId};
+use proxy_common::{SessionId, TaskId, TaskStatus, TaskUsage};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,7 +8,8 @@ use crate::db::{self, connection, migration};
 use crate::error::{StoreError, StoreResult};
 use crate::models::{
     ArchiveInfo, ArchiveOptions, ArchiveSearchResult, NewTask, Session, SessionFilter,
-    SessionListItem, Task, TaskListItem, TimeRange,
+    SessionListItem, Task, TaskFinalization, TaskFinalizeResult, TaskListItem,
+    TaskStartResult, TimeRange,
 };
 use crate::summary::analyzer::SessionSummary;
 use rusqlite::Connection;
@@ -221,6 +222,258 @@ impl ProxyStore {
             );
             e
         })
+    }
+
+    /// Start a new Recording task in a single transaction.
+    pub async fn task_start(
+        &self,
+        session_id: &SessionId,
+        task: NewTask,
+    ) -> StoreResult<TaskStartResult> {
+        let sid = session_id.clone();
+        let this = self.clone();
+        Self::blocking(move || {
+            let conn = this.inner.conn.lock().unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+
+            let result = (|| -> StoreResult<TaskStartResult> {
+                if task.status != TaskStatus::Recording {
+                    return Err(StoreError::InvalidArgument(
+                        "task_start requires Recording status".into(),
+                    ));
+                }
+
+                let task_id = task.id.clone().unwrap_or_else(TaskId::generate);
+
+                if db::tasks::get_task(&conn, &task_id)?.is_some() {
+                    return Err(StoreError::InvalidArgument(format!(
+                        "task '{}' already exists",
+                        task_id
+                    )));
+                }
+
+                let first_activity_at = task.started_at;
+                db::sessions::ensure_session(
+                    &conn,
+                    &sid,
+                    &task.session_defaults,
+                    first_activity_at,
+                )?;
+
+                let sequence_no = db::sessions::allocate_sequence(&conn, &sid)?;
+                let inserted = db::tasks::insert_task(&conn, &task, &task_id, &sid, sequence_no, 0)?;
+
+                if !inserted {
+                    return Err(StoreError::InvalidArgument(format!(
+                        "task '{}' insert failed (conflict)",
+                        task_id
+                    )));
+                }
+
+                let priced = task.billing.pricing_model_id != "unknown";
+                db::sessions::record_task_started(
+                    &conn,
+                    &sid,
+                    task.started_at,
+                    &task.billing.provider,
+                    &task.billing.resolved_model,
+                    task.upstream.as_deref(),
+                    priced,
+                    &task_id,
+                )?;
+
+                db::usage::record_task_started_usage(
+                    &conn,
+                    &sid,
+                    &task.billing.provider,
+                    &task.billing.resolved_model,
+                    &task.billing.currency,
+                    task.started_at,
+                )?;
+
+                let task = db::tasks::get_task(&conn, &task_id)?
+                    .ok_or_else(|| StoreError::NotFound("task not found after start".into()))?;
+                let session = db::sessions::get_session(&conn, &sid)?
+                    .ok_or_else(|| StoreError::NotFound("session not found after start".into()))?;
+
+                Ok(TaskStartResult { task, session })
+            })();
+
+            match result {
+                Ok(r) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(r)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })
+        .await
+    }
+
+    /// Finalize a Recording task to a terminal status.
+    pub async fn task_finalize(
+        &self,
+        task_id: &TaskId,
+        finalization: TaskFinalization,
+    ) -> StoreResult<TaskFinalizeResult> {
+        let tid = task_id.clone();
+        let this = self.clone();
+        Self::blocking(move || {
+            let conn = this.inner.conn.lock().unwrap();
+
+            let existing = db::tasks::get_task(&conn, &tid)?
+                .ok_or_else(|| StoreError::NotFound(format!("task '{}' not found", tid)))?;
+
+            if existing.status != TaskStatus::Recording {
+                return Ok(TaskFinalizeResult::AlreadyFinalized { task: existing });
+            }
+
+            let rates = proxy_common::PriceRates {
+                input_microusd: existing.input_rate_microusd,
+                output_microusd: existing.output_rate_microusd,
+                cache_write_microusd: existing.cache_write_rate_microusd,
+                cache_read_microusd: existing.cache_read_rate_microusd,
+            };
+            let cost_microusd =
+                crate::billing::calculate_cost_microusd(&finalization.usage, &rates)
+                    .map_err(|e| StoreError::InvalidArgument(e.to_string()))?;
+
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+
+            let result = (|| -> StoreResult<TaskFinalizeResult> {
+                let applied = db::tasks::finalize_task(&conn, &tid, &finalization, cost_microusd)?;
+
+                if !applied {
+                    let task = db::tasks::get_task(&conn, &tid)?
+                        .ok_or_else(|| StoreError::NotFound("task vanished".into()))?;
+                    return Ok(TaskFinalizeResult::AlreadyFinalized { task });
+                }
+
+                let duration_ms = finalization.timing.duration_ms.unwrap_or(0);
+                db::sessions::record_task_finalized(
+                    &conn,
+                    &existing.session_id,
+                    finalization.status.as_str(),
+                    finalization.usage.input_tokens,
+                    finalization.usage.output_tokens,
+                    finalization.usage.cache_creation_tokens,
+                    finalization.usage.cache_read_tokens,
+                    cost_microusd,
+                    finalization.ended_at,
+                    duration_ms,
+                    finalization.timing.ttft_ms,
+                    finalization.ended_at,
+                    &tid,
+                    finalization.timing.stop_reason.as_deref(),
+                    finalization.error.as_ref().map(|e| e.error_type.as_str()),
+                    finalization.error.as_ref().map(|e| e.error_message.as_str()),
+                )?;
+
+                db::usage::record_task_finalized_usage(
+                    &conn,
+                    &existing.session_id,
+                    &existing.provider,
+                    &existing.resolved_model,
+                    &existing.currency,
+                    finalization.status.as_str(),
+                    finalization.usage.input_tokens,
+                    finalization.usage.output_tokens,
+                    finalization.usage.cache_creation_tokens,
+                    finalization.usage.cache_read_tokens,
+                    cost_microusd,
+                    existing.started_at,
+                )?;
+
+                let task = db::tasks::get_task(&conn, &tid)?
+                    .ok_or_else(|| StoreError::NotFound("task not found after finalize".into()))?;
+                let session = db::sessions::get_session(&conn, &existing.session_id)?
+                    .ok_or_else(|| StoreError::NotFound("session not found after finalize".into()))?;
+
+                Ok(TaskFinalizeResult::Applied { task, session })
+            })();
+
+            match result {
+                Ok(r) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(r)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })
+        .await
+    }
+
+    /// Build a SessionSnapshot for WS SessionUpdated events.
+    pub fn session_snapshot(session: &Session) -> proxy_common::models::SessionSnapshot {
+        proxy_common::models::SessionSnapshot {
+            id: session.id.as_str().to_string(),
+            label: session.name.clone(),
+            status: session.status.clone(),
+            cwd: session.cwd.clone(),
+            project_key: session.project_key.clone(),
+            started_at: session.first_activity_at,
+            ended_at: session.ended_at,
+            task_count: session.task_count,
+            completed_task_count: session.completed_task_count,
+            failed_task_count: session.failed_task_count,
+            total_input_tokens: session.total_input_tokens,
+            total_output_tokens: session.total_output_tokens,
+            total_cost_microusd: session.total_cost_microusd,
+            latest_model: session.latest_model.clone(),
+            latest_provider: session.latest_provider.clone(),
+        }
+    }
+
+    /// Recover tasks left in Recording status from a previous run.
+    ///
+    /// Called once at startup before the server accepts requests.
+    /// Each Recording task created before `process_start_ms` is finalized
+    /// as Interrupted with zero tokens/cost.
+    pub async fn recover_interrupted_tasks(&self, process_start_ms: i64) -> StoreResult<usize> {
+        let tasks = {
+            let this = self.clone();
+            Self::blocking(move || {
+                let conn = this.inner.conn.lock().unwrap();
+                db::tasks::list_recording_tasks(&conn, process_start_ms)
+            })
+            .await?
+        };
+
+        let mut recovered = 0usize;
+        for (task_id, _session_id) in &tasks {
+            let finalization = TaskFinalization {
+                status: TaskStatus::Interrupted,
+                first_byte_at: None,
+                ended_at: process_start_ms,
+                response_headers: None,
+                response_body: None,
+                http_status_code: None,
+                usage: TaskUsage::default(),
+                timing: crate::models::TaskTiming::default(),
+                error: None,
+                metadata_patch: serde_json::json!({"recovered": true}),
+            };
+            match self.task_finalize(task_id, finalization).await {
+                Ok(TaskFinalizeResult::Applied { .. }) => recovered += 1,
+                _ => {}
+            }
+        }
+
+        if recovered > 0 {
+            tracing::info!(
+                "[store] recovered {} interrupted task(s) from {} Recording candidates",
+                recovered,
+                tasks.len()
+            );
+        }
+
+        Ok(recovered)
     }
 
     // ── Read ──

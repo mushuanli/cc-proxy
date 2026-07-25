@@ -31,7 +31,7 @@ fn request_prompt(body: &serde_json::Value) -> Option<String> {
 use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessage};
 use proxy_common::{ConfigStore, EventBus};
 use proxy_common::{ResolvedRoute, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
-use proxy_store::{NewSessionDefaults, NewTask, ProxyStore, StoreResult, Task};
+use proxy_store::{NewSessionDefaults, NewTask, ProxyStore, StoreResult};
 use proxy_store::summarize_task;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -510,6 +510,106 @@ async fn proxy_request(
         }
     };
 
+    // ── Generate task context before dispatch ──
+    let task_id = TaskId::generate();
+    let task_started_at =
+        chrono::Utc::now().timestamp_millis() - start.elapsed().as_millis() as i64;
+
+    // ── Build Recording task for persistence ──
+    let request_headers = upstream::redact_headers(&headers);
+    let request_body = stored_request_body(is_transparent, &body, &body_json);
+    let recording_metadata = serde_json::json!({
+        "protocol": protocol.request_type(),
+        "upstream_mode": if is_transparent { "proxy" } else { "relay" },
+        "priced": priced,
+    });
+
+    let recording_task = NewTask {
+        id: Some(task_id.clone()),
+        session_defaults: NewSessionDefaults {
+            client_type: client_type(protocol),
+            client_session_id: Some(session_id_str.clone()),
+            cwd: session_meta.cwd.clone(),
+            project_key: session_meta.project_key.clone(),
+            ..Default::default()
+        },
+        started_at: task_started_at,
+        first_byte_at: None,
+        ended_at: None,
+        status: TaskStatus::Recording,
+        method: method.to_string(),
+        path: path_or_url.to_string(),
+        request_headers: Some(serde_json::to_value(&request_headers).unwrap_or_default()),
+        request_body: Some(request_body.clone()),
+        response_headers: None,
+        response_body: None,
+        http_status_code: None,
+        is_streaming,
+        requested_model: Some(request_model.clone()),
+        upstream: Some(route.upstream.clone()),
+        billing: billing.clone(),
+        usage: TaskUsage::default(),
+        timing: proxy_store::TaskTiming::default(),
+        error: None,
+        metadata: recording_metadata.clone(),
+        messages_count: msg_count,
+        prompt_text: prompt.clone(),
+        summary_json: None,
+    };
+
+    // Apply capture trimming to the recording task before persistence
+    let mut recording_task = recording_task;
+    finalize_task(&mut recording_task, session_id.as_str(), &relay.capture);
+
+    // ── Build ProxiedRequest for WS NewRequest event ──
+    let recording_proxied = proxy_common::models::ProxiedRequest {
+        id: task_id.as_str().to_string(),
+        timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
+            .unwrap_or_else(chrono::Utc::now),
+        method: method.to_string(),
+        path: path_or_url.to_string(),
+        request_headers: request_headers.clone(),
+        request_body: if ws_include_bodies {
+            Some(request_body.clone())
+        } else {
+            None
+        },
+        model: Some(effective_model.clone()),
+        provider: Some(route.provider.clone()),
+        is_streaming,
+        status: Some(TaskStatus::Recording),
+        session_id: Some(session_id.as_str().to_string()),
+        request_type: protocol.request_type().into(),
+        messages_count: Some(msg_count),
+        prompt: prompt.clone(),
+        priced: Some(priced),
+        ..Default::default()
+    };
+
+    // ── Persist Recording task before dispatching upstream ──
+    let _start_result = match start_and_publish(
+        &relay.store,
+        &relay.events,
+        &session_id,
+        recording_task,
+        recording_proxied,
+    )
+    .await
+    {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::error!(
+                "[proxy] [{}] task_start failed: {} — aborting upstream dispatch",
+                sid_short,
+                e
+            );
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("Service temporarily unavailable"))
+                .unwrap();
+        }
+    };
+
     // ── Dispatch upstream ──
     let http_client = relay.client_for_proxy(proxy_url.as_deref());
     let response = match upstream::dispatch_upstream(
@@ -525,86 +625,58 @@ async fn proxy_request(
     {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::error!("[proxy] [{}] upstream dispatch failed: {}", sid_short, e,);
+            tracing::error!("[proxy] [{}] upstream dispatch failed: {}", sid_short, e);
 
-            // Build the event from the relay result itself. Persistence is a
-            // separate concern; the UI must still receive a complete task if
-            // the store is unavailable.
-            let task_id = TaskId::generate();
-            let failed_at = chrono::Utc::now();
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let request_headers = upstream::redact_headers(&headers);
-            let request_body = stored_request_body(is_transparent, &body, &body_json);
+            let failed_at = chrono::Utc::now().timestamp_millis();
+            let duration_ms = start.elapsed().as_millis() as i64;
 
-            let mut task = NewTask {
-                id: Some(task_id.clone()),
-                session_defaults: NewSessionDefaults {
-                    client_type: client_type(protocol),
-                    client_session_id: Some(session_id_str.clone()),
-                    cwd: session_meta.cwd.clone(),
-                    project_key: session_meta.project_key.clone(),
-                    ..Default::default()
-                },
-                started_at: failed_at.timestamp_millis(),
-                first_byte_at: None,
-                ended_at: Some(failed_at.timestamp_millis()),
+            let finalization = proxy_store::TaskFinalization {
                 status: TaskStatus::Failed,
-                method: method.to_string(),
-                path: path_or_url.to_string(),
-                request_headers: Some(serde_json::to_value(&request_headers).unwrap_or_default()),
-                request_body: Some(request_body.clone()),
+                first_byte_at: None,
+                ended_at: failed_at,
                 response_headers: None,
                 response_body: None,
                 http_status_code: None,
-                is_streaming: false,
-                requested_model: Some(request_model.clone()),
-                upstream: Some(route.upstream.clone()),
-                billing,
                 usage: TaskUsage::default(),
                 timing: proxy_store::TaskTiming {
-                    duration_ms: Some(duration_ms as i64),
+                    duration_ms: Some(duration_ms),
                     ..Default::default()
                 },
                 error: Some(proxy_store::TaskError {
                     error_type: "upstream_error".into(),
                     error_message: e.clone(),
                 }),
-                metadata: serde_json::json!({
-                    "protocol": protocol.request_type(),
-                    "upstream_mode": if is_transparent { "proxy" } else { "relay" },
-                    "priced": priced,
-                }),
-                messages_count: msg_count,
-                prompt_text: None,
-                summary_json: None,
+                metadata_patch: recording_metadata,
             };
 
-            finalize_task(&mut task, session_id.as_str(), &relay.capture);
-            let _ = write_and_publish(
-                &relay.store,
-                &relay.events,
-                &session_id,
-                task,
-                WsMessage::RequestUpdated(proxy_common::models::ProxiedRequest {
-                    id: task_id.as_str().to_string(),
-                    timestamp: failed_at,
-                    method: method.to_string(),
-                    path: path_or_url.to_string(),
-                    request_headers,
-                    request_body: Some(request_body),
-                    error: Some(e.clone()),
-                    model: Some(effective_model.clone()),
-                    provider: Some(route.provider.clone()),
-                    duration_ms: Some(duration_ms),
-                    session_id: Some(session_id.as_str().to_string()),
-                    request_type: protocol.request_type().into(),
-                    messages_count: Some(msg_count),
-                    prompt,
-                    priced: Some(priced),
-                    ..Default::default()
-                }),
-            )
-            .await;
+            let proxied = proxy_common::models::ProxiedRequest {
+                id: task_id.as_str().to_string(),
+                timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
+                    .unwrap_or_else(chrono::Utc::now),
+                method: method.to_string(),
+                path: path_or_url.to_string(),
+                request_headers: request_headers.clone(),
+                request_body: if ws_include_bodies {
+                    Some(request_body.clone())
+                } else {
+                    None
+                },
+                model: Some(effective_model.clone()),
+                provider: Some(route.provider.clone()),
+                is_streaming: false,
+                status: Some(TaskStatus::Failed),
+                duration_ms: Some(duration_ms as u64),
+                session_id: Some(session_id.as_str().to_string()),
+                error: Some(e.clone()),
+                request_type: protocol.request_type().into(),
+                messages_count: Some(msg_count),
+                prompt: prompt.clone(),
+                priced: Some(priced),
+                ..Default::default()
+            };
+
+            finalize_and_publish(&relay.store, &relay.events, &task_id, finalization, proxied)
+                .await;
 
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -614,36 +686,12 @@ async fn proxy_request(
     };
 
     // ── Parse response ──
-    #[allow(clippy::needless_late_init)]
     let upstream_response: upstream::UpstreamResponse;
-    let task_id = TaskId::generate();
-    let task_started_at =
-        chrono::Utc::now().timestamp_millis() - start.elapsed().as_millis() as i64;
 
     if !is_streaming {
         upstream_response =
             upstream::handle_non_streaming_response(response, start, protocol).await;
     } else {
-        relay.events.publish(WsMessage::NewRequest(
-            proxy_common::models::ProxiedRequest {
-                id: task_id.as_str().to_string(),
-                timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
-                    .unwrap_or_else(chrono::Utc::now),
-                method: method.to_string(),
-                path: path_or_url.to_string(),
-                model: Some(effective_model.clone()),
-                provider: Some(route.provider.clone()),
-                is_streaming: true,
-                status_code: Some(response.status().as_u16()),
-                session_id: Some(session_id.as_str().to_string()),
-                request_type: protocol.request_type().into(),
-                messages_count: Some(msg_count),
-                prompt: prompt.clone(),
-                priced: Some(priced),
-                ..Default::default()
-            },
-        ));
-
         let stream = upstream::stream_upstream_response(response, start, protocol);
         let client_resp = Response::builder()
             .status(stream.status_code)
@@ -651,53 +699,86 @@ async fn proxy_request(
             .unwrap();
         let stream_meta = stream.metadata;
 
-        // For the store write, we need to wait for metadata.
-        // Clone what we need for the spawned task.
         let store = relay.store.clone();
         let events = relay.events.clone();
         let session_id_clone = session_id.clone();
-        let session_id_str_clone = session_id_str.clone();
         let log_model = request_model.clone();
         let effective_model_clone = effective_model.clone();
         let method_str = method.to_string();
         let path_str = path_or_url.to_string();
-        let billing_clone = billing.clone();
-        let priced_val = priced;
-        let msg_count_val = msg_count;
-        let ws_include_bodies_val = ws_include_bodies;
+        let _route_upstream = route.upstream.clone();
+        let route_provider = route.provider.clone();
+        let resolved_model = route.resolved_model.clone();
         let capture = relay.capture.clone();
-        let session_meta_clone = session_meta.clone();
         let prompt_clone = prompt.clone();
+        let ws_include_bodies_val = ws_include_bodies;
+        let msg_count_val = msg_count;
+        let priced_val = priced;
+        let is_transparent_val = is_transparent;
+        let body_clone = body.clone();
+        let body_json_clone = body_json.clone();
+        let headers_clone = headers.clone();
 
         tokio::spawn(async move {
             let meta = match stream_meta.await {
                 Ok(m) => m,
-                Err(_) => return,
+                Err(_) => {
+                    // Stream interrupted — finalize as Interrupted
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let finalization = proxy_store::TaskFinalization {
+                        status: TaskStatus::Interrupted,
+                        first_byte_at: None,
+                        ended_at: now,
+                        response_headers: None,
+                        response_body: None,
+                        http_status_code: None,
+                        usage: TaskUsage::default(),
+                        timing: proxy_store::TaskTiming {
+                            duration_ms: Some((now - task_started_at).max(0)),
+                            ..Default::default()
+                        },
+                        error: None,
+                        metadata_patch: recording_metadata.clone(),
+                    };
+                    finalize_and_publish(
+                        &store,
+                        &events,
+                        &task_id,
+                        finalization,
+                        proxy_common::models::ProxiedRequest {
+                            id: task_id.as_str().to_string(),
+                            timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
+                                .unwrap_or_else(chrono::Utc::now),
+                            method: method_str,
+                            path: path_str,
+                            model: Some(effective_model_clone),
+                            provider: Some(route_provider),
+                            is_streaming: true,
+                            status: Some(TaskStatus::Interrupted),
+                            session_id: Some(session_id_clone.as_str().to_string()),
+                            request_type: protocol.request_type().into(),
+                            messages_count: Some(msg_count_val),
+                            prompt: prompt_clone,
+                            priced: Some(priced_val),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    return;
+                }
             };
 
-            let mut task = NewTask {
-                id: Some(task_id.clone()),
-                session_defaults: NewSessionDefaults {
-                    client_type: client_type(protocol),
-                    client_session_id: Some(session_id_str_clone),
-                    cwd: session_meta_clone.cwd,
-                    project_key: session_meta_clone.project_key,
-                    ..Default::default()
-                },
-                started_at: task_started_at,
+            let now = chrono::Utc::now().timestamp_millis();
+            let final_status = if meta.error.is_some() || meta.status_code >= 400 {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Completed
+            };
+
+            let finalization = proxy_store::TaskFinalization {
+                status: final_status.clone(),
                 first_byte_at: meta.ttft_ms.map(|ttft| task_started_at + ttft as i64),
-                ended_at: Some(chrono::Utc::now().timestamp_millis()),
-                status: if meta.error.is_some() || meta.status_code >= 400 {
-                    TaskStatus::Failed
-                } else {
-                    TaskStatus::Completed
-                },
-                method: method_str.clone(),
-                path: path_str.clone(),
-                request_headers: Some(
-                    serde_json::to_value(upstream::redact_headers(&headers)).unwrap_or_default(),
-                ),
-                request_body: Some(stored_request_body(is_transparent, &body, &body_json)),
+                ended_at: now,
                 response_headers: Some(
                     serde_json::to_value(
                         meta.response_headers
@@ -709,10 +790,6 @@ async fn proxy_request(
                 ),
                 response_body: Some(meta.normalized.clone()),
                 http_status_code: Some(meta.status_code),
-                is_streaming: true,
-                requested_model: Some(log_model.clone()),
-                upstream: Some(route.upstream.clone()),
-                billing: billing_clone,
                 usage: TaskUsage {
                     input_tokens: meta.input_tokens as u64,
                     output_tokens: meta.output_tokens as u64,
@@ -729,20 +806,15 @@ async fn proxy_request(
                     error_type: "upstream_error".into(),
                     error_message: e.clone(),
                 }),
-                metadata: serde_json::json!({
+                metadata_patch: serde_json::json!({
                     "protocol": protocol.request_type(),
-                    "upstream_mode": if is_transparent { "proxy" } else { "relay" },
+                    "upstream_mode": if is_transparent_val { "proxy" } else { "relay" },
                     "priced": priced_val,
                     "capture_truncated": meta.capture_truncated,
                     "raw_response_body": String::from_utf8_lossy(&meta.raw_body).to_string(),
                     "sse_events": meta.sse_events.clone(),
                 }),
-                messages_count: msg_count_val,
-                prompt_text: None,
-                summary_json: None,
             };
-
-            finalize_task(&mut task, session_id_clone.as_str(), &capture);
 
             let mut proxied = proxy_common::models::ProxiedRequest {
                 id: task_id.as_str().to_string(),
@@ -750,10 +822,10 @@ async fn proxy_request(
                     .unwrap_or_else(chrono::Utc::now),
                 method: method_str.clone(),
                 path: path_str.clone(),
-                request_headers: upstream::redact_headers(&headers),
-                request_body: Some(stored_request_body(is_transparent, &body, &body_json)),
+                request_headers: upstream::redact_headers(&headers_clone),
+                request_body: Some(stored_request_body(is_transparent_val, &body_clone, &body_json_clone)),
                 model: Some(effective_model_clone.clone()),
-                provider: Some(route.provider.clone()),
+                provider: Some(route_provider.clone()),
                 response_headers: meta
                     .response_headers
                     .iter()
@@ -764,13 +836,21 @@ async fn proxy_request(
                 status_code: Some(meta.status_code),
                 input_tokens: Some(meta.input_tokens),
                 output_tokens: Some(meta.output_tokens),
+                cache_creation_input_tokens: Some(meta.cache_creation_tokens),
+                cache_read_input_tokens: Some(meta.cache_read_tokens),
                 duration_ms: Some(meta.duration_ms),
+                time_to_first_token_ms: meta.ttft_ms,
+                stop_reason: meta.stop_reason.clone(),
+                message_id: meta.message_id.clone(),
                 session_id: Some(session_id_clone.as_str().to_string()),
+                is_streaming: true,
+                status: Some(final_status),
                 error: meta.error.clone(),
                 request_type: protocol.request_type().into(),
                 messages_count: Some(msg_count_val),
                 prompt: prompt_clone,
                 priced: Some(priced_val),
+                sse_events: meta.sse_events.clone(),
                 ..Default::default()
             };
             if !ws_include_bodies_val {
@@ -780,14 +860,7 @@ async fn proxy_request(
                 proxied.sse_events.clear();
             }
 
-            let _ = write_and_publish(
-                &store,
-                &events,
-                &session_id_clone,
-                task,
-                WsMessage::RequestUpdated(proxied),
-            )
-            .await;
+            finalize_and_publish(&store, &events, &task_id, finalization, proxied).await;
 
             capture.record_exchange(
                 session_id_clone.as_str(),
@@ -795,7 +868,7 @@ async fn proxy_request(
                     method: method_str.clone(),
                     path: path_str.clone(),
                     status_code: meta.status_code,
-                    request_body: stored_request_body(is_transparent, &body, &body_json),
+                    request_body: stored_request_body(is_transparent_val, &body_clone, &body_json_clone),
                     response_body: meta.content_text.as_deref().unwrap_or("").to_string(),
                     duration_ms: meta.duration_ms,
                 },
@@ -811,7 +884,7 @@ async fn proxy_request(
                 tracing::warn!(
                     "[proxy] [stream] {} -> {} HTTP {} err={} body={}",
                     log_model,
-                    route.resolved_model,
+                    resolved_model,
                     meta.status_code,
                     err_detail,
                     body_snippet,
@@ -819,7 +892,7 @@ async fn proxy_request(
             } else {
                 tracing::info!(
                     "[proxy] [stream] {} in={} out={} dur={}ms",
-                    route.resolved_model,
+                    resolved_model,
                     meta.input_tokens,
                     meta.output_tokens,
                     meta.duration_ms,
@@ -851,57 +924,28 @@ async fn proxy_request(
         );
     }
 
-    // Build one complete task snapshot for both the event and persistence.
-    // The event is not reconstructed by querying the store.
-    let request_headers = upstream::redact_headers(&headers);
-    let request_body = stored_request_body(is_transparent, &body, &body_json);
+    // ── Non-streaming: finalize the Recording task ──
     let response_headers: HashMap<String, String> = upstream_response
         .response_headers
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
-    let normalized_response = Some(upstream_response.normalized.clone());
-    let raw_response_body = String::from_utf8_lossy(&upstream_response.raw_body).to_string();
-    let inspect_metadata = serde_json::json!({
-        "protocol": protocol.request_type(),
-        "upstream_mode": if is_transparent { "proxy" } else { "relay" },
-        "priced": priced,
-        "capture_truncated": upstream_response.capture_truncated,
-        "raw_response_body": raw_response_body,
-        "sse_events": upstream_response.sse_events.clone(),
-    });
 
-    // ── Write to store (store computes cost internally) ──
-    let mut task = NewTask {
-        id: Some(task_id.clone()),
-        session_defaults: NewSessionDefaults {
-            client_type: client_type(protocol),
-            client_session_id: Some(session_id_str.clone()),
-            cwd: session_meta.cwd.clone(),
-            project_key: session_meta.project_key.clone(),
-            ..Default::default()
-        },
-        started_at: task_started_at,
+    let final_status = if upstream_response.error.is_some() || is_http_error {
+        TaskStatus::Failed
+    } else {
+        TaskStatus::Completed
+    };
+
+    let finalization = proxy_store::TaskFinalization {
+        status: final_status.clone(),
         first_byte_at: upstream_response
             .ttft_ms
             .map(|ttft| task_started_at + ttft as i64),
-        ended_at: Some(chrono::Utc::now().timestamp_millis()),
-        status: if upstream_response.error.is_some() || is_http_error {
-            TaskStatus::Failed
-        } else {
-            TaskStatus::Completed
-        },
-        method: method.to_string(),
-        path: path_or_url.to_string(),
-        request_headers: Some(serde_json::to_value(&request_headers).unwrap_or_default()),
-        request_body: Some(request_body.clone()),
+        ended_at: chrono::Utc::now().timestamp_millis(),
         response_headers: Some(serde_json::to_value(&response_headers).unwrap_or_default()),
-        response_body: normalized_response.clone(),
+        response_body: Some(upstream_response.normalized.clone()),
         http_status_code: Some(upstream_response.status_code),
-        is_streaming,
-        requested_model: Some(request_model.clone()),
-        upstream: Some(route.upstream.clone()),
-        billing,
         usage: TaskUsage {
             input_tokens: upstream_response.input_tokens as u64,
             output_tokens: upstream_response.output_tokens as u64,
@@ -921,25 +965,28 @@ async fn proxy_request(
                 error_type: "upstream_error".into(),
                 error_message: e.clone(),
             }),
-        metadata: inspect_metadata,
-        messages_count: msg_count,
-        prompt_text: None,
-        summary_json: None,
+        metadata_patch: serde_json::json!({
+            "protocol": protocol.request_type(),
+            "upstream_mode": if is_transparent { "proxy" } else { "relay" },
+            "priced": priced,
+            "capture_truncated": upstream_response.capture_truncated,
+            "raw_response_body": String::from_utf8_lossy(&upstream_response.raw_body).to_string(),
+            "sse_events": upstream_response.sse_events.clone(),
+        }),
     };
 
-    // ── Build ProxiedRequest for WS event ──
     let mut proxied = proxy_common::models::ProxiedRequest {
         id: task_id.as_str().to_string(),
         timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
             .unwrap_or_else(chrono::Utc::now),
         method: method.to_string(),
         path: path_or_url.to_string(),
-        request_headers,
+        request_headers: request_headers.clone(),
         request_body: Some(request_body.clone()),
         model: Some(effective_model.clone()),
         provider: Some(route.provider.clone()),
         response_headers,
-        response_body: normalized_response
+        response_body: Some(upstream_response.normalized)
             .as_ref()
             .and_then(|body| serde_json::to_string(body).ok()),
         content_text: upstream_response.content_text.clone(),
@@ -954,9 +1001,10 @@ async fn proxy_request(
         message_id: upstream_response.message_id.clone(),
         session_id: Some(session_id.as_str().to_string()),
         is_streaming,
+        status: Some(final_status),
         error: upstream_response.error.clone(),
         messages_count: Some(msg_count as u32),
-        prompt,
+        prompt: prompt.clone(),
         priced: Some(priced),
         request_type: protocol.request_type().into(),
         sse_events: upstream_response.sse_events.clone(),
@@ -969,16 +1017,7 @@ async fn proxy_request(
         proxied.sse_events.clear();
     }
 
-    finalize_task(&mut task, session_id.as_str(), &relay.capture);
-
-    let store_result = write_and_publish(
-        &relay.store,
-        &relay.events,
-        &session_id,
-        task,
-        WsMessage::NewRequest(proxied),
-    )
-    .await;
+    finalize_and_publish(&relay.store, &relay.events, &task_id, finalization, proxied).await;
 
     // ── Capture recording ──
     relay.capture.record_exchange(
@@ -998,32 +1037,36 @@ async fn proxy_request(
     );
 
     // ── Log completion ──
-    if let Ok(ref t) = store_result {
-        let cost_usd = t.cost_microusd as f64 / 1_000_000.0;
-        if let Some(ref err) = upstream_response.error {
-            tracing::error!(
-                "[proxy] [{}] {} HTTP {} err={} in={} out={} dur={}ms",
-                sid_short,
-                route.resolved_model,
-                upstream_response.status_code,
-                err,
-                upstream_response.input_tokens,
-                upstream_response.output_tokens,
-                upstream_response.duration_ms,
-            );
-        } else {
-            tracing::info!(
-                "[proxy] [{}] {} in={} out={} cache_w={} cache_r={} cost=${:.6} dur={}ms",
-                sid_short,
-                route.resolved_model,
-                upstream_response.input_tokens,
-                upstream_response.output_tokens,
-                upstream_response.cache_creation_tokens,
-                upstream_response.cache_read_tokens,
-                cost_usd,
-                upstream_response.duration_ms,
-            );
-        }
+    if upstream_response.error.is_some() || is_http_error {
+        let err_detail = upstream_response.error.as_deref().unwrap_or("no body");
+        tracing::error!(
+            "[proxy] [{}] {} HTTP {} err={} in={} out={} dur={}ms",
+            sid_short,
+            route.resolved_model,
+            upstream_response.status_code,
+            err_detail,
+            upstream_response.input_tokens,
+            upstream_response.output_tokens,
+            upstream_response.duration_ms,
+        );
+    } else {
+        let cost_usd = upstream_response.input_tokens as f64 * billing.rates.input_microusd as f64
+            / 1_000_000.0
+            / 1_000_000.0
+            + upstream_response.output_tokens as f64 * billing.rates.output_microusd as f64
+                / 1_000_000.0
+                / 1_000_000.0;
+        tracing::info!(
+            "[proxy] [{}] {} in={} out={} cache_w={} cache_r={} cost=${:.6} dur={}ms",
+            sid_short,
+            route.resolved_model,
+            upstream_response.input_tokens,
+            upstream_response.output_tokens,
+            upstream_response.cache_creation_tokens,
+            upstream_response.cache_read_tokens,
+            cost_usd,
+            upstream_response.duration_ms,
+        );
     }
 
     // ── Build client response ──
@@ -1116,27 +1159,54 @@ fn finalize_task(task: &mut NewTask, session_id: &str, capture: &CaptureControl)
     }
 }
 
-/// Unified persistence + notification: write task, publish event, emit cost stats.
-async fn write_and_publish(
+/// Persist a Recording task and publish NewRequest + SessionUpdated.
+/// Returns the stored task on success.
+async fn start_and_publish(
     store: &ProxyStore,
     events: &EventBus,
     session_id: &SessionId,
     task: NewTask,
-    ws_msg: WsMessage,
-) -> StoreResult<Task> {
-    let result = store.task_write(session_id, task).await;
-    if let Ok(stats) = store.usage_cost_stats().await {
-        events.publish(WsMessage::CostUpdated(stats));
-    }
-    events.publish(ws_msg);
-    result
+    proxied: proxy_common::models::ProxiedRequest,
+) -> StoreResult<proxy_store::TaskStartResult> {
+    let result = store.task_start(session_id, task).await?;
+    events.publish(WsMessage::SessionUpdated(ProxyStore::session_snapshot(
+        &result.session,
+    )));
+    events.publish(WsMessage::NewRequest(proxied));
+    Ok(result)
 }
 
-/// Strip request body to only the last user message, preserving the full JSON
-/// structure (model, system, metadata, etc.). This keeps the same display logic
-/// working for both capture-on and capture-off modes.
+/// Finalize a Recording task and publish RequestUpdated + SessionUpdated + CostUpdated.
+/// Only publishes events if the finalization actually transitioned the task.
+async fn finalize_and_publish(
+    store: &ProxyStore,
+    events: &EventBus,
+    task_id: &TaskId,
+    finalization: proxy_store::TaskFinalization,
+    proxied: proxy_common::models::ProxiedRequest,
+) {
+    match store.task_finalize(task_id, finalization).await {
+        Ok(proxy_store::TaskFinalizeResult::Applied { session, .. }) => {
+            if let Ok(stats) = store.usage_cost_stats().await {
+                events.publish(WsMessage::CostUpdated(stats));
+            }
+            events.publish(WsMessage::SessionUpdated(ProxyStore::session_snapshot(
+                &session,
+            )));
+            events.publish(WsMessage::RequestUpdated(proxied));
+        }
+        Ok(proxy_store::TaskFinalizeResult::AlreadyFinalized { .. }) => {
+            tracing::debug!("[relay] task {} already finalized, skipping events", task_id);
+        }
+        Err(e) => {
+            tracing::error!("[relay] task_finalize failed for {}: {}", task_id, e);
+        }
+    }
+}
+
+/// Strip request body to only model, output_config, and the last real user message.
 fn strip_body_to_last_user_message(body: &str) -> Option<String> {
-    let mut value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let msg_key = if value.get("messages").and_then(|v| v.as_array()).is_some() {
         "messages"
     } else if value.get("input").and_then(|v| v.as_array()).is_some() {
@@ -1144,9 +1214,8 @@ fn strip_body_to_last_user_message(body: &str) -> Option<String> {
     } else {
         return None;
     };
-    let messages = value.get_mut(msg_key)?.as_array_mut()?;
+    let messages = value.get(msg_key)?.as_array()?;
 
-    // Find the last real user message (skip tool_result-only messages)
     let last_user_idx = messages.iter().enumerate().rev().find_map(|(i, msg)| {
         let is_user = msg.get("role").and_then(|v| v.as_str()) == Some("user");
         if !is_user {
@@ -1157,9 +1226,19 @@ fn strip_body_to_last_user_message(body: &str) -> Option<String> {
     })?;
 
     let last_user = messages[last_user_idx].clone();
-    *messages = vec![last_user];
+    let mut minimal = serde_json::Map::new();
+    minimal.insert(
+        msg_key.to_string(),
+        serde_json::json!([last_user]),
+    );
+    if let Some(model) = value.get("model") {
+        minimal.insert("model".to_string(), model.clone());
+    }
+    if let Some(oc) = value.get("output_config") {
+        minimal.insert("output_config".to_string(), oc.clone());
+    }
 
-    Some(serde_json::to_string(&value).unwrap_or_default())
+    Some(serde_json::to_string(&minimal).unwrap_or_default())
 }
 
 fn client_type(protocol: upstream::ApiProtocol) -> ClientType {

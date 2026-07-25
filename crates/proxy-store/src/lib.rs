@@ -12,7 +12,8 @@ pub use db::usage::DailyUsageRow;
 pub use error::{StoreError, StoreResult};
 pub use models::{
     ArchiveInfo, ArchiveOptions, NewSessionDefaults, NewTask, Session, SessionFilter,
-    SessionListItem, Task, TaskError, TaskListItem, TaskTiming,
+    SessionListItem, Task, TaskError, TaskFinalization, TaskFinalizeResult, TaskListItem,
+    TaskStartResult, TaskTiming,
 };
 pub use store::{ProxyStore, ProxyStoreConfig};
 pub use summary::analyzer::{extract_latest_user_prompt, summarize_task, SessionSummary};

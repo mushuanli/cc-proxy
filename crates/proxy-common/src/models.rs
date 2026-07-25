@@ -253,6 +253,7 @@ pub struct ProxiedRequest {
     pub model: Option<String>,
     pub provider: Option<String>, // routing decision writes the provider name here
     pub is_streaming: bool,
+    pub status: Option<TaskStatus>,
     // Response
     pub status_code: Option<u16>,
     pub response_headers: HashMap<String, String>,
@@ -290,6 +291,26 @@ pub struct ProxiedRequest {
 pub struct SseEvent {
     pub event_type: Option<String>,
     pub data: Option<String>,
+}
+
+/// Lightweight session snapshot for WS SessionUpdated events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    pub id: String,
+    pub label: Option<String>,
+    pub status: String,
+    pub cwd: Option<String>,
+    pub project_key: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub task_count: u64,
+    pub completed_task_count: u64,
+    pub failed_task_count: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cost_microusd: i64,
+    pub latest_model: Option<String>,
+    pub latest_provider: Option<String>,
 }
 
 // ── Provider info (for frontend) ──
@@ -363,6 +384,8 @@ pub enum WsMessage {
     /// Frontend uses this to update the inspector toolbar cost display
     /// without making a separate GET /api/costs call.
     CostUpdated(CostStats),
+    /// A session's aggregate state changed (new task started / task finalized).
+    SessionUpdated(SessionSnapshot),
     /// Sent when the server-side broadcast buffer overflowed for this client
     /// (messages were dropped). The client should re-fetch state via REST
     /// (GET /api/requests etc.) to resynchronize instead of trusting the stream.
@@ -380,6 +403,8 @@ pub struct CostStats {
     pub today_cache_creation_tokens: i64,
     pub today_cache_read_tokens: i64,
     pub today_cost_microusd: i64,
+    pub month_input_tokens: i64,
+    pub month_output_tokens: i64,
     pub month_cost_microusd: i64,
 }
 

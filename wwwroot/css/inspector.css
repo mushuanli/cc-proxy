@@ -138,3 +138,68 @@ td.col-req { padding: 6px 10px; white-space: normal; overflow: visible; }
 #view-inspector.summary-open.summary-collapsed .table-container { margin-right: 48px; }
 #view-inspector.summary-open.summary-collapsed .detail-panel { margin-right: 48px; }
 #view-inspector.summary-open.summary-collapsed .pagination { margin-right: 48px; }
+
+/* ── Conversation timeline ── */
+.timeline-item {
+    padding: 6px 10px;
+    border-left: 3px solid var(--border);
+    margin-bottom: 2px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    outline: none;
+}
+.timeline-item:hover,
+.timeline-item:focus-visible {
+    background: var(--bg-hover, #f0f2f5);
+}
+.timeline-item.tl-recording {
+    border-left-color: var(--accent, #4a90a4);
+}
+.timeline-item.tl-completed {
+    border-left-color: var(--success, #2e7d32);
+}
+.timeline-item.tl-failed {
+    border-left-color: var(--error, #c62828);
+    background: rgba(198, 40, 40, 0.04);
+}
+.timeline-item.tl-interrupted {
+    border-left-color: var(--text-muted, #999);
+    background: rgba(0, 0, 0, 0.02);
+}
+.timeline-row1 {
+    font-size: 0.82rem;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+}
+.timeline-row2 {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.tl-status {
+    font-size: 0.75rem;
+    width: 14px;
+    text-align: center;
+}
+.tl-recording .tl-status { color: var(--accent, #4a90a4); animation: tl-pulse 2s ease-in-out infinite; }
+.tl-completed .tl-status { color: var(--success, #2e7d32); }
+.tl-failed .tl-status { color: var(--error, #c62828); }
+.tl-interrupted .tl-status { color: var(--text-muted, #999); }
+
+@keyframes tl-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.highlight-flash {
+    animation: hl-flash 1.5s ease-out;
+}
+@keyframes hl-flash {
+    0% { background: var(--accent, #4a90a4); color: #fff; }
+    100% { background: transparent; }
+}

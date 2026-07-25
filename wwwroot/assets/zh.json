@@ -37,6 +37,7 @@
 
   "inspector": {
     "unpriced": "未定价",
+    "cache_hit_rate": "缓存命中率",
     "record": "录制",
     "recording": "录制中…",
     "rec_dot": "录制",

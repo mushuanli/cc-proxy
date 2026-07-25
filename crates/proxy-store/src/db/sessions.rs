@@ -171,6 +171,113 @@ pub fn update_aggregates(
     Ok(())
 }
 
+/// Record session-level aggregates when a task starts (Recording).
+pub fn record_task_started(
+    conn: &Connection,
+    session_id: &SessionId,
+    activity_at: i64,
+    provider: &str,
+    resolved_model: &str,
+    upstream: Option<&str>,
+    priced: bool,
+    task_id: &TaskId,
+) -> StoreResult<()> {
+    conn.execute(
+        "UPDATE sessions SET
+            created_at = MIN(created_at, ?2),
+            first_activity_at = MIN(first_activity_at, ?2),
+            last_activity_at = MAX(last_activity_at, ?2),
+            task_count = task_count + 1,
+            priced_task_count = priced_task_count + CASE WHEN ?3 THEN 1 ELSE 0 END,
+            unpriced_task_count = unpriced_task_count + CASE WHEN ?3 THEN 0 ELSE 1 END,
+            latest_provider = ?4,
+            latest_model = ?5,
+            latest_upstream = COALESCE(?6, latest_upstream),
+            last_task_id = ?7,
+            last_task_status = 'recording',
+            archive_dirty = 1
+         WHERE id = ?1",
+        params![
+            session_id.as_str(),
+            activity_at,
+            priced,
+            provider,
+            resolved_model,
+            upstream,
+            task_id.as_str(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record session-level aggregates when a task reaches a terminal status.
+/// Does NOT increment task_count — that happened in record_task_started.
+#[allow(clippy::too_many_arguments)]
+pub fn record_task_finalized(
+    conn: &Connection,
+    session_id: &SessionId,
+    status: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    cost_microusd: i64,
+    activity_at: i64,
+    duration_ms: i64,
+    ttft_ms: Option<i64>,
+    ended_at: i64,
+    task_id: &TaskId,
+    stop_reason: Option<&str>,
+    error_type: Option<&str>,
+    error_message: Option<&str>,
+) -> StoreResult<()> {
+    conn.execute(
+        "UPDATE sessions SET
+            last_activity_at = MAX(last_activity_at, ?2),
+            completed_task_count = completed_task_count +
+                CASE WHEN ?3 = 'completed' THEN 1 ELSE 0 END,
+            failed_task_count = failed_task_count +
+                CASE WHEN ?3 = 'failed' THEN 1 ELSE 0 END,
+            total_input_tokens = total_input_tokens + ?4,
+            total_output_tokens = total_output_tokens + ?5,
+            total_cache_creation_tokens = total_cache_creation_tokens + ?6,
+            total_cache_read_tokens = total_cache_read_tokens + ?7,
+            total_cost_microusd = total_cost_microusd + ?8,
+            total_duration_ms = total_duration_ms + ?9,
+            total_ttft_ms = total_ttft_ms + COALESCE(?10, 0),
+            ttft_task_count = ttft_task_count + CASE WHEN ?10 IS NULL THEN 0 ELSE 1 END,
+            ended_at = CASE
+                WHEN ended_at IS NULL THEN ?11
+                ELSE MAX(ended_at, ?11)
+            END,
+            last_task_id = ?12,
+            last_task_status = ?3,
+            last_stop_reason = ?13,
+            last_error_type = ?14,
+            last_error_message = ?15,
+            archive_dirty = 1
+         WHERE id = ?1",
+        params![
+            session_id.as_str(),
+            activity_at,
+            status,
+            input_tokens as i64,
+            output_tokens as i64,
+            cache_creation_tokens as i64,
+            cache_read_tokens as i64,
+            cost_microusd,
+            duration_ms,
+            ttft_ms,
+            ended_at,
+            task_id.as_str(),
+            stop_reason,
+            error_type,
+            error_message,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Update session archive checkpoint.
 pub fn update_archive_checkpoint(
     conn: &Connection,

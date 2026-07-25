@@ -169,7 +169,8 @@ pub fn list_tasks(
         "SELECT id, sequence_no, started_at, ended_at, status,
          method, path,
          provider, resolved_model, http_status_code,
-         input_tokens, output_tokens, cost_microusd, pricing_model_id,
+         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+         cost_microusd, pricing_model_id,
          duration_ms, ttft_ms, summary_json, messages_count, prompt_text
          FROM tasks WHERE session_id = ?1",
     );
@@ -279,6 +280,103 @@ pub fn delete_tasks(conn: &Connection, ids: &[TaskId]) -> StoreResult<usize> {
     Ok(deleted)
 }
 
+/// Conditionally update a task from Recording to a terminal status.
+/// Returns true if a row was affected (transition happened), false if already finalized.
+pub fn finalize_task(
+    conn: &Connection,
+    id: &TaskId,
+    finalization: &crate::models::TaskFinalization,
+    cost_microusd: i64,
+) -> StoreResult<bool> {
+    let response_body_json = finalization
+        .response_body
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
+    let response_headers_json = finalization
+        .response_headers
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
+    let metadata_json = serde_json::to_string(&finalization.metadata_patch)?;
+
+    let rows = conn.execute(
+        "UPDATE tasks SET
+            status = ?2,
+            first_byte_at = ?3,
+            ended_at = ?4,
+            response_headers_json = ?5,
+            response_body = ?6,
+            http_status_code = ?7,
+            input_tokens = ?8,
+            output_tokens = ?9,
+            cache_creation_tokens = ?10,
+            cache_read_tokens = ?11,
+            duration_ms = ?12,
+            ttft_ms = ?13,
+            stop_reason = ?14,
+            upstream_message_id = ?15,
+            error_type = ?16,
+            error_message = ?17,
+            cost_microusd = ?18,
+            metadata_json = ?19
+         WHERE id = ?1 AND status = 'recording'",
+        params![
+            id.as_str(),
+            finalization.status.as_str(),
+            finalization.first_byte_at,
+            finalization.ended_at,
+            response_headers_json,
+            response_body_json,
+            finalization.http_status_code.map(|c| c as i64),
+            finalization.usage.input_tokens as i64,
+            finalization.usage.output_tokens as i64,
+            finalization.usage.cache_creation_tokens as i64,
+            finalization.usage.cache_read_tokens as i64,
+            finalization.timing.duration_ms,
+            finalization.timing.ttft_ms,
+            finalization.timing.stop_reason,
+            finalization.timing.upstream_message_id,
+            finalization.error
+                .as_ref()
+                .map(|e| e.error_type.as_str())
+                .unwrap_or(""),
+            finalization.error
+                .as_ref()
+                .map(|e| e.error_message.as_str())
+                .unwrap_or(""),
+            cost_microusd,
+            metadata_json,
+        ],
+    )?;
+
+    Ok(rows > 0)
+}
+
+/// List all tasks currently in Recording status created before the given timestamp.
+/// Returns (task_id, session_id) pairs for startup recovery.
+pub fn list_recording_tasks(
+    conn: &Connection,
+    before_ms: i64,
+) -> StoreResult<Vec<(TaskId, SessionId)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id FROM tasks WHERE status = 'recording' AND created_at < ?1",
+    )?;
+    let rows = stmt.query_map(params![before_ms], |row| {
+        Ok((
+            TaskId::new(row.get::<_, String>(0)?),
+            SessionId::from_trusted(row.get::<_, String>(1)?),
+        ))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let response_body_str: Option<String> = row.get("response_body")?;
     let response_body =
@@ -356,6 +454,8 @@ fn row_to_task_list_item(row: &rusqlite::Row) -> rusqlite::Result<TaskListItem> 
             .map(|v| v as u16),
         input_tokens: row.get::<_, i64>("input_tokens")? as u64,
         output_tokens: row.get::<_, i64>("output_tokens")? as u64,
+        cache_creation_tokens: row.get::<_, i64>("cache_creation_tokens")? as u64,
+        cache_read_tokens: row.get::<_, i64>("cache_read_tokens")? as u64,
         cost_microusd: row.get("cost_microusd")?,
         priced: row
             .get::<_, Option<String>>("pricing_model_id")?

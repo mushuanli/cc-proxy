@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { loadI18n, applyI18n, t } from './i18n.js';
 import {
-    renderPage, upsertRequestRow, updateRequestCount, clearAllTables,
+    renderPage, updateRequestCount, clearAllTables,
     showRequestDetail, updateFilterOptions, getSessionGroups,
     setSessionPanelFns, applyFiltersAndRender, updatePagination,
     toggleSession, selectSession, expandAllSessions, collapseAllSessions,
@@ -15,9 +15,9 @@ import {
     openUpstreamTableEdit, closeUpstreamTableEdit, activateUpstream, deleteUpstream,
     deleteModelPricing,
 } from './settings.js';
-import { loadCosts, updateInspectorCostStats, refreshInspectorCostStatsNow } from './cost.js';import { loadArchiveList, loadArchiveFile, startArchiveRename } from './archive.js';
+import { loadCosts, updateInspectorCostStats, refreshInspectorCostStatsNow, applyCostStats } from './cost.js';import { loadArchiveList, loadArchiveFile, startArchiveRename } from './archive.js';
 import {
-    addToTimeline,
+    renderTimeline, updateConvFilter,
 } from './timeline.js';
 
 // Optional dashboard auth. Open `/?token=...` once; keep the token only for
@@ -63,6 +63,9 @@ export function connect() {
         el.textContent = t('status.connected');
         console.debug('[ws] connected at', new Date().toISOString());
         startSilentCheck();
+        // Run resync after initial connection and every reconnect
+        const reason = state.requestRows.size === 0 ? 'init' : 'reconnect';
+        resyncState(reason);
     };
 
     state.ws.onclose = (ev) => {
@@ -95,75 +98,181 @@ export function connect() {
 
 function handleMessage(msg) {
     state._lastMsgTime = Date.now();
+    if (state.syncing) {
+        // Buffer events during resync to replay after snapshot loads
+        if (msg.type === 'NewRequest' || msg.type === 'RequestUpdated'
+            || msg.type === 'SessionUpdated' || msg.type === 'CostUpdated') {
+            state.pendingEvents.push(msg);
+        }
+        return;
+    }
     console.debug('[ws] msg type=' + msg.type);
     switch (msg.type) {
         case 'NewRequest':
         case 'RequestUpdated':
-            upsertRequestRow(msg.payload);
-            addToTimeline(msg.payload);
+            applyTaskEvent(msg.payload);
+            renderTimeline();
             if (msg.payload.id === state.selectedRequestId) showRequestDetail(msg.payload);
             updateRequestCount();
-            if (msg.payload.session_id) {
-                const sid = msg.payload.session_id;
-                fetchSessionMeta(sid);
+            break;
+        case 'SessionUpdated':
+            if (msg.payload && msg.payload.id) {
+                const s = msg.payload;
+                state.sessionMeta[s.id] = { ...(state.sessionMeta[s.id] || {}), ...s };
+                state.sessionCache[s.id] = s.label || shortSid(s.id);
+                if (!state.convSessions.has(s.id)) {
+                    state.convSessions.add(s.id);
+                    updateConvFilter();
+                }
+                renderPage();
+            }
+            break;
+        case 'CostUpdated':
+            if (typeof window._applyCostStats === 'function') {
+                window._applyCostStats(msg.payload);
             }
             break;
         case 'Cleared':
+            state.requestRows.clear();
+            state.detailCache.clear();
+            state.convSessions.clear();
+            state.selectedRequestId = null;
             clearAllTables();
             updateRequestCount();
             break;
         case 'Resync':
-            // The server dropped some messages (broadcast buffer overflow).
-            // Re-fetch requests via REST so our view doesn't silently miss events.
-            console.warn('[ws] Resync received — refreshing request list from REST');
-            fetch('/api/requests?limit=2000')
-                .then(r => r.json())
-                .then(requests => {
-                    state.requestRows.clear();
-                    requests.forEach(req => state.requestRows.set(req.id, req));
-                    renderPage(); updateRequestCount(); updateFilterOptions();
-                })
-                .catch(() => {});
+            console.warn('[ws] Resync received — running full resync');
+            resyncState('lagged');
             break;
     }
 }
 
-// ── Session metadata fetch ──
+// ── Task event reducer ──
 
-export function fetchSessionMeta(sid) {
-    if (state.pendingSessionFetches.has(sid)) {
-        // Do not lose a newer task event while an older metadata request is in flight.
-        state.queuedSessionFetches.add(sid);
+function applyTaskEvent(payload) {
+    const previous = state.requestRows.get(payload.id) || {};
+    // Never downgrade a terminal status to Recording
+    const prevStatus = previous.status;
+    const nextStatus = payload.status;
+    if (prevStatus && prevStatus !== 'recording' && nextStatus === 'recording') {
         return;
     }
-    state.pendingSessionFetches.add(sid);
-    fetch(`/api/session/${encodeURIComponent(sid)}`)
-        .then(r => r.ok ? r.json() : null)
-        .then(data => {
-            if (data && data.session) {
-                const s = data.session;
-                state.sessionMeta[s.id] = s;
-                state.sessionCache[s.id] = s.label || shortSid(s.id);
-                // Sync all tasks from this session into requestRows
-                if (Array.isArray(data.requests)) {
-                    data.requests.forEach(req => {
-                        const existing = state.requestRows.get(req.id);
-                        // REST list rows are intentionally lightweight. Merge them with
-                        // the richer event payload instead of choosing one source and
-                        // dropping fields from the other.
-                        state.requestRows.set(req.id, { ...(existing || {}), ...req });
-                    });
-                }
-                renderPage();
-                updateRequestCount();
-            }
-        })
-        .catch(() => {})
-        .finally(() => {
-            state.pendingSessionFetches.delete(sid);
-            if (state.queuedSessionFetches.delete(sid)) fetchSessionMeta(sid);
-        });
+    // Merge: WS fields overlay, but null body fields don't overwrite cached details
+    const next = { ...previous, ...payload };
+    state.requestRows.set(payload.id, next);
 }
+
+// ── Resync state ──
+
+async function resyncState(reason) {
+    if (state.syncing) {
+        state._resyncQueued = true;
+        return;
+    }
+    state.syncing = true;
+    state.pendingEvents = [];
+    console.debug('[ws] resync start — reason:', reason);
+
+    try {
+        const [sessions, requests] = await Promise.all([
+            fetch('/api/sessions').then(r => r.json()).catch(() => []),
+            fetch('/api/requests?limit=2000').then(r => r.json()).catch(() => []),
+        ]);
+
+        // Build new state from snapshots
+        const newRows = new Map();
+        requests.forEach(req => { newRows.set(req.id, req); });
+        const newMeta = {};
+        const newCache = {};
+        sessions.forEach(s => {
+            newMeta[s.id] = s;
+            newCache[s.id] = s.label || shortSid(s.id);
+        });
+
+        // Replay buffered events
+        for (const evt of state.pendingEvents) {
+            if (evt.type === 'SessionUpdated' && evt.payload && evt.payload.id) {
+                const s = evt.payload;
+                newMeta[s.id] = { ...(newMeta[s.id] || {}), ...s };
+                newCache[s.id] = s.label || shortSid(s.id);
+            }
+            if ((evt.type === 'NewRequest' || evt.type === 'RequestUpdated') && evt.payload) {
+                const prev = newRows.get(evt.payload.id) || {};
+                const prevStatus = prev.status;
+                const nextStatus = evt.payload.status;
+                if (!(prevStatus && prevStatus !== 'recording' && nextStatus === 'recording')) {
+                    newRows.set(evt.payload.id, { ...prev, ...evt.payload });
+                }
+            }
+        }
+
+        // Atomic replacement
+        state.requestRows = newRows;
+        state.sessionMeta = newMeta;
+        state.sessionCache = newCache;
+        state.detailCache.clear();
+        state.pendingEvents = [];
+
+        renderPage();
+        updateRequestCount();
+        updateFilterOptions();
+        renderTimeline();
+        if (typeof window._applyCostStats !== 'function' || reason !== 'init') {
+            refreshInspectorCostStatsNow();
+        }
+    } catch (e) {
+        console.error('[ws] resync failed:', e);
+    } finally {
+        state.syncing = false;
+        if (state._resyncQueued) {
+            state._resyncQueued = false;
+            resyncState('queued');
+        }
+    }
+}
+
+// ── Navigate to request ──
+
+export async function navigateToRequest(id) {
+    const req = state.requestRows.get(id);
+    if (!req) {
+        console.warn('[nav] request not found:', id);
+        return;
+    }
+    // Activate Inspector tab
+    document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+    const inspectorLink = document.querySelector('nav a[data-view="inspector"]');
+    if (inspectorLink) inspectorLink.classList.add('active');
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.getElementById('view-inspector').classList.add('active');
+    // Show summary panel
+    const panel = document.getElementById('summary-panel');
+    panel.classList.remove('hidden');
+    document.getElementById('view-inspector').classList.add('summary-open');
+
+    if (req.session_id) {
+        state.expandedSessions.add(req.session_id);
+    }
+    // Paginate to the correct page
+    const groups = getSessionGroups();
+    const groupIdx = groups.findIndex(g => g.session_id === (req.session_id || '__no_session__'));
+    if (groupIdx >= 0) {
+        state.currentPage = Math.floor(groupIdx / state.pageSize) + 1;
+    }
+    renderPage();
+    await showRequestDetail(req);
+    requestAnimationFrame(() => {
+        const row = document.getElementById(`req-${id}`);
+        if (row) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            row.classList.add('highlight-flash');
+            setTimeout(() => row.classList.remove('highlight-flash'), 1500);
+        }
+    });
+}
+
+// Expose for conversation clicks
+window._navigateToRequest = navigateToRequest;
 
 function shortSid(sid) {
     if (!sid) return '—';
@@ -269,41 +378,7 @@ Object.assign(window, {
         .then(r => r.json())
         .then(data => applyUpstreamState(data.active_upstream, data.active_proxy_upstream, data.upstreams, data.providers, data.active_effort, data.model_pricing, data.http_proxy));
 
-    // Pre-fill session cache and metadata in one call
-    fetch('/api/sessions')
-        .then(r => r.json())
-        .then(sessions => {
-            sessions.forEach(s => {
-                state.sessionMeta[s.id] = s;
-                state.sessionCache[s.id] = s.label || shortSid(s.id);
-            });
-            // Session and task snapshots load concurrently. Render again when
-            // metadata arrives so labels, archived rows and aggregate totals
-            // do not depend on which request happened to finish first.
-            renderPage();
-        })
-        .catch(() => {});
-
-    fetch('/api/requests?limit=2000')
-        .then(r => r.json())
-        .then(requests => {
-            if (requests.length > 0) {
-                requests.forEach(req => {
-                    const existing = state.requestRows.get(req.id);
-                    state.requestRows.set(req.id, { ...(existing || {}), ...req });
-                });
-                // All sessions start collapsed — user expands on demand
-                state.currentPage = 1;
-                renderPage(); updateRequestCount();
-                updateFilterOptions();
-            } else {
-                // Ensure pagination reads correct even with no data
-                updatePagination(0, 1);
-            }
-            // Refresh Inspector cost stats after initial data load
-            refreshInspectorCostStatsNow();
-        })
-        .catch(err => console.error('Failed to load requests:', err));
+    // Sessions and requests are loaded by resyncState() in WS onopen
 
     fetch('/api/capture/status')
         .then(r => r.json())

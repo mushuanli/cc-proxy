@@ -228,6 +228,8 @@ pub struct TaskListItem {
     pub http_status_code: Option<u16>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
     pub cost_microusd: i64,
     pub priced: bool,
     pub duration_ms: Option<i64>,
@@ -289,4 +291,33 @@ pub struct ArchiveInfo {
     pub file_path: String,
     pub archived_at: Option<i64>,
     pub task_count: u64,
+}
+
+// ── Two-phase task lifecycle types ──
+
+/// Fields that may change when a task transitions from Recording to a terminal status.
+#[derive(Clone, Debug)]
+pub struct TaskFinalization {
+    pub status: TaskStatus,
+    pub first_byte_at: Option<i64>,
+    pub ended_at: i64,
+    pub response_headers: Option<serde_json::Value>,
+    pub response_body: Option<NormalizedResponse>,
+    pub http_status_code: Option<u16>,
+    pub usage: TaskUsage,
+    pub timing: TaskTiming,
+    pub error: Option<TaskError>,
+    pub metadata_patch: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskStartResult {
+    pub task: Task,
+    pub session: Session,
+}
+
+#[derive(Clone, Debug)]
+pub enum TaskFinalizeResult {
+    Applied { task: Task, session: Session },
+    AlreadyFinalized { task: Task },
 }

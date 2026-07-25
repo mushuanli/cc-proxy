@@ -63,6 +63,15 @@ export const state = {
     // Inspector
     requestRows: new Map(),
 
+    // Detail cache & dedup
+    detailCache: new Map(),      // key: `${id}:${status}`
+    detailFetches: new Map(),    // key: `${id}:${status}`, value: Promise
+
+    // Resync state
+    pendingEvents: [],
+    syncing: false,
+    _resyncQueued: false,
+
     // Fullscreen
     fullscreenReqId: null,
 

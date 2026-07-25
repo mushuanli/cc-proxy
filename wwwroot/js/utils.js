@@ -81,9 +81,23 @@ export function formatAxisDate(dateStr, totalDays) {
 }
 
 export function formatTokens(n) {
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return Math.round(n / 1e3) + 'K';
+    if (n == null) return '0';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 10e3) return (n / 1e3).toFixed(1) + 'K';
+    if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
     return String(n);
+}
+
+/// Cache hit rate: fraction of all input tokens served from cache.
+/// Returns a string like "42%" or "—" if no cache activity.
+export function cacheHitRate(cacheRead, cacheCreate, input) {
+    const read = cacheRead || 0;
+    const create = cacheCreate || 0;
+    const inp = input || 0;
+    const total = read + create + inp;
+    if (total === 0) return '—';
+    const pct = Math.round((read / total) * 100);
+    return pct + '%';
 }
 
 // ── JSON Tree Viewer ──
