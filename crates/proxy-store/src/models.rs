@@ -158,6 +158,10 @@ pub struct NewTask {
     /// Number of messages in the request body (for display in list views).
     pub messages_count: u32,
 
+    /// Pre-computed prompt text extracted from request body.
+    /// Set before `request_body` is cleared when capture is off.
+    pub prompt_text: Option<String>,
+
     /// Pre-computed summary JSON. Written directly to tasks.summary_json.
     pub summary_json: Option<String>,
 }

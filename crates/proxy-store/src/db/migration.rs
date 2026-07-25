@@ -17,32 +17,39 @@ pub fn migrate(conn: &Connection) -> StoreResult<()> {
 
 /// Migration v6: separate the list prompt from the full task summary.
 fn migrate_v6_prompt_text(conn: &Connection) -> StoreResult<()> {
-    if conn
+    let column_exists = conn
         .prepare("SELECT prompt_text FROM tasks LIMIT 0")
-        .is_ok()
-    {
-        return Ok(());
-    }
+        .is_ok();
 
     let tx = conn.unchecked_transaction()?;
-    tx.execute_batch("ALTER TABLE tasks ADD COLUMN prompt_text TEXT;")?;
+    if !column_exists {
+        tx.execute_batch("ALTER TABLE tasks ADD COLUMN prompt_text TEXT;")?;
+        // One-time: remove legacy non-v1 summaries
+        let mut stmt = tx.prepare(
+            "SELECT id, summary_json FROM tasks WHERE summary_json IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let records = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (id, summary_json) in records {
+            remove_legacy_summary(&tx, &id, summary_json.as_deref())?;
+        }
+    }
+
+    // Backfill NULL prompt_text from request_body (idempotent on re-runs)
     let mut stmt = tx.prepare(
-        "SELECT id, request_body, summary_json FROM tasks
-         WHERE request_body IS NOT NULL OR summary_json IS NOT NULL",
+        "SELECT id, request_body FROM tasks
+         WHERE prompt_text IS NULL AND request_body IS NOT NULL",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        ))
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
     })?;
     let records = rows.collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
-
-    for (id, request_body, summary_json) in records {
-        backfill_prompt(&tx, &id, request_body.as_deref())?;
-        remove_legacy_summary(&tx, &id, summary_json.as_deref())?;
+    for (id, body) in records {
+        backfill_prompt(&tx, &id, body.as_deref())?;
     }
     tx.commit()?;
     Ok(())

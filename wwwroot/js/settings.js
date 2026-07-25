@@ -13,7 +13,7 @@ export function applyUpstreamState(active, proxyActive, upstreams, providers, ef
     state.globalProxy = httpProxy || null;
     if (effort !== undefined) { state.activeEffort = effort; }
     populateUpstreamSelect(upstreams, active);
-    populateProxyUpstreamSelect(upstreams, state.activeProxyUpstream);
+
     populateEffortSelect(state.activeEffort);
     renderModelMatrix();
     renderUpstreamTable();
@@ -44,30 +44,6 @@ export function populateUpstreamSelect(upstreams, active) {
         opt.value = u.name;
         opt.textContent = u.name + (u.active ? ' ✓' : '');
         if (u.name === active || u.active) opt.selected = true;
-        select.appendChild(opt);
-    });
-}
-
-export function populateProxyUpstreamSelect(upstreams, active) {
-    const select = document.getElementById('proxy-upstream-select');
-    if (!select) return;
-    select.innerHTML = '';
-    const forbidOpt = document.createElement('option');
-    forbidOpt.value = '__forbid__';
-    forbidOpt.textContent = 'Forbid';
-    if (active === '__forbid__') forbidOpt.selected = true;
-    select.appendChild(forbidOpt);
-    // Auto-detect option (top)
-    const autoOpt = document.createElement('option');
-    autoOpt.value = '__auto__';
-    autoOpt.textContent = 'Auto (auto-detect)';
-    if (active === '__auto__') autoOpt.selected = true;
-    select.appendChild(autoOpt);
-    (upstreams || []).forEach(u => {
-        const opt = document.createElement('option');
-        opt.value = u.name;
-        opt.textContent = u.name + (u.proxy_active ? ' ✓' : '');
-        if (u.name === active || u.proxy_active) opt.selected = true;
         select.appendChild(opt);
     });
 }
@@ -859,12 +835,6 @@ document.getElementById('upstream-select').addEventListener('change', async () =
     const name = document.getElementById('upstream-select').value;
     if (!name) return;
     await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate`, { method: 'POST' });
-});
-
-document.getElementById('proxy-upstream-select').addEventListener('change', async () => {
-    const name = document.getElementById('proxy-upstream-select').value;
-    if (!name) return;
-    await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate-proxy`, { method: 'POST' });
 });
 
 // Effort select in Inspector toolbar — saves to active upstream's effort field

@@ -575,6 +575,7 @@ async fn proxy_request(
                     "priced": priced,
                 }),
                 messages_count: msg_count,
+                prompt_text: None,
                 summary_json: None,
             };
 
@@ -737,6 +738,7 @@ async fn proxy_request(
                     "sse_events": meta.sse_events.clone(),
                 }),
                 messages_count: msg_count_val,
+                prompt_text: None,
                 summary_json: None,
             };
 
@@ -921,6 +923,7 @@ async fn proxy_request(
             }),
         metadata: inspect_metadata,
         messages_count: msg_count,
+        prompt_text: None,
         summary_json: None,
     };
 
@@ -1094,9 +1097,21 @@ fn finalize_task(task: &mut NewTask, session_id: &str, capture: &CaptureControl)
             task.error.as_ref().map(|e| e.error_type.as_str()),
             task.error.as_ref().map(|e| e.error_message.as_str()),
         );
+        // Extract prompt_text before request_body is cleared when capture is off
+        if task.prompt_text.is_none() {
+            task.prompt_text = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .as_ref()
+                .and_then(|v| request_prompt(v));
+        }
     }
     if !capture.is_enabled() {
-        task.request_body = None;
+        // Strip request body to only the last user message so the frontend
+        // can reuse the same messages-array rendering logic for both modes.
+        task.request_body = task
+            .request_body
+            .as_deref()
+            .and_then(strip_body_to_last_user_message);
         task.response_body = None;
     }
 }
@@ -1115,6 +1130,36 @@ async fn write_and_publish(
     }
     events.publish(ws_msg);
     result
+}
+
+/// Strip request body to only the last user message, preserving the full JSON
+/// structure (model, system, metadata, etc.). This keeps the same display logic
+/// working for both capture-on and capture-off modes.
+fn strip_body_to_last_user_message(body: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let msg_key = if value.get("messages").and_then(|v| v.as_array()).is_some() {
+        "messages"
+    } else if value.get("input").and_then(|v| v.as_array()).is_some() {
+        "input"
+    } else {
+        return None;
+    };
+    let messages = value.get_mut(msg_key)?.as_array_mut()?;
+
+    // Find the last real user message (skip tool_result-only messages)
+    let last_user_idx = messages.iter().enumerate().rev().find_map(|(i, msg)| {
+        let is_user = msg.get("role").and_then(|v| v.as_str()) == Some("user");
+        if !is_user {
+            return None;
+        }
+        let is_real = proxy_store::summary::analyzer::is_real_user_prompt(msg);
+        if is_real { Some(i) } else { None }
+    })?;
+
+    let last_user = messages[last_user_idx].clone();
+    *messages = vec![last_user];
+
+    Some(serde_json::to_string(&value).unwrap_or_default())
 }
 
 fn client_type(protocol: upstream::ApiProtocol) -> ClientType {

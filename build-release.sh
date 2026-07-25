@@ -4,13 +4,13 @@ set -euo pipefail
 # ============================================================
 # CC Proxy Release Builder
 # Usage:
-#   ./build-release.sh                        # 编译所有架构
-#   ./build-release.sh darwin-arm64           # 仅编译 macOS ARM
-#   ./build-release.sh [arch] --skip-build    # 跳过编译，仅打包
+#   ./build-release.sh                        # 自动递增 patch，生成 changelog，编译 + 发布
+#   ./build-release.sh --build-only           # 仅编译
+#   ./build-release.sh --build-only darwin-arm64  # 仅编译指定架构
 #
-#   ./build-release.sh 2.0.0                  # 完整发布流程
-#   ./build-release.sh 2.0.0 --notes "xxx"    # 带 release notes
-#   ./build-release.sh 2.0.0 darwin-arm64     # 指定架构 + 发布
+#   ./build-release.sh 2.1.0                  # 指定版本，自动生成 changelog
+#   ./build-release.sh 2.1.0 --notes "xxx"    # 指定版本 + 自定义 notes
+#   ./build-release.sh 2.1.0 darwin-arm64     # 指定架构 + 发布
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -38,6 +38,7 @@ _register "windows-x86_64" "x86_64-pc-windows-gnu"    "zip"
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 OUTPUT_DIR="$SCRIPT_DIR/release"
 SKIP_BUILD=false
+BUILD_ONLY=false
 SELECTED_ARCH=""
 BUILT_COUNT=0
 SKIPPED_COUNT=0
@@ -48,14 +49,17 @@ RELEASE_NOTES=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-build) SKIP_BUILD=true; shift ;;
+        --build-only) BUILD_ONLY=true; shift ;;
         --notes)
             RELEASE_NOTES="$2"
             shift 2
             ;;
         -h|--help)
             echo "Usage:"
-            echo "  Build only:  ./build-release.sh [darwin-arm64|linux-x86_64|windows-x86_64] [--skip-build]"
-            echo "  Full release: ./build-release.sh <version> [arch] [--notes \"changelog\"] [--skip-build]"
+            echo "  Release:     ./build-release.sh               # auto-bump + changelog + build + release"
+            echo "  Release:     ./build-release.sh <version>     # specified version"
+            echo "  Build only:  ./build-release.sh --build-only [arch]"
+            echo "  Custom:      ./build-release.sh <version> --notes \"changelog\" [arch]"
             exit 0
             ;;
         *)
@@ -75,10 +79,50 @@ done
 
 mkdir -p "$OUTPUT_DIR"
 
-if [[ -n "$RELEASE_VERSION" ]]; then
-    echo "=== CC Proxy Release Builder (publish mode) ==="
+# --- Auto-bump patch version ---
+auto_bump_version() {
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$VERSION"
+    patch=$((patch + 1))
+    echo "${major}.${minor}.${patch}"
+}
+
+# --- Generate changelog from git history ---
+generate_changelog() {
+    # Find the latest tag, fall back to the first commit if none exists
+    local last_tag
+    last_tag=$(git describe --tags --abbrev=0 2>/dev/null) || last_tag=""
+
+    if [[ -z "$last_tag" ]]; then
+        git log --oneline --no-merges || echo "(no commits)"
+        return
+    fi
+
+    local log
+    log=$(git log "${last_tag}..HEAD" --oneline --no-merges 2>/dev/null) || true
+    if [[ -z "$log" ]]; then
+        echo "(no changes since $last_tag)"
+    else
+        echo "$log"
+    fi
+}
+
+# --- Output ---
+if [[ "$BUILD_ONLY" == "true" ]]; then
+    echo "=== CC Proxy Release Builder v${VERSION} (build only) ==="
 else
-    echo "=== CC Proxy Release Builder v${VERSION} ==="
+    # When no version specified, auto-bump patch
+    if [[ -z "$RELEASE_VERSION" ]]; then
+        RELEASE_VERSION=$(auto_bump_version)
+        echo "[INFO] Auto-bumped version: $VERSION -> $RELEASE_VERSION"
+    fi
+    echo "=== CC Proxy Release Builder $RELEASE_VERSION (publish mode) ==="
+
+    # Auto-generate changelog if not provided
+    if [[ -z "$RELEASE_NOTES" ]]; then
+        RELEASE_NOTES=$(generate_changelog)
+        echo "[INFO] Auto-generated changelog from git history"
+    fi
 fi
 echo ""
 
@@ -103,8 +147,8 @@ check_release_prereqs() {
 
     local branch
     branch=$(git branch --show-current)
-    if [[ "$branch" != "main" ]]; then
-        echo "[WARN] Current branch is '$branch', not 'main'."
+    if [[ "$branch" != "main" && ! "$branch" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+        echo "[WARN] Current branch is '$branch' (unusual for release)."
     fi
 
     if [[ "$errors" -gt 0 ]]; then
@@ -266,9 +310,8 @@ do_release() {
     echo "  1. git push origin \$(git branch --show-current)"
     echo "  2. git push origin $tag"
     echo "  3. gh release create $tag with ${#artifacts[@]} artifacts"
-    if [[ -n "$RELEASE_NOTES" ]]; then
-        echo "     Notes: $RELEASE_NOTES"
-    fi
+    echo "  Notes:"
+    echo "$RELEASE_NOTES"
     echo "============================================"
     read -rp "  Proceed? (y/N): " confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -301,15 +344,8 @@ do_release() {
     echo "[OK] Pushed."
 
     # Create GitHub release
-    local notes_flag=()
-    if [[ -n "$RELEASE_NOTES" ]]; then
-        notes_flag=(--notes "$RELEASE_NOTES")
-    else
-        notes_flag=(--notes "Release $tag")
-    fi
-
     echo "[RELEASE] Creating GitHub release..."
-    gh release create "$tag" "${artifacts[@]}" --title "$tag" "${notes_flag[@]}"
+    gh release create "$tag" "${artifacts[@]}" --title "$tag" --notes "$RELEASE_NOTES"
     echo "[DONE] GitHub release created: $tag"
 }
 
@@ -317,14 +353,16 @@ do_release() {
 # Main
 # ============================================================
 
-if [[ -n "$RELEASE_VERSION" ]]; then
+if [[ "$BUILD_ONLY" == "true" ]]; then
+    build_all || true
+    echo "=== 完成: $BUILT_COUNT 个已构建, $SKIPPED_COUNT 个已跳过. 包在 $OUTPUT_DIR/ ==="
+    ls -lh "$OUTPUT_DIR"/*.{zip,tar.gz} 2>/dev/null || true
+elif [[ -n "$RELEASE_VERSION" ]]; then
     check_release_prereqs
     update_cargo_version "$RELEASE_VERSION"
     build_all
     do_release
 else
-    build_all || true
-
-    echo "=== 完成: $BUILT_COUNT 个已构建, $SKIPPED_COUNT 个已跳过. 包在 $OUTPUT_DIR/ ==="
-    ls -lh "$OUTPUT_DIR"/*.{zip,tar.gz} 2>/dev/null || true
+    echo "[ERROR] No release version determined."
+    exit 1
 fi

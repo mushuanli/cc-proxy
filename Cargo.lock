@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-common"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "chrono",
  "serde",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-relay"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "axum",
  "bytes",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-server"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "proxy-store"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "chrono",
  "proxy-common",

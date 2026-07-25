@@ -33,11 +33,12 @@ pub fn insert_task(
         .transpose()?;
 
     let metadata_json = serde_json::to_string(&task.metadata)?;
-    let prompt_text = task
-        .request_body
-        .as_deref()
-        .and_then(|body| serde_json::from_str(body).ok())
-        .and_then(|body| crate::summary::analyzer::extract_latest_user_prompt(&body));
+    let prompt_text = task.prompt_text.clone().or_else(|| {
+        task.request_body
+            .as_deref()
+            .and_then(|body| serde_json::from_str(body).ok())
+            .and_then(|body| crate::summary::analyzer::extract_latest_user_prompt(&body))
+    });
 
     let rows = conn.execute(
         "INSERT INTO tasks (

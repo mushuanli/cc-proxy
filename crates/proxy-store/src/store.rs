@@ -683,6 +683,7 @@ mod tests {
             error: None,
             metadata: serde_json::json!({}),
             messages_count: 1,
+            prompt_text: None,
             summary_json: None,
         }
     }
