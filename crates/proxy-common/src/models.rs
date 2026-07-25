@@ -282,6 +282,9 @@ pub struct ProxiedRequest {
     // Latest real user prompt for lightweight list and streaming updates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// Latest operation associated with the current user prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_operation: Option<String>,
     /// Whether a configured pricing rule matched this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priced: Option<bool>,

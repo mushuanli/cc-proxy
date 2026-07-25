@@ -593,7 +593,6 @@ pub async fn clear_all(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     Json(json!({"ok": true})).into_response()
 }
 
-
 // ── Hook (session lifecycle signals from proxy-hook-agent) ──
 
 pub async fn hook_event(

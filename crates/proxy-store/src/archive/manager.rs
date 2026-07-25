@@ -111,7 +111,7 @@ impl ArchiveManager {
         conn: &Connection,
         session_id: &SessionId,
     ) -> StoreResult<Vec<crate::models::Task>> {
-        let items = tasks::list_tasks(conn, session_id, None)?;
+        let items = tasks::list_tasks(conn, session_id, None, 10_000, None)?;
         let mut result = Vec::with_capacity(items.len());
         for item in items {
             if let Some(mut task) = tasks::get_task(conn, &item.id)? {

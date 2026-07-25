@@ -1,6 +1,7 @@
 import { state } from './state.js';
 import { t } from './i18n.js';
-import { esc, shortSid, formatTime, truncate } from './utils.js';
+import { esc, shortSid, formatTime } from './utils.js';
+import { buildRequestSummary } from './inspector.js';
 
 // ── Timeline derived from requestRows ──
 
@@ -51,10 +52,7 @@ export function renderTimeline() {
         div.setAttribute('tabindex', '0');
         div.setAttribute('role', 'button');
 
-        const promptText = item.prompt
-            || (item.request_body ? tryParsePrompt(item.request_body) : null)
-            || `${item.method} ${item.path}`;
-        const truncated = truncate(promptText, 80);
+        const summary = buildRequestSummary(item);
         const time = formatTime(item.timestamp);
         const statusCode = item.status_code != null ? `HTTP ${item.status_code}` : '';
         const model = item.model || '—';
@@ -64,7 +62,7 @@ export function renderTimeline() {
         const dur = item.duration_ms != null ? `${item.duration_ms}ms` : '';
 
         div.innerHTML = `
-            <div class="timeline-row1">${esc(truncated)}</div>
+            <div class="timeline-row1">${summary}</div>
             <div class="timeline-row2">
                 <span class="tl-status">${statusLabel(item.status)}</span>
                 <span>${esc(time)}</span>
@@ -75,26 +73,6 @@ export function renderTimeline() {
             </div>`;
         timeline.appendChild(div);
     }
-}
-
-function tryParsePrompt(body) {
-    if (typeof body !== 'string') return null;
-    try {
-        const parsed = JSON.parse(body);
-        if (parsed.messages && Array.isArray(parsed.messages)) {
-            for (let i = parsed.messages.length - 1; i >= 0; i--) {
-                const m = parsed.messages[i];
-                if (m.role === 'user' && m.content) {
-                    if (typeof m.content === 'string') return m.content;
-                    if (Array.isArray(m.content)) {
-                        const textParts = m.content.filter(c => c.type === 'text').map(c => c.text);
-                        if (textParts.length) return textParts.join(' ');
-                    }
-                }
-            }
-        }
-    } catch (_) {}
-    return null;
 }
 
 // ── Session filter ──

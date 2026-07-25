@@ -8,8 +8,8 @@ use crate::db::{self, connection, migration};
 use crate::error::{StoreError, StoreResult};
 use crate::models::{
     ArchiveInfo, ArchiveOptions, ArchiveSearchResult, NewTask, Session, SessionFilter,
-    SessionListItem, Task, TaskFinalization, TaskFinalizeResult, TaskListItem,
-    TaskStartResult, TimeRange,
+    SessionListItem, Task, TaskFinalization, TaskFinalizeResult, TaskListItem, TaskStartResult,
+    TimeRange,
 };
 use crate::summary::analyzer::SessionSummary;
 use rusqlite::Connection;
@@ -261,7 +261,8 @@ impl ProxyStore {
                 )?;
 
                 let sequence_no = db::sessions::allocate_sequence(&conn, &sid)?;
-                let inserted = db::tasks::insert_task(&conn, &task, &task_id, &sid, sequence_no, 0)?;
+                let inserted =
+                    db::tasks::insert_task(&conn, &task, &task_id, &sid, sequence_no, 0)?;
 
                 if !inserted {
                     return Err(StoreError::InvalidArgument(format!(
@@ -369,7 +370,10 @@ impl ProxyStore {
                     &tid,
                     finalization.timing.stop_reason.as_deref(),
                     finalization.error.as_ref().map(|e| e.error_type.as_str()),
-                    finalization.error.as_ref().map(|e| e.error_message.as_str()),
+                    finalization
+                        .error
+                        .as_ref()
+                        .map(|e| e.error_message.as_str()),
                 )?;
 
                 db::usage::record_task_finalized_usage(
@@ -387,10 +391,16 @@ impl ProxyStore {
                     existing.started_at,
                 )?;
 
-                let task = db::tasks::get_task(&conn, &tid)?
+                let mut task = db::tasks::get_task(&conn, &tid)?
                     .ok_or_else(|| StoreError::NotFound("task not found after finalize".into()))?;
-                let session = db::sessions::get_session(&conn, &existing.session_id)?
-                    .ok_or_else(|| StoreError::NotFound("session not found after finalize".into()))?;
+                if let Some(summary_json) = crate::refresh_task_summary(&task) {
+                    db::tasks::update_summary(&conn, &tid, &summary_json)?;
+                    task.summary_json = Some(summary_json);
+                }
+                let session =
+                    db::sessions::get_session(&conn, &existing.session_id)?.ok_or_else(|| {
+                        StoreError::NotFound("session not found after finalize".into())
+                    })?;
 
                 Ok(TaskFinalizeResult::Applied { task, session })
             })();
@@ -532,7 +542,23 @@ impl ProxyStore {
         let tr = time_range.clone();
         Self::blocking(move || {
             let conn = this.inner.conn.lock().unwrap();
-            db::tasks::list_tasks(&conn, &sid, tr.as_ref())
+            db::tasks::list_tasks(&conn, &sid, tr.as_ref(), 10_000, None)
+        })
+        .await
+    }
+
+    /// List one keyset-paginated task page for a session.
+    pub async fn task_page(
+        &self,
+        session_id: &SessionId,
+        limit: u32,
+        before_sequence: Option<u64>,
+    ) -> StoreResult<Vec<TaskListItem>> {
+        let this = self.clone();
+        let sid = session_id.clone();
+        Self::blocking(move || {
+            let conn = this.inner.conn.lock().unwrap();
+            db::tasks::list_tasks(&conn, &sid, None, limit, before_sequence)
         })
         .await
     }
@@ -762,8 +788,9 @@ impl ProxyStore {
             let task = db::tasks::get_task(&conn, &tid)?
                 .ok_or_else(|| StoreError::NotFound(format!("task '{}' not found", tid)))?;
             if let Some(ref json) = task.summary_json {
-                return serde_json::from_str::<SessionSummary>(json)
-                    .map_err(|e| StoreError::InvalidArgument(format!("invalid summary_json: {}", e)));
+                return serde_json::from_str::<SessionSummary>(json).map_err(|e| {
+                    StoreError::InvalidArgument(format!("invalid summary_json: {}", e))
+                });
             }
             crate::summary::analyzer::analyze_task(&task)
                 .ok_or_else(|| StoreError::NotFound(format!("could not analyze task '{}'", tid)))
@@ -841,13 +868,14 @@ impl ProxyStore {
                             let filter = crate::models::SessionFilter::default();
                             let sessions = db::sessions::list_sessions(&conn, &filter)?;
                             for s in &sessions {
-                                let tasks = db::tasks::list_tasks(&conn, &s.id, None)?;
+                                let tasks =
+                                    db::tasks::list_tasks(&conn, &s.id, None, 10_000, None)?;
                                 for t in &tasks {
-                                    if t.summary_json.is_none() {
-                                        let full_task = match db::tasks::get_task(&conn, &t.id)? {
-                                            Some(ft) => ft,
-                                            None => continue,
-                                        };
+                                    let full_task = match db::tasks::get_task(&conn, &t.id)? {
+                                        Some(ft) => ft,
+                                        None => continue,
+                                    };
+                                    if full_task.summary_json.is_none() {
                                         if let Some(summary) =
                                             crate::summary::analyzer::analyze_task(&full_task)
                                         {

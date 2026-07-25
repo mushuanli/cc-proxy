@@ -16,4 +16,7 @@ pub use models::{
     TaskStartResult, TaskTiming,
 };
 pub use store::{ProxyStore, ProxyStoreConfig};
-pub use summary::analyzer::{extract_latest_user_prompt, summarize_task, SessionSummary};
+pub use summary::analyzer::{
+    extract_latest_user_prompt, persisted_operation_preview, refresh_task_summary, summarize_task,
+    summary_current_operation, SessionSummary,
+};

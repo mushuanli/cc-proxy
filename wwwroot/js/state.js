@@ -62,10 +62,15 @@ export const state = {
 
     // Inspector
     requestRows: new Map(),
+    loadedSessions: new Set(),
+    loadingSessions: new Set(),
+    sessionTaskPages: new Map(),
 
     // Detail cache & dedup
     detailCache: new Map(),      // key: `${id}:${status}`
     detailFetches: new Map(),    // key: `${id}:${status}`, value: Promise
+    requestSummaryCache: new Map(),
+    requestSummaryFetches: new Map(),
 
     // Resync state
     pendingEvents: [],
@@ -78,3 +83,19 @@ export const state = {
     // Timeline
     convSessions: new Set(),
 };
+
+export function getLru(cache, key) {
+    if (!cache.has(key)) return undefined;
+    const value = cache.get(key);
+    cache.delete(key);
+    cache.set(key, value);
+    return value;
+}
+
+export function setLru(cache, key, value, limit = 20) {
+    cache.delete(key);
+    cache.set(key, value);
+    while (cache.size > limit) {
+        cache.delete(cache.keys().next().value);
+    }
+}

@@ -1,4 +1,4 @@
-import { state } from './state.js';
+import { state, getLru, setLru } from './state.js';
 import { t } from './i18n.js';
 import { esc, shortSid, formatTime, formatHeaders, tryParseJson, jsonTreeHTML, truncate, formatTokens, cacheHitRate } from './utils.js';
 
@@ -10,11 +10,15 @@ function formatDate(ts) {
 
 // Forward reference — set by main.js after all modules are loaded
 let _openSummaryPanel = null;
+let _openRequestSummaryPanel = null;
 let _renderSummaryFromCache = null;
+let _prepareRequestSummaryPanel = null;
 
-export function setSessionPanelFns(openSummary, _openReqSummary, renderSummaryCache) {
+export function setSessionPanelFns(openSummary, openRequestSummary, renderSummaryCache, prepareRequestSummary) {
     _openSummaryPanel = openSummary;
+    _openRequestSummaryPanel = openRequestSummary;
     _renderSummaryFromCache = renderSummaryCache;
+    _prepareRequestSummaryPanel = prepareRequestSummary;
 }
 
 // ── Price lookup ──
@@ -139,6 +143,7 @@ export function getSessionGroups() {
                 firstTime: req.timestamp, lastTime: req.timestamp,
                 models: new Set(),
                 archived: false,
+                tasksLoaded: state.loadedSessions.has(sid),
                 request_count: 0,
             });
         }
@@ -166,7 +171,8 @@ export function getSessionGroups() {
                 firstTime: meta.started_at,
                 lastTime: meta.ended_at || meta.started_at,
                 models: [],
-                archived: true,
+                archived: false,
+                tasksLoaded: state.loadedSessions.has(sid),
                 request_count: meta.request_count || 0,
             });
         } else {
@@ -183,14 +189,16 @@ export function getSessionGroups() {
     result.forEach(g => {
         if (!g.archived) {
             g.requests.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-            g.totalIn = g.requests.reduce((s, r) => s + (r.input_tokens || 0), 0);
-            g.totalOut = g.requests.reduce((s, r) => s + (r.output_tokens || 0), 0);
-            g.totalCacheCreate = g.requests.reduce((s, r) => s + (r.cache_creation_input_tokens || 0), 0);
-            g.totalCacheRead = g.requests.reduce((s, r) => s + (r.cache_read_input_tokens || 0), 0);
-            g.totalCost = g.requests.reduce((s, r) => s + formatCostNum(r), 0);
+            const meta = state.sessionMeta[g.session_id];
+            g.totalIn = meta?.total_input_tokens ?? g.requests.reduce((s, r) => s + (r.input_tokens || 0), 0);
+            g.totalOut = meta?.total_output_tokens ?? g.requests.reduce((s, r) => s + (r.output_tokens || 0), 0);
+            g.totalCacheCreate = meta?.total_cache_creation_tokens ?? g.requests.reduce((s, r) => s + (r.cache_creation_input_tokens || 0), 0);
+            g.totalCacheRead = meta?.total_cache_read_tokens ?? g.requests.reduce((s, r) => s + (r.cache_read_input_tokens || 0), 0);
+            g.totalCost = meta?.total_cost ?? g.requests.reduce((s, r) => s + formatCostNum(r), 0);
             g.unpricedCount = g.requests.filter(r => r.priced === false).length;
             g.models = Array.from(g.models);
-            g.request_count = Math.max(g.requests.length, g._metaRequestCount || 0);
+            g.request_count = Math.max(g.requests.length, meta?.request_count || g._metaRequestCount || 0);
+            g.tasksLoaded = state.loadedSessions.has(g.session_id);
         }
     });
     result.sort((a, b) => new Date(b.lastTime) - new Date(a.lastTime));
@@ -223,7 +231,7 @@ export function buildArchivedSessionHTML(group) {
 }
 
 export function buildSessionHeaderHTML(group, isExpanded) {
-    const reqCount = group.requests.length;
+    const reqCount = group.request_count || group.requests.length;
     const dateStr = group.firstTime ? formatDate(group.firstTime) : '';
     const timeRange = formatTime(group.lastTime);
     const tokens = group.totalIn > 0 || group.totalOut > 0 ? `${formatTokens(group.totalIn)}/${formatTokens(group.totalOut)}` : '—';
@@ -256,11 +264,40 @@ export function buildSessionHeaderHTML(group, isExpanded) {
 
 // ── Session toggle & select ──
 
+async function loadSessionTasks(sessionId, append = false) {
+    if (state.loadingSessions.has(sessionId)) return;
+    const page = state.sessionTaskPages.get(sessionId);
+    if (!append && state.loadedSessions.has(sessionId)) return;
+    state.loadingSessions.add(sessionId);
+    renderPage();
+    try {
+        const before = append && page?.nextBefore ? `&before_sequence=${page.nextBefore}` : '';
+        const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/tasks?limit=50${before}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        for (const request of data.items || []) state.requestRows.set(request.id, request);
+        state.loadedSessions.add(sessionId);
+        state.sessionTaskPages.set(sessionId, {
+            hasMore: Boolean(data.has_more),
+            nextBefore: data.next_before_sequence,
+        });
+    } catch (error) {
+        console.error('[tasks] load failed:', sessionId, error);
+    } finally {
+        state.loadingSessions.delete(sessionId);
+        renderPage();
+        updateRequestCount();
+        updateFilterOptions();
+        if (typeof window._renderTimeline === 'function') window._renderTimeline();
+    }
+}
+
 export function toggleSession(sessionId) {
     if (state.expandedSessions.has(sessionId)) {
         state.expandedSessions.delete(sessionId);
     } else {
         state.expandedSessions.add(sessionId);
+        void loadSessionTasks(sessionId);
     }
     renderPage();
 }
@@ -268,13 +305,17 @@ export function toggleSession(sessionId) {
 export function selectSession(sid) {
     state.currentSelectedSession = sid;
     state.expandedSessions.add(sid);
+    void loadSessionTasks(sid);
     renderPage();
     if (_openSummaryPanel) _openSummaryPanel(sid);
 }
 
 export function expandAllSessions() {
     const groups = getSessionGroups();
-    groups.forEach(g => state.expandedSessions.add(g.session_id));
+    groups.forEach(g => {
+        state.expandedSessions.add(g.session_id);
+        void loadSessionTasks(g.session_id);
+    });
     renderPage();
 }
 
@@ -382,7 +423,28 @@ function renderPromptSummary(prompt) {
         + `💬 ${esc(truncate(prompt, 40))}</span>`;
 }
 
-function buildRequestSummary(req) {
+function renderCurrentOperation(operation) {
+    if (!operation) return '';
+    return `<span class="req-summary-resp" title="${esc(operation)}">`
+        + `→ ${esc(truncate(operation, 60))}</span>`;
+}
+
+function responseSnapshot(req) {
+    // Parse response_body — it may arrive as a JSON string or a parsed object.
+    let respBody = null;
+    if (typeof req.response_body === 'string') {
+        respBody = tryParseJson(req.response_body);
+    } else if (req.response_body && typeof req.response_body === 'object') {
+        respBody = req.response_body;
+    }
+    // NormalizedResponse format: { text: string[], tool_calls: [...] }
+    const texts = Array.isArray(respBody?.text) ? respBody.text : [];
+    const toolCalls = Array.isArray(respBody?.tool_calls) ? respBody.tool_calls : [];
+    const text = req.content_text || texts.join(' ');
+    return { text, toolCalls };
+}
+
+export function buildRequestSummary(req) {
     const bodyJson = req.request_body ? tryParseJson(req.request_body) : null;
     const msgCount = req.messages_count
         ?? (bodyJson && Array.isArray(bodyJson.messages) ? bodyJson.messages.length : null);
@@ -391,9 +453,21 @@ function buildRequestSummary(req) {
         ? `<span class="req-msg-count">[${msgCount}]</span> `
         : '';
 
+    // ── Current operation / response preview ──
+    let respPart = renderCurrentOperation(req.current_operation);
+    const resp = responseSnapshot(req);
+    if (!respPart && resp.toolCalls.length > 0) {
+        const names = resp.toolCalls.slice(0, 3).map(tc => esc(tc.name || 'tool')).join(' ');
+        const more = resp.toolCalls.length > 3 ? ` +${resp.toolCalls.length - 3}` : '';
+        respPart = `<span class="req-summary-resp">🔧 ${names}${more}</span> `;
+    } else if (!respPart && resp.text && resp.text.trim()) {
+        const clean = resp.text.replace(/\s+/g, ' ').trim();
+        respPart = `<span class="req-summary-resp">→ ${esc(truncate(clean, 60))}</span> `;
+    }
+
     // ── Fast path: prompt is loaded directly without the full request body ──
     if (req.prompt && !bodyJson) {
-        return `${countChip}${renderPromptSummary(req.prompt)}`;
+        return `${countChip}${renderPromptSummary(req.prompt)} ${respPart}`;
     }
 
     // ── Full path: body available (after row click) ──
@@ -407,7 +481,7 @@ function buildRequestSummary(req) {
                 : Array.isArray(last.content) ? (last.content.find(b => b.type === 'text')?.text || '') : '';
             if (text.trim()) {
                 const clean = text.replace(/\s+/g, ' ').trim();
-                return `${countChip}<span class="req-summary-text">${esc(truncate(clean, 80))}</span>`;
+                return `${countChip}<span class="req-summary-text">${esc(truncate(clean, 80))}</span> ${respPart}`;
             }
         }
 
@@ -448,10 +522,11 @@ function buildRequestSummary(req) {
         }
     }
 
-    // Fallback: count + tokens
+    // Fallback: response + count + tokens
+    if (respPart) return `${countChip}${respPart}`;
     const inTok = req.input_tokens;
     const tokStr = (inTok != null && inTok > 0)
-        ? `<span class="req-summary-tokens">${inTok}t</span>`
+        ? `<span class="req-summary-tokens">${formatTokens(inTok)}</span>`
         : '';
     if (countChip || tokStr) return `${countChip}${tokStr}`;
 
@@ -506,6 +581,26 @@ export function buildRequestRowHTML(req, hideSession) {
 
 // ── Render page ──
 
+function appendSessionLoadingRow(tbody, sessionId) {
+    const loading = state.loadingSessions.has(sessionId);
+    const loaded = state.loadedSessions.has(sessionId);
+    if (!loading && !loaded) return;
+    const row = document.createElement('tr');
+    row.className = 'session-child';
+    row.innerHTML = `<td></td><td class="muted">${loading ? '加载中…' : '暂无 task'}</td>`;
+    tbody.appendChild(row);
+}
+
+function appendSessionPageRow(tbody, sessionId) {
+    const page = state.sessionTaskPages.get(sessionId);
+    if (!page?.hasMore) return;
+    const row = document.createElement('tr');
+    row.className = 'session-child';
+    row.innerHTML = '<td></td><td><button class="btn btn-sm">加载更多</button></td>';
+    row.querySelector('button').addEventListener('click', () => loadSessionTasks(sessionId, true));
+    tbody.appendChild(row);
+}
+
 export function renderPage() {
     const groups = getSessionGroups();
     const totalPages = Math.max(1, Math.ceil(groups.length / state.pageSize));
@@ -530,16 +625,21 @@ export function renderPage() {
             });
 
         } else if (group.requests.length === 0) {
-            // Case 0: archived session — show compact summary row, no expand
-            const archivedTr = document.createElement('tr');
-            archivedTr.className = 'session-header session-archived' + (state.currentSelectedSession === group.session_id ? ' session-selected' : '');
-            archivedTr.dataset.session = group.session_id;
-            archivedTr.innerHTML = buildArchivedSessionHTML(group);
-            archivedTr.addEventListener('click', (e) => {
+            const isExpanded = state.expandedSessions.has(group.session_id);
+            const headerTr = document.createElement('tr');
+            headerTr.className = 'session-header' + (state.currentSelectedSession === group.session_id ? ' session-selected' : '');
+            headerTr.dataset.session = group.session_id;
+            headerTr.innerHTML = buildSessionHeaderHTML(group, isExpanded);
+            headerTr.addEventListener('click', (e) => {
                 if (e.target.closest('.session-chk')) return;
+                if (e.target.closest('.session-expand-icon')) {
+                    toggleSession(group.session_id);
+                    return;
+                }
                 selectSession(group.session_id);
             });
-            tbody.appendChild(archivedTr);
+            tbody.appendChild(headerTr);
+            if (isExpanded) appendSessionLoadingRow(tbody, group.session_id);
 
         } else if (group.requests.length === 1) {
             // Single request — render as foldable session header + child row
@@ -573,6 +673,7 @@ export function renderPage() {
                 });
                 tbody.appendChild(tr);
             }
+            appendSessionPageRow(tbody, group.session_id);
 
         } else {
             // Case 2: multiple requests — expandable session group
@@ -605,6 +706,7 @@ export function renderPage() {
                 });
                 tbody.appendChild(tr);
             });
+                appendSessionPageRow(tbody, group.session_id);
             }
         }
 
@@ -661,6 +763,60 @@ function cacheKey(req) {
     return `${req.id}:${req.status || 'unknown'}`;
 }
 
+function updateRequestPreview(req) {
+    const existing = state.requestRows.get(req.id);
+    if (!existing) return;
+    state.requestRows.set(req.id, {
+        ...existing,
+        prompt: req.prompt ?? existing.prompt,
+        current_operation: req.current_operation ?? existing.current_operation,
+        messages_count: req.messages_count ?? existing.messages_count,
+    });
+}
+
+function selectedRequestDetail() {
+    const req = state.requestRows.get(state.selectedRequestId);
+    if (!req) return null;
+    return getLru(state.detailCache, cacheKey(req)) || req;
+}
+
+function loadRequestDetail(req) {
+    const key = cacheKey(req);
+    if (req.request_body != null || req.response_body != null) {
+        setLru(state.detailCache, key, req);
+    }
+    const cached = getLru(state.detailCache, key);
+    if (cached) return Promise.resolve(cached);
+
+    const inFlight = state.detailFetches.get(key);
+    if (inFlight) return inFlight;
+
+    const promise = fetch(`/api/request/${encodeURIComponent(req.id)}`)
+        .then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+        })
+        .then(fullReq => {
+            setLru(state.detailCache, key, fullReq);
+            updateRequestPreview(fullReq);
+            return fullReq;
+        })
+        .finally(() => state.detailFetches.delete(key));
+    state.detailFetches.set(key, promise);
+    return promise;
+}
+
+function renderRequestSummary(req, sid) {
+    if (req.summary_json && _renderSummaryFromCache) {
+        setLru(state.requestSummaryCache, req.id, req.summary_json);
+        _renderSummaryFromCache(req.summary_json, sid);
+        return;
+    }
+    if (_openRequestSummaryPanel && sid) {
+        _openRequestSummaryPanel(req.id, sid);
+    }
+}
+
 export async function showRequestDetail(req) {
     state.selectedRequestId = req.id;
     // Auto-expand the session containing this request
@@ -671,6 +827,11 @@ export async function showRequestDetail(req) {
     document.getElementById('request-detail').classList.remove('hidden');
     document.getElementById('view-inspector').classList.add('detail-open');
     document.getElementById('detail-title').textContent = `${req.method} ${req.path}`;
+    content.innerHTML = `<div class="detail-loading">${t('summary.loading')}</div>`;
+    if (_prepareRequestSummaryPanel && req.session_id) {
+        _prepareRequestSummaryPanel(req.session_id);
+    }
+    const detailPromise = loadRequestDetail(req);
 
     // Find page containing this request's session group
     const groups = getSessionGroups();
@@ -679,70 +840,27 @@ export async function showRequestDetail(req) {
         const targetPage = Math.floor(groupIdx / state.pageSize) + 1;
         if (targetPage !== state.currentPage) state.currentPage = targetPage;
     }
-    renderPage();
-
-    // Check if WS payload includes full body — write to detail cache
-    const key = cacheKey(req);
-    if (req.request_body != null || req.response_body != null) {
-        state.detailCache.set(key, req);
+    try {
+        renderPage();
+    } catch (e) {
+        console.error('Failed to refresh request list:', e);
     }
-
-    // Hit detail cache
-    const cached = state.detailCache.get(key);
-    if (cached) {
-        // Update requestRows with cached full detail
-        const existing = state.requestRows.get(cached.id);
-        state.requestRows.set(cached.id, { ...(existing || {}), ...cached });
-        updateDetailView(cached);
-        if (cached.summary_json && _renderSummaryFromCache) {
-            _renderSummaryFromCache(cached.summary_json, req.session_id);
-        }
-        return;
-    }
-
-    // Dedup in-flight fetches
-    const inFlight = state.detailFetches.get(key);
-    if (inFlight) {
-        try {
-            const fullReq = await inFlight;
-            updateDetailView(fullReq);
-            if (fullReq.summary_json && _renderSummaryFromCache) {
-                _renderSummaryFromCache(fullReq.summary_json, req.session_id);
-            }
-        } catch (_) {
-            updateDetailView(req);
-        }
-        return;
-    }
-
-    // Fetch full request detail from API
-    const promise = fetch(`/api/request/${encodeURIComponent(req.id)}`)
-        .then(r => {
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            return r.json();
-        })
-        .then(fullReq => {
-            state.detailCache.set(key, fullReq);
-            const existing = state.requestRows.get(fullReq.id);
-            state.requestRows.set(fullReq.id, { ...(existing || {}), ...fullReq });
-            return fullReq;
-        });
-    state.detailFetches.set(key, promise);
 
     try {
-        const fullReq = await promise;
+        const fullReq = await detailPromise;
+        if (state.selectedRequestId !== req.id) return;
         const row = document.getElementById(`req-${fullReq.id}`);
         if (row) row.innerHTML = buildRequestRowHTML(fullReq, row.classList.contains('session-child'));
         updateDetailView(fullReq);
-        // Cascade pre-computed summary to sidebar — no second API call needed
-        if (fullReq.summary_json && _renderSummaryFromCache) {
-            _renderSummaryFromCache(fullReq.summary_json, req.session_id);
-        }
+        renderRequestSummary(fullReq, req.session_id);
     } catch (e) {
         console.error('Failed to load request detail:', e);
-        updateDetailView(req);
-    } finally {
-        state.detailFetches.delete(key);
+        if (state.selectedRequestId === req.id) {
+            content.innerHTML = `<div class="detail-error">${esc(e.message || String(e))}</div>`;
+            if (_openRequestSummaryPanel && req.session_id) {
+                _openRequestSummaryPanel(req.id, req.session_id);
+            }
+        }
     }
 }
 
@@ -964,11 +1082,11 @@ document.addEventListener('click', (e) => {
 });
 
 // Detail tab buttons
-document.querySelectorAll('.tab').forEach(btn => {
+document.querySelectorAll('.detail-tabs .tab').forEach(btn => {
     btn.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.detail-tabs .tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        const req = state.requestRows.get(state.selectedRequestId);
+        const req = selectedRequestDetail();
         if (req) showDetailTab(btn.dataset.tab, req);
     });
 });
@@ -987,7 +1105,7 @@ document.getElementById('btn-fullscreen-close').addEventListener('click', () => 
 });
 
 document.getElementById('btn-fullscreen-detail').addEventListener('click', () => {
-    const req = state.requestRows.get(state.selectedRequestId);
+    const req = selectedRequestDetail();
     if (!req) return;
     state.fullscreenReqId = req.id;
     const activeTab = document.querySelector('.detail-tabs .tab.active')?.dataset.tab || 'request';

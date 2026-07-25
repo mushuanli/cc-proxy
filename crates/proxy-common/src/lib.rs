@@ -11,9 +11,8 @@ pub use core::event::EventBus;
 
 // Re-export shared domain types
 pub use models::{
-    BillingSnapshot, ClientType, CostData, DailyCost, ModelCost,
-    NormalizedResponse, PriceRates, ProviderCost, ProviderInfo, ProxiedRequest,
-    SessionCost, SessionId, SseEvent, TaskId, TaskStatus, TaskUsage, TierRuleInfo,
-    ToolCallRecord, UpstreamInfo, WsMessage,
+    BillingSnapshot, ClientType, CostData, DailyCost, ModelCost, NormalizedResponse, PriceRates,
+    ProviderCost, ProviderInfo, ProxiedRequest, SessionCost, SessionId, SseEvent, TaskId,
+    TaskStatus, TaskUsage, TierRuleInfo, ToolCallRecord, UpstreamInfo, WsMessage,
 };
 pub use response::normalize_response;

@@ -178,7 +178,12 @@ pub fn extract_request_session_id(
     headers: &HeaderMap,
     body: &serde_json::Value,
 ) -> Option<String> {
-    for name in ["x-claude-code-session-id", "session_id", "x-session-id", "x-codex-session-id"] {
+    for name in [
+        "x-claude-code-session-id",
+        "session_id",
+        "x-session-id",
+        "x-codex-session-id",
+    ] {
         if let Some(value) = headers
             .get(name)
             .and_then(|v| v.to_str().ok())
@@ -794,7 +799,6 @@ pub fn inject_effort(body_json: &mut serde_json::Value, effort: &str) {
     // Set output_config.effort
     body_json["output_config"] = serde_json::json!({"effort": effort});
 }
-
 
 #[cfg(test)]
 mod tests {

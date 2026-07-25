@@ -16,6 +16,12 @@ pub struct ListQuery {
     pub limit: Option<u32>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct SessionTasksQuery {
+    pub limit: Option<u32>,
+    pub before_sequence: Option<u64>,
+}
+
 /// Transform TaskListItem to match frontend expectations (session_id, timestamp, model, cost).
 pub(crate) fn task_to_json(
     task: &proxy_store::TaskListItem,
@@ -47,6 +53,7 @@ pub(crate) fn task_to_json(
         "time_to_first_token_ms": task.ttft_ms,
         "ttft_ms": task.ttft_ms,
         "prompt": task.prompt_text,
+        "current_operation": task.current_operation,
         "messages_count": task.messages_count,
     })
 }
@@ -116,8 +123,49 @@ fn task_to_full_json(task: &proxy_store::Task) -> Value {
         "request_type": task.metadata.get("protocol").and_then(|v| v.as_str()).unwrap_or("anthropic"),
         "messages_count": task.messages_count,
         "prompt": task.prompt_text,
+        "current_operation": task.current_operation,
         "summary_json": task.summary_json
     })
+}
+
+pub async fn list_session_tasks(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<SessionTasksQuery>,
+) -> impl IntoResponse {
+    let sid = match SessionId::new(id) {
+        Ok(value) => value,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    match state
+        .store
+        .task_page(&sid, limit + 1, q.before_sequence)
+        .await
+    {
+        Ok(mut tasks) => {
+            let has_more = tasks.len() > limit as usize;
+            tasks.truncate(limit as usize);
+            let next = has_more
+                .then(|| tasks.last().map(|task| task.sequence_no))
+                .flatten();
+            let items = tasks
+                .iter()
+                .map(|task| task_to_json(task, Some(&sid)))
+                .collect::<Vec<_>>();
+            Json(json!({
+                "items": items,
+                "has_more": has_more,
+                "next_before_sequence": next
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn list(

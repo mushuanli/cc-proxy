@@ -33,6 +33,7 @@ pub fn insert_task(
         .transpose()?;
 
     let metadata_json = serde_json::to_string(&task.metadata)?;
+    let current_operation = crate::persisted_operation_preview(task.summary_json.as_deref());
     let prompt_text = task.prompt_text.clone().or_else(|| {
         task.request_body
             .as_deref()
@@ -45,8 +46,6 @@ pub fn insert_task(
             id, session_id, sequence_no,
             created_at, started_at, first_byte_at, ended_at,
             status, method, path,
-            request_headers_json, request_body,
-            response_headers_json, response_body,
             http_status_code, is_streaming,
             requested_model, provider, pricing_model_id,
             resolved_model, upstream,
@@ -56,24 +55,20 @@ pub fn insert_task(
             input_rate_microusd, output_rate_microusd,
             cache_write_rate_microusd, cache_read_rate_microusd,
             cost_microusd, currency,
-            messages_count, metadata_json, prompt_text,
-            summary_json, summary_created_at
+            messages_count, prompt_text, current_operation
         ) VALUES (
             ?1, ?2, ?3,
             ?4, ?5, ?6, ?7,
             ?8, ?9, ?10,
             ?11, ?12,
-            ?13, ?14,
-            ?15, ?16,
-            ?17, ?18, ?19,
-            ?20, ?21,
+            ?13, ?14, ?15,
+            ?16, ?17,
+            ?18, ?19, ?20, ?21,
             ?22, ?23, ?24, ?25,
-            ?26, ?27, ?28, ?29,
-            ?30, ?31,
-            ?32, ?33, ?34, ?35,
-            ?36, ?37,
-            ?38, ?39, ?40,
-            ?41, ?42
+            ?26, ?27,
+            ?28, ?29, ?30, ?31,
+            ?32, ?33,
+            ?34, ?35, ?36
         )
         ON CONFLICT(id) DO NOTHING",
         params![
@@ -87,10 +82,6 @@ pub fn insert_task(
             task.status.as_str(),
             task.method,
             task.path,
-            request_headers_json,
-            task.request_body,
-            response_headers_json,
-            response_body_json,
             task.http_status_code.map(|c| c as i64),
             task.is_streaming as i64,
             task.requested_model,
@@ -121,42 +112,73 @@ pub fn insert_task(
             cost_microusd,
             task.billing.currency,
             task.messages_count as i64,
-            metadata_json,
             prompt_text,
-            task.summary_json,
-            task.summary_json.as_ref().map(|_| now_ms),
+            current_operation,
         ],
     )?;
 
+    if rows > 0 {
+        insert_task_payloads(
+            conn,
+            id,
+            request_headers_json.as_deref(),
+            task.request_body.as_deref(),
+            response_headers_json.as_deref(),
+            response_body_json.as_deref(),
+            &metadata_json,
+            task.summary_json.as_deref(),
+            now_ms,
+        )?;
+    }
     Ok(rows > 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_task_payloads(
+    conn: &Connection,
+    id: &TaskId,
+    request_headers: Option<&str>,
+    request_body: Option<&str>,
+    response_headers: Option<&str>,
+    response_body: Option<&str>,
+    metadata: &str,
+    summary: Option<&str>,
+    now_ms: i64,
+) -> StoreResult<()> {
+    conn.execute(
+        "INSERT INTO task_details VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            id.as_str(),
+            request_headers,
+            request_body,
+            response_headers,
+            response_body,
+            metadata
+        ],
+    )?;
+    if let Some(summary) = summary {
+        conn.execute(
+            "INSERT INTO task_summaries VALUES (?1, 1, ?2, ?3, ?3)",
+            params![id.as_str(), summary, now_ms],
+        )?;
+    }
+    Ok(())
 }
 
 /// Get a task by id (full detail).
 pub fn get_task(conn: &Connection, id: &TaskId) -> StoreResult<Option<Task>> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, sequence_no,
-         created_at, started_at, first_byte_at, ended_at,
-         status, method, path,
-         request_headers_json, request_body,
-         response_headers_json, response_body,
-         http_status_code, is_streaming,
-         requested_model, provider, pricing_model_id,
-         resolved_model, upstream,
-         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-         duration_ms, ttft_ms, stop_reason, upstream_message_id,
-         error_type, error_message,
-         input_rate_microusd, output_rate_microusd,
-         cache_write_rate_microusd, cache_read_rate_microusd,
-         cost_microusd, currency,
-         summary_json, summary_created_at, metadata_json, messages_count, prompt_text
-         FROM tasks WHERE id = ?1",
+        "SELECT t.*, d.request_headers_json, d.request_body,
+         d.response_headers_json, d.response_body, d.metadata_json,
+         s.summary_json, s.created_at AS summary_created_at
+         FROM tasks t
+         LEFT JOIN task_details d ON d.task_id = t.id
+         LEFT JOIN task_summaries s ON s.task_id = t.id
+         WHERE t.id = ?1",
     )?;
 
     let mut rows = stmt.query_map(params![id.as_str()], row_to_task)?;
-    match rows.next() {
-        Some(Ok(t)) => Ok(Some(t)),
-        _ => Ok(None),
-    }
+    rows.next().transpose().map_err(Into::into)
 }
 
 /// List tasks for a session (lightweight, no body).
@@ -164,6 +186,8 @@ pub fn list_tasks(
     conn: &Connection,
     session_id: &SessionId,
     time_range: Option<&crate::models::TimeRange>,
+    limit: u32,
+    before_sequence: Option<u64>,
 ) -> StoreResult<Vec<TaskListItem>> {
     let mut sql = String::from(
         "SELECT id, sequence_no, started_at, ended_at, status,
@@ -171,7 +195,7 @@ pub fn list_tasks(
          provider, resolved_model, http_status_code,
          input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
          cost_microusd, pricing_model_id,
-         duration_ms, ttft_ms, summary_json, messages_count, prompt_text
+         duration_ms, ttft_ms, messages_count, prompt_text, current_operation
          FROM tasks WHERE session_id = ?1",
     );
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -188,7 +212,15 @@ pub fn list_tasks(
         }
     }
 
-    sql.push_str(" ORDER BY sequence_no DESC");
+    if let Some(sequence) = before_sequence {
+        params.push(Box::new(sequence as i64));
+        sql.push_str(&format!(" AND sequence_no < ?{}", params.len()));
+    }
+    params.push(Box::new(limit.min(10_001) as i64));
+    sql.push_str(&format!(
+        " ORDER BY sequence_no DESC LIMIT ?{}",
+        params.len()
+    ));
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
@@ -201,12 +233,20 @@ pub fn list_tasks(
     Ok(result)
 }
 
-/// Update task summary_json cache.
+/// Update the summary and its persisted list preview.
 pub fn update_summary(conn: &Connection, id: &TaskId, summary_json: &str) -> StoreResult<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let preview = crate::persisted_operation_preview(Some(summary_json));
     conn.execute(
-        "UPDATE tasks SET summary_json = ?2, summary_created_at = ?3 WHERE id = ?1",
+        "INSERT INTO task_summaries (task_id, version, summary_json, created_at, updated_at)
+         VALUES (?1, 1, ?2, ?3, ?3)
+         ON CONFLICT(task_id) DO UPDATE SET
+            version = 1, summary_json = excluded.summary_json, updated_at = excluded.updated_at",
         params![id.as_str(), summary_json, now_ms],
+    )?;
+    conn.execute(
+        "UPDATE tasks SET current_operation = ?2 WHERE id = ?1",
+        params![id.as_str(), preview],
     )?;
     Ok(())
 }
@@ -217,31 +257,18 @@ pub fn get_latest_completed_task(
     session_id: &SessionId,
 ) -> StoreResult<Option<Task>> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, sequence_no,
-         created_at, started_at, first_byte_at, ended_at,
-         status, method, path,
-         request_headers_json, request_body,
-         response_headers_json, response_body,
-         http_status_code, is_streaming,
-         requested_model, provider, pricing_model_id,
-         resolved_model, upstream,
-         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-         duration_ms, ttft_ms, stop_reason, upstream_message_id,
-         error_type, error_message,
-         input_rate_microusd, output_rate_microusd,
-         cache_write_rate_microusd, cache_read_rate_microusd,
-         cost_microusd, currency,
-         summary_json, summary_created_at, metadata_json, messages_count, prompt_text
-         FROM tasks
-         WHERE session_id = ?1 AND ended_at IS NOT NULL AND status != 'recording'
-         ORDER BY sequence_no DESC LIMIT 1",
+        "SELECT t.*, d.request_headers_json, d.request_body,
+         d.response_headers_json, d.response_body, d.metadata_json,
+         s.summary_json, s.created_at AS summary_created_at
+         FROM tasks t
+         LEFT JOIN task_details d ON d.task_id = t.id
+         LEFT JOIN task_summaries s ON s.task_id = t.id
+         WHERE t.session_id = ?1 AND t.ended_at IS NOT NULL AND t.status != 'recording'
+         ORDER BY t.sequence_no DESC LIMIT 1",
     )?;
 
     let mut rows = stmt.query_map(params![session_id.as_str()], row_to_task)?;
-    match rows.next() {
-        Some(Ok(t)) => Ok(Some(t)),
-        _ => Ok(None),
-    }
+    rows.next().transpose().map_err(Into::into)
 }
 
 /// Delete old tasks that have been archived and are past retention.
@@ -307,29 +334,24 @@ pub fn finalize_task(
             status = ?2,
             first_byte_at = ?3,
             ended_at = ?4,
-            response_headers_json = ?5,
-            response_body = ?6,
-            http_status_code = ?7,
-            input_tokens = ?8,
-            output_tokens = ?9,
-            cache_creation_tokens = ?10,
-            cache_read_tokens = ?11,
-            duration_ms = ?12,
-            ttft_ms = ?13,
-            stop_reason = ?14,
-            upstream_message_id = ?15,
-            error_type = ?16,
-            error_message = ?17,
-            cost_microusd = ?18,
-            metadata_json = ?19
+            http_status_code = ?5,
+            input_tokens = ?6,
+            output_tokens = ?7,
+            cache_creation_tokens = ?8,
+            cache_read_tokens = ?9,
+            duration_ms = ?10,
+            ttft_ms = ?11,
+            stop_reason = ?12,
+            upstream_message_id = ?13,
+            error_type = ?14,
+            error_message = ?15,
+            cost_microusd = ?16
          WHERE id = ?1 AND status = 'recording'",
         params![
             id.as_str(),
             finalization.status.as_str(),
             finalization.first_byte_at,
             finalization.ended_at,
-            response_headers_json,
-            response_body_json,
             finalization.http_status_code.map(|c| c as i64),
             finalization.usage.input_tokens as i64,
             finalization.usage.output_tokens as i64,
@@ -339,19 +361,32 @@ pub fn finalize_task(
             finalization.timing.ttft_ms,
             finalization.timing.stop_reason,
             finalization.timing.upstream_message_id,
-            finalization.error
+            finalization
+                .error
                 .as_ref()
                 .map(|e| e.error_type.as_str())
                 .unwrap_or(""),
-            finalization.error
+            finalization
+                .error
                 .as_ref()
                 .map(|e| e.error_message.as_str())
                 .unwrap_or(""),
             cost_microusd,
-            metadata_json,
         ],
     )?;
 
+    if rows > 0 {
+        conn.execute(
+            "UPDATE task_details SET response_headers_json = ?2,
+             response_body = ?3, metadata_json = ?4 WHERE task_id = ?1",
+            params![
+                id.as_str(),
+                response_headers_json,
+                response_body_json,
+                metadata_json
+            ],
+        )?;
+    }
     Ok(rows > 0)
 }
 
@@ -429,6 +464,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         summary_json: row.get("summary_json")?,
         summary_created_at: row.get("summary_created_at")?,
         prompt_text: row.get("prompt_text")?,
+        current_operation: row.get("current_operation")?,
         metadata: row
             .get::<_, String>("metadata_json")
             .ok()
@@ -462,8 +498,8 @@ fn row_to_task_list_item(row: &rusqlite::Row) -> rusqlite::Result<TaskListItem> 
             .is_some_and(|id| id != "unknown"),
         duration_ms: row.get("duration_ms")?,
         ttft_ms: row.get("ttft_ms")?,
-        summary_json: row.get("summary_json")?,
         prompt_text: row.get("prompt_text")?,
+        current_operation: row.get("current_operation")?,
         messages_count: row.get::<_, i64>("messages_count")? as u32,
     })
 }

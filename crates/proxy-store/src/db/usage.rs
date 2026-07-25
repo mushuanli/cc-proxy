@@ -91,13 +91,7 @@ pub fn record_task_started_usage(
         ON CONFLICT (usage_date, session_id, provider, model, currency)
         DO UPDATE SET
             task_count = task_count + 1",
-        params![
-            usage_date,
-            session_id.as_str(),
-            provider,
-            model,
-            currency,
-        ],
+        params![usage_date, session_id.as_str(), provider, model, currency,],
     )?;
 
     Ok(())

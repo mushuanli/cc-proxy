@@ -33,6 +33,8 @@
 .tab { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); padding: 7px 14px; cursor: pointer; font-size: 0.82rem; }
 .tab.active { color: var(--accent2); border-bottom-color: var(--accent2); }
 .detail-body { padding: 14px; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; flex: 1; overflow-y: auto; background: var(--bg); color: var(--text); }
+.detail-loading { color: var(--text-muted); padding: 20px 0; text-align: center; }
+.detail-error { color: var(--error); padding: 20px 0; }
 .detail-headers, .detail-plain { margin: 0 0 10px 0; font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: var(--text-muted); }
 .detail-headers { padding-bottom: 10px; }
 
@@ -112,6 +114,7 @@ td.col-req { padding: 6px 10px; white-space: normal; overflow: visible; }
 .req-tool-out { color: var(--text-muted); font-size: 0.7rem; border-left: 1px solid var(--border); padding-left: 3px; margin-left: 1px; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
 .req-tool-chip--err .req-tool-out { color: var(--error); }
 .req-summary-prompt { color: var(--accent); font-size: 0.75rem; margin-left: 4px; }
+.req-summary-resp { color: var(--text); font-size: 0.78rem; margin-left: 8px; }
 
 /* overflow badge */
 .req-tool-more { display: inline-flex; align-items: center; justify-content: center; background: var(--bg-card); border: 1px solid var(--border); border-radius: 3px; padding: 0 5px; height: 20px; font-size: 0.72rem; color: var(--text-muted); cursor: pointer; vertical-align: middle; user-select: none; }

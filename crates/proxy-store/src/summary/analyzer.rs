@@ -54,6 +54,138 @@ fn summary_version() -> u32 {
     1
 }
 
+/// Extract a compact operation preview from a persisted task summary.
+pub fn summary_current_operation(summary_json: &str) -> Option<String> {
+    let summary = serde_json::from_str::<TaskSummaryV1>(summary_json).ok()?;
+    let prompt_index = summary.user_prompts.last().map(|prompt| prompt.msg_index);
+    summary
+        .assistant_actions
+        .iter()
+        .rev()
+        .find(|action| prompt_index.is_none_or(|index| action.msg_index > index))
+        .and_then(action_preview)
+        .or_else(|| compact_preview(&summary.final_response))
+}
+
+/// Extract the list preview once when a summary is written or migrated.
+pub fn persisted_operation_preview(summary_json: Option<&str>) -> Option<String> {
+    summary_json.and_then(summary_current_operation)
+}
+
+/// Refresh recording-time summary fields after a task reaches a terminal state.
+pub fn refresh_task_summary(task: &Task) -> Option<String> {
+    let mut summary = task
+        .summary_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<TaskSummaryV1>(json).ok())
+        .or_else(|| analyze_task(task))?;
+    apply_final_metadata(&mut summary, task);
+    apply_final_response(&mut summary, task.response_body.as_ref());
+    serde_json::to_string(&summary).ok()
+}
+
+fn apply_final_metadata(summary: &mut TaskSummaryV1, task: &Task) {
+    summary.status = task.status.as_str().to_string();
+    summary.status_code = task.http_status_code;
+    summary.stop_reason.clone_from(&task.stop_reason);
+    summary.input_tokens = task.input_tokens;
+    summary.output_tokens = task.output_tokens;
+    summary.cache_read_tokens = task.cache_read_tokens;
+    summary.cache_creation_tokens = task.cache_creation_tokens;
+    summary.cost_microusd = task.cost_microusd;
+    summary.duration_ms = task.duration_ms;
+    summary.ttft_ms = task.ttft_ms;
+    summary.error_type = task.error_type.clone().filter(|value| !value.is_empty());
+    summary.error_message = task.error_message.clone().filter(|value| !value.is_empty());
+}
+
+fn apply_final_response(
+    summary: &mut TaskSummaryV1,
+    response: Option<&proxy_common::NormalizedResponse>,
+) {
+    let Some(response) = response else { return };
+    let text = response.text.join("");
+    if !text.is_empty() {
+        summary.final_response = truncate(&text, 3000);
+    }
+    append_response_tools(summary, response);
+}
+
+fn append_response_tools(summary: &mut TaskSummaryV1, response: &proxy_common::NormalizedResponse) {
+    if response.tool_calls.is_empty() {
+        return;
+    }
+    let prompt_index = summary.user_prompts.last().map(|prompt| prompt.msg_index);
+    let already_present = summary
+        .assistant_actions
+        .iter()
+        .any(|action| prompt_index.is_none_or(|index| action.msg_index > index));
+    if already_present {
+        return;
+    }
+    let tools = summarize_response_tools(response, &mut summary.stats);
+    let msg_index = prompt_index.map_or(0, |index| index + 1);
+    summary.assistant_actions.push(AssistantAction {
+        msg_index,
+        thought: None,
+        tools,
+    });
+}
+
+fn summarize_response_tools(
+    response: &proxy_common::NormalizedResponse,
+    stats: &mut SessionStats,
+) -> Vec<ToolCallSummary> {
+    response
+        .tool_calls
+        .iter()
+        .map(|tool| {
+            stats.tool_call_count += 1;
+            *stats
+                .tool_call_by_name
+                .entry(tool.name.clone())
+                .or_insert(0) += 1;
+            ToolCallSummary {
+                name: tool.name.clone(),
+                description: describe_tool(&tool.name, &tool.input),
+            }
+        })
+        .collect()
+}
+
+fn action_preview(action: &AssistantAction) -> Option<String> {
+    if let Some(tool) = action.tools.last() {
+        let description = tool.description.trim();
+        let label = if description.is_empty() {
+            tool.name.trim().to_string()
+        } else if description
+            .to_lowercase()
+            .starts_with(&tool.name.trim().to_lowercase())
+        {
+            description.to_string()
+        } else {
+            format!("{} {description}", tool.name.trim())
+        };
+        return compact_preview(&label);
+    }
+    action.thought.as_deref().and_then(compact_preview)
+}
+
+fn compact_preview(value: &str) -> Option<String> {
+    const MAX_CHARS: usize = 160;
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut chars = normalized.chars();
+    let preview = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    })
+}
+
 /// Extract the latest real user prompt from a request payload.
 ///
 /// This lightweight path is used while a response is still streaming, so the
@@ -136,7 +268,9 @@ pub fn analyze_task(task: &Task) -> Option<SessionSummary> {
         &task.resolved_model,
         &task.provider,
         task.upstream.as_deref(),
-        task.pricing_model_id.as_deref().is_some_and(|id| id != "unknown"),
+        task.pricing_model_id
+            .as_deref()
+            .is_some_and(|id| id != "unknown"),
         task.started_at,
         task.http_status_code,
         task.stop_reason.as_deref(),
@@ -728,6 +862,7 @@ mod tests {
             summary_json: None,
             summary_created_at: None,
             prompt_text: None,
+            current_operation: None,
             metadata: serde_json::Value::Null,
             messages_count: 0,
         }
@@ -871,6 +1006,81 @@ mod tests {
         assert_eq!(summary.touched_files.len(), 1);
         assert_eq!(summary.touched_files[0].path, "/foo/bar.ts");
         assert_eq!(summary.touched_files[0].reads, 1);
+    }
+
+    #[test]
+    fn current_operation_uses_latest_action_after_parent_prompt() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "Fix the inspector"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "inspector.js"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "file content"}
+                ]}
+            ]
+        });
+        let summary = analyze_task(&make_task(Some(&body.to_string()))).unwrap();
+        let json = serde_json::to_string(&summary).unwrap();
+        assert_eq!(
+            summary_current_operation(&json).as_deref(),
+            Some("Read inspector.js")
+        );
+    }
+
+    #[test]
+    fn current_operation_ignores_actions_before_latest_prompt() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "old.js"}}
+                ]},
+                {"role": "user", "content": "Start a new task"}
+            ]
+        });
+        let summary = analyze_task(&make_task(Some(&body.to_string()))).unwrap();
+        let json = serde_json::to_string(&summary).unwrap();
+        assert_eq!(summary_current_operation(&json), None);
+    }
+
+    #[test]
+    fn current_operation_falls_back_to_final_response() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "Explain the result"}]
+        });
+        let mut summary = analyze_task(&make_task(Some(&body.to_string()))).unwrap();
+        summary.final_response = "The operation completed successfully.".into();
+        let json = serde_json::to_string(&summary).unwrap();
+        assert_eq!(
+            summary_current_operation(&json).as_deref(),
+            Some("The operation completed successfully.")
+        );
+    }
+
+    #[test]
+    fn refresh_summary_adds_terminal_response_operation() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "Read the config"}]
+        });
+        let mut task = make_task(Some(&body.to_string()));
+        task.summary_json =
+            analyze_task(&task).and_then(|summary| serde_json::to_string(&summary).ok());
+        task.status = TaskStatus::Completed;
+        task.response_body = Some(proxy_common::NormalizedResponse {
+            tool_calls: vec![proxy_common::ToolCallRecord {
+                id: "t1".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": "config.toml"}),
+            }],
+            ..Default::default()
+        });
+
+        let json = refresh_task_summary(&task).unwrap();
+        assert_eq!(
+            summary_current_operation(&json).as_deref(),
+            Some("Read config.toml")
+        );
     }
 
     #[test]

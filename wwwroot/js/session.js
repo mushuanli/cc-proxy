@@ -1,4 +1,4 @@
-import { state } from './state.js';
+import { state, getLru, setLru } from './state.js';
 import { t } from './i18n.js';
 import { esc, shortSid } from './utils.js';
 import { renderPage, updateFilterOptions, updateRequestCount } from './inspector.js';
@@ -91,7 +91,7 @@ export function renderSummaryFromCache(summaryJson, sid) {
     if (state.summaryCollapsed) toggleSummaryPanel();
 }
 
-export async function openRequestSummaryPanel(reqId, sid) {
+export function prepareRequestSummaryPanel(sid) {
     const content = document.getElementById('summary-content');
     document.getElementById('summary-title').textContent = t('summary.loading');
     content.innerHTML = '<div class="summary-loading">' + t('summary.loading') + '</div>';
@@ -99,24 +99,56 @@ export async function openRequestSummaryPanel(reqId, sid) {
     document.getElementById('view-inspector').classList.add('summary-open');
     bindSummarySidebarActions(sid);
     if (state.summaryCollapsed) toggleSummaryPanel();
+}
+
+export async function openRequestSummaryPanel(reqId, sid) {
+    prepareRequestSummaryPanel(sid);
+    const content = document.getElementById('summary-content');
+    const cached = getLru(state.requestSummaryCache, reqId);
+    if (cached) {
+        renderRequestSummary(cached, sid);
+        return;
+    }
+
+    let promise = state.requestSummaryFetches.get(reqId);
+    if (!promise) {
+        promise = fetchRequestSummary(reqId);
+        state.requestSummaryFetches.set(reqId, promise);
+    }
 
     try {
-        const resp = await fetch(`/api/request/${encodeURIComponent(reqId)}/summary`);
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({ error: resp.statusText }));
-            content.innerHTML = `<div class="summary-error">${esc(err.error || t('summary.failed_load_summary'))}</div>`;
-            document.getElementById('summary-title').textContent = t('summary.error');
-            return;
-        }
-        const data = await resp.json();
-        document.getElementById('summary-title').textContent =
-            t('summary.summary_of', { label: (state.sessionCache[sid] || sid).slice(-20) });
-        content.innerHTML = renderSummaryHTML(data);
-        bindSummaryEvents(content);
+        const data = await promise;
+        setLru(state.requestSummaryCache, reqId, data);
+        renderRequestSummary(data, sid);
     } catch (e) {
         content.innerHTML = `<div class="summary-error">${esc(String(e))}</div>`;
-        document.getElementById('summary-title').textContent = 'Error';
+        document.getElementById('summary-title').textContent = t('summary.error');
+    } finally {
+        state.requestSummaryFetches.delete(reqId);
     }
+}
+
+async function fetchRequestSummary(reqId) {
+    const resp = await fetch(`/api/request/${encodeURIComponent(reqId)}/summary`);
+    if (resp.ok) return resp.json();
+    const error = await resp.json().catch(() => ({ error: resp.statusText }));
+    throw new Error(error.error || t('summary.failed_load_summary'));
+}
+
+function renderRequestSummary(data, sid) {
+    const content = document.getElementById('summary-content');
+    if (typeof data === 'string') {
+        try {
+            data = JSON.parse(data);
+        } catch (e) {
+            content.innerHTML = `<div class="summary-error">${esc(String(e))}</div>`;
+            return;
+        }
+    }
+    document.getElementById('summary-title').textContent =
+        t('summary.summary_of', { label: (state.sessionCache[sid] || sid).slice(-20) });
+    content.innerHTML = renderSummaryHTML(data);
+    bindSummaryEvents(content);
 }
 
 export async function openSummaryPanel(sid) {

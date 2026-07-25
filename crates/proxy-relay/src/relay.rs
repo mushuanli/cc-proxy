@@ -31,8 +31,8 @@ fn request_prompt(body: &serde_json::Value) -> Option<String> {
 use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessage};
 use proxy_common::{ConfigStore, EventBus};
 use proxy_common::{ResolvedRoute, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
+use proxy_store::{summarize_task, summary_current_operation};
 use proxy_store::{NewSessionDefaults, NewTask, ProxyStore, StoreResult};
-use proxy_store::summarize_task;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -317,9 +317,8 @@ async fn proxy_request(
             .map(|sid| sid.as_str().to_string())
             .unwrap_or_else(|| format!("headless-{}", TaskId::generate())),
     };
-    let session_id = SessionId::new(session_id_str.clone()).unwrap_or_else(|_| {
-        SessionId::from_trusted(format!("headless-{}", TaskId::generate()))
-    });
+    let session_id = SessionId::new(session_id_str.clone())
+        .unwrap_or_else(|_| SessionId::from_trusted(format!("headless-{}", TaskId::generate())));
 
     // Extract session metadata (cwd, project_key) from headers and body
     let session_meta = upstream::extract_session_metadata(&headers, &body_json);
@@ -560,6 +559,10 @@ async fn proxy_request(
     // Apply capture trimming to the recording task before persistence
     let mut recording_task = recording_task;
     finalize_task(&mut recording_task, session_id.as_str(), &relay.capture);
+    let current_operation = recording_task
+        .summary_json
+        .as_deref()
+        .and_then(summary_current_operation);
 
     // ── Build ProxiedRequest for WS NewRequest event ──
     let recording_proxied = proxy_common::models::ProxiedRequest {
@@ -582,6 +585,7 @@ async fn proxy_request(
         request_type: protocol.request_type().into(),
         messages_count: Some(msg_count),
         prompt: prompt.clone(),
+        current_operation,
         priced: Some(priced),
         ..Default::default()
     };
@@ -816,6 +820,7 @@ async fn proxy_request(
                 }),
             };
 
+            let current_operation = response_operation_preview(&meta.normalized);
             let mut proxied = proxy_common::models::ProxiedRequest {
                 id: task_id.as_str().to_string(),
                 timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
@@ -823,7 +828,11 @@ async fn proxy_request(
                 method: method_str.clone(),
                 path: path_str.clone(),
                 request_headers: upstream::redact_headers(&headers_clone),
-                request_body: Some(stored_request_body(is_transparent_val, &body_clone, &body_json_clone)),
+                request_body: Some(stored_request_body(
+                    is_transparent_val,
+                    &body_clone,
+                    &body_json_clone,
+                )),
                 model: Some(effective_model_clone.clone()),
                 provider: Some(route_provider.clone()),
                 response_headers: meta
@@ -849,6 +858,7 @@ async fn proxy_request(
                 request_type: protocol.request_type().into(),
                 messages_count: Some(msg_count_val),
                 prompt: prompt_clone,
+                current_operation,
                 priced: Some(priced_val),
                 sse_events: meta.sse_events.clone(),
                 ..Default::default()
@@ -868,7 +878,11 @@ async fn proxy_request(
                     method: method_str.clone(),
                     path: path_str.clone(),
                     status_code: meta.status_code,
-                    request_body: stored_request_body(is_transparent_val, &body_clone, &body_json_clone),
+                    request_body: stored_request_body(
+                        is_transparent_val,
+                        &body_clone,
+                        &body_json_clone,
+                    ),
                     response_body: meta.content_text.as_deref().unwrap_or("").to_string(),
                     duration_ms: meta.duration_ms,
                 },
@@ -975,6 +989,7 @@ async fn proxy_request(
         }),
     };
 
+    let current_operation = response_operation_preview(&upstream_response.normalized);
     let mut proxied = proxy_common::models::ProxiedRequest {
         id: task_id.as_str().to_string(),
         timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
@@ -1005,6 +1020,7 @@ async fn proxy_request(
         error: upstream_response.error.clone(),
         messages_count: Some(msg_count as u32),
         prompt: prompt.clone(),
+        current_operation,
         priced: Some(priced),
         request_type: protocol.request_type().into(),
         sse_events: upstream_response.sse_events.clone(),
@@ -1159,6 +1175,29 @@ fn finalize_task(task: &mut NewTask, session_id: &str, capture: &CaptureControl)
     }
 }
 
+fn response_operation_preview(response: &proxy_common::NormalizedResponse) -> Option<String> {
+    if let Some(tool) = response.tool_calls.last() {
+        let input = serde_json::to_string(&tool.input).unwrap_or_default();
+        return compact_operation(&format!("{} {}", tool.name, input));
+    }
+    compact_operation(&response.text.join(" "))
+}
+
+fn compact_operation(value: &str) -> Option<String> {
+    const MAX_CHARS: usize = 160;
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut chars = normalized.chars();
+    let preview = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    })
+}
+
 /// Persist a Recording task and publish NewRequest + SessionUpdated.
 /// Returns the stored task on success.
 async fn start_and_publish(
@@ -1196,7 +1235,10 @@ async fn finalize_and_publish(
             events.publish(WsMessage::RequestUpdated(proxied));
         }
         Ok(proxy_store::TaskFinalizeResult::AlreadyFinalized { .. }) => {
-            tracing::debug!("[relay] task {} already finalized, skipping events", task_id);
+            tracing::debug!(
+                "[relay] task {} already finalized, skipping events",
+                task_id
+            );
         }
         Err(e) => {
             tracing::error!("[relay] task_finalize failed for {}: {}", task_id, e);
@@ -1222,15 +1264,16 @@ fn strip_body_to_last_user_message(body: &str) -> Option<String> {
             return None;
         }
         let is_real = proxy_store::summary::analyzer::is_real_user_prompt(msg);
-        if is_real { Some(i) } else { None }
+        if is_real {
+            Some(i)
+        } else {
+            None
+        }
     })?;
 
     let last_user = messages[last_user_idx].clone();
     let mut minimal = serde_json::Map::new();
-    minimal.insert(
-        msg_key.to_string(),
-        serde_json::json!([last_user]),
-    );
+    minimal.insert(msg_key.to_string(), serde_json::json!([last_user]));
     if let Some(model) = value.get("model") {
         minimal.insert("model".to_string(), model.clone());
     }

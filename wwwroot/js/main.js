@@ -8,7 +8,7 @@ import {
 } from './inspector.js';
 import {
     toggleSummaryPanel, openSummaryPanel, openRequestSummaryPanel,
-    renderSummaryFromCache, normalizeRequestBody,
+    prepareRequestSummaryPanel, renderSummaryFromCache, normalizeRequestBody,
 } from './session.js';
 import {
     applyUpstreamState, updateCaptureButton,
@@ -43,10 +43,16 @@ window.fetch = (input, init = {}) => {
 
 // ── Wire up circular-dep bridge for inspector.js ──
 // inspector.js needs openSummaryPanel/openRequestSummaryPanel from session.js
-setSessionPanelFns(openSummaryPanel, openRequestSummaryPanel, renderSummaryFromCache);
+setSessionPanelFns(
+    openSummaryPanel,
+    openRequestSummaryPanel,
+    renderSummaryFromCache,
+    prepareRequestSummaryPanel,
+);
 
 // Also expose updateInspectorCostStats via window bridge (used by inspector.js and settings.js)
 window._updateInspectorCostStats = updateInspectorCostStats;
+window._renderTimeline = renderTimeline;
 
 // ── WebSocket ──
 
@@ -135,6 +141,8 @@ function handleMessage(msg) {
         case 'Cleared':
             state.requestRows.clear();
             state.detailCache.clear();
+            state.requestSummaryCache.clear();
+            state.requestSummaryFetches.clear();
             state.convSessions.clear();
             state.selectedRequestId = null;
             clearAllTables();
@@ -157,9 +165,33 @@ function applyTaskEvent(payload) {
     if (prevStatus && prevStatus !== 'recording' && nextStatus === 'recording') {
         return;
     }
-    // Merge: WS fields overlay, but null body fields don't overwrite cached details
+    if (prevStatus && prevStatus !== nextStatus) {
+        state.requestSummaryCache.delete(payload.id);
+    }
+    const isNew = !state.requestRows.has(payload.id);
+    // Merge: WS fields overlay, but null body fields from WS don't
+    // overwrite detail that was already fetched via REST.
     const next = { ...previous, ...payload };
+    if (payload.request_body == null && previous.request_body != null) {
+        next.request_body = previous.request_body;
+    }
+    if (payload.response_body == null && previous.response_body != null) {
+        next.response_body = previous.response_body;
+    }
+    if (payload.content_text == null && previous.content_text != null) {
+        next.content_text = previous.content_text;
+    }
     state.requestRows.set(payload.id, next);
+
+    // Debounced re-render — same as old upsertRequestRow
+    if (!state._renderPageTimer) {
+        state._renderPageTimer = setTimeout(() => {
+            renderPage();
+            state._renderPageTimer = null;
+        }, isNew ? 0 : 100);
+    }
+    clearTimeout(state._updateFilterTimer);
+    state._updateFilterTimer = setTimeout(updateFilterOptions, 500);
 }
 
 // ── Resync state ──
@@ -174,14 +206,10 @@ async function resyncState(reason) {
     console.debug('[ws] resync start — reason:', reason);
 
     try {
-        const [sessions, requests] = await Promise.all([
-            fetch('/api/sessions').then(r => r.json()).catch(() => []),
-            fetch('/api/requests?limit=2000').then(r => r.json()).catch(() => []),
-        ]);
+        const sessions = await fetch('/api/sessions').then(r => r.json()).catch(() => []);
 
-        // Build new state from snapshots
+        // Initial paint only needs session aggregates; tasks are loaded on expansion.
         const newRows = new Map();
-        requests.forEach(req => { newRows.set(req.id, req); });
         const newMeta = {};
         const newCache = {};
         sessions.forEach(s => {
@@ -210,7 +238,12 @@ async function resyncState(reason) {
         state.requestRows = newRows;
         state.sessionMeta = newMeta;
         state.sessionCache = newCache;
+        state.loadedSessions.clear();
+        state.loadingSessions.clear();
+        state.sessionTaskPages.clear();
         state.detailCache.clear();
+        state.requestSummaryCache.clear();
+        state.requestSummaryFetches.clear();
         state.pendingEvents = [];
 
         renderPage();

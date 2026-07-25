@@ -102,7 +102,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Recover interrupted tasks from previous run ──
     let process_start_ms = chrono::Utc::now().timestamp_millis();
-    let _ = state.store.recover_interrupted_tasks(process_start_ms).await;
+    let _ = state
+        .store
+        .recover_interrupted_tasks(process_start_ms)
+        .await;
 
     // ── Providers table ──
     let (pw, uw) = (20usize, 52usize);
@@ -110,23 +113,69 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("┌{}┬{}┐", "─".repeat(pw), "─".repeat(uw));
     tracing::info!("│{:^pw$}│{:^uw$}│", " provider ", " url ");
     for p in &config.proxy.providers {
-        tracing::info!("│ {:<pw1$}│ {:<uw1$} │", p.name, p.url, pw1 = pw - 1, uw1 = uw - 1);
+        tracing::info!(
+            "│ {:<pw1$}│ {:<uw1$} │",
+            p.name,
+            p.url,
+            pw1 = pw - 1,
+            uw1 = uw - 1
+        );
     }
     tracing::info!("└{}┴{}┘", "─".repeat(pw), "─".repeat(uw));
 
     // ── Upstreams header ──
-    tracing::info!("{} upstream(s) — * = active, (effort) = tier override:", config.proxy.upstreams.len());
+    tracing::info!(
+        "{} upstream(s) — * = active, (effort) = tier override:",
+        config.proxy.upstreams.len()
+    );
 
     // Find the dominant keyword for each tier column
     let modal_kw = |rules: &[Option<&str>]| {
-        let kws: Vec<&str> = rules.iter().filter_map(|&r| r).filter(|k| !k.is_empty()).collect();
-        if kws.is_empty() { return "—".into(); }
+        let kws: Vec<&str> = rules
+            .iter()
+            .filter_map(|&r| r)
+            .filter(|k| !k.is_empty())
+            .collect();
+        if kws.is_empty() {
+            return "—".into();
+        }
         let first = kws[0];
-        if kws.iter().all(|&k| k == first) { first.to_string() } else { "—".into() }
+        if kws.iter().all(|&k| k == first) {
+            first.to_string()
+        } else {
+            "—".into()
+        }
     };
-    let h_kws: Vec<Option<&str>> = config.proxy.upstreams.iter().map(|u| u.high.as_ref().and_then(|t| t.keywords.first().map(|s| s.as_str()))).collect();
-    let m_kws: Vec<Option<&str>> = config.proxy.upstreams.iter().map(|u| u.mid.as_ref().and_then(|t| t.keywords.first().map(|s| s.as_str()))).collect();
-    let l_kws: Vec<Option<&str>> = config.proxy.upstreams.iter().map(|u| u.low.as_ref().and_then(|t| t.keywords.first().map(|s| s.as_str()))).collect();
+    let h_kws: Vec<Option<&str>> = config
+        .proxy
+        .upstreams
+        .iter()
+        .map(|u| {
+            u.high
+                .as_ref()
+                .and_then(|t| t.keywords.first().map(|s| s.as_str()))
+        })
+        .collect();
+    let m_kws: Vec<Option<&str>> = config
+        .proxy
+        .upstreams
+        .iter()
+        .map(|u| {
+            u.mid
+                .as_ref()
+                .and_then(|t| t.keywords.first().map(|s| s.as_str()))
+        })
+        .collect();
+    let l_kws: Vec<Option<&str>> = config
+        .proxy
+        .upstreams
+        .iter()
+        .map(|u| {
+            u.low
+                .as_ref()
+                .and_then(|t| t.keywords.first().map(|s| s.as_str()))
+        })
+        .collect();
     let hkw = modal_kw(&h_kws);
     let mkw = modal_kw(&m_kws);
     let lkw = modal_kw(&l_kws);
@@ -134,12 +183,22 @@ async fn main() -> anyhow::Result<()> {
     let ww = [20, 22, 22, 22, 26];
     let hline = |w: usize| "─".repeat(w);
     let sep = |l: &str, m: &str, r: &str| {
-        tracing::info!("{l}{0}{m}{1}{m}{2}{m}{3}{m}{4}{r}",
-            hline(ww[0]), hline(ww[1]), hline(ww[2]), hline(ww[3]), hline(ww[4]));
+        tracing::info!(
+            "{l}{0}{m}{1}{m}{2}{m}{3}{m}{4}{r}",
+            hline(ww[0]),
+            hline(ww[1]),
+            hline(ww[2]),
+            hline(ww[3]),
+            hline(ww[4])
+        );
     };
     let row = |cells: [&str; 5]| {
         let trunc = |s: &str, w: usize| {
-            if s.len() > w - 3 { format!("{}…", &s[..w - 4]) } else { s.to_string() }
+            if s.len() > w - 3 {
+                format!("{}…", &s[..w - 4])
+            } else {
+                s.to_string()
+            }
         };
         tracing::info!(
             "│{:^w0$}│{:^w1$}│{:^w2$}│{:^w3$}│{:^w4$}│",
@@ -148,15 +207,29 @@ async fn main() -> anyhow::Result<()> {
             trunc(cells[2], ww[2]),
             trunc(cells[3], ww[3]),
             trunc(cells[4], ww[4]),
-            w0 = ww[0], w1 = ww[1], w2 = ww[2], w3 = ww[3], w4 = ww[4],
+            w0 = ww[0],
+            w1 = ww[1],
+            w2 = ww[2],
+            w3 = ww[3],
+            w4 = ww[4],
         );
     };
 
     sep("┌", "┬", "┐");
-    row(["upstream", &format!("high ({hkw})"), &format!("mid ({mkw})"), &format!("low ({lkw})"), "default"]);
+    row([
+        "upstream",
+        &format!("high ({hkw})"),
+        &format!("mid ({mkw})"),
+        &format!("low ({lkw})"),
+        "default",
+    ]);
     sep("├", "┼", "┤");
     for u in &config.proxy.upstreams {
-        let dp = u.default.as_ref().map(|d| d.provider.as_str()).unwrap_or("");
+        let dp = u
+            .default
+            .as_ref()
+            .map(|d| d.provider.as_str())
+            .unwrap_or("");
         let cell = |t: Option<&proxy_common::TierRule>| -> String {
             match t {
                 Some(r) if !r.keywords.is_empty() => {
@@ -169,7 +242,11 @@ async fn main() -> anyhow::Result<()> {
                 _ => "—".into(),
             }
         };
-        let star = if u.name == config.proxy.active_upstream { "*" } else { " " };
+        let star = if u.name == config.proxy.active_upstream {
+            "*"
+        } else {
+            " "
+        };
         let effort_note = u.effort.as_deref().unwrap_or("");
         let name_cell = if effort_note.is_empty() || effort_note == "auto" {
             format!("{}{}", u.name, star)
@@ -181,7 +258,8 @@ async fn main() -> anyhow::Result<()> {
             &cell(u.high.as_ref()),
             &cell(u.mid.as_ref()),
             &cell(u.low.as_ref()),
-            &u.default.as_ref()
+            &u.default
+                .as_ref()
                 .map(|d| format!("{}/{}", d.provider, d.model))
                 .unwrap_or_else(|| "—".into()),
         ]);
@@ -199,13 +277,22 @@ async fn main() -> anyhow::Result<()> {
                 config.server.listen_address
             );
         }
-        tracing::info!("[server] listen_address={} with auth_token", config.server.listen_address);
+        tracing::info!(
+            "[server] listen_address={} with auth_token",
+            config.server.listen_address
+        );
     }
 
     let http_router = web::build_router(state.clone());
-    let http_addr = SocketAddr::new(config.server.listen_address.parse()?, config.server.http_port);
+    let http_addr = SocketAddr::new(
+        config.server.listen_address.parse()?,
+        config.server.http_port,
+    );
     let proxy_router = state.relay.clone().build_router();
-    let proxy_addr = SocketAddr::new(config.server.listen_address.parse()?, config.server.proxy_port);
+    let proxy_addr = SocketAddr::new(
+        config.server.listen_address.parse()?,
+        config.server.proxy_port,
+    );
 
     tracing::info!("Dashboard: http://{http_addr}");
     tracing::info!("Anthropic proxy: http://{proxy_addr}");

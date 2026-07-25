@@ -57,54 +57,42 @@ pub async fn get(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> 
         Ok(v) => v,
         Err(e) => return e,
     };
-    let session = state.store.session_get(&sid).await;
-    let tasks = state.store.task_list(&sid, None).await;
-
-    match (session, tasks) {
-        (Ok(Some(s)), Ok(task_list)) => {
-            let requests: Vec<serde_json::Value> = task_list
-                .iter()
-                .map(|t| super::requests::task_to_json(t, Some(&sid)))
-                .collect();
-            Json(json!({
-                "session": {
-                    "id": s.id,
-                    "label": s.name,
-                    "name": s.name,
-                    "status": s.status,
-                    "client_type": s.client_type,
-                    "client_session_id": s.client_session_id,
-                    "cwd": s.cwd,
-                    "project_key": s.project_key,
-                    "created_at": s.created_at,
-                    "started_at": s.created_at,
-                    "last_activity_at": s.last_activity_at,
-                    "ended_at": s.ended_at.unwrap_or(s.last_activity_at),
-                    "task_count": s.task_count,
-                    "request_count": s.task_count,
-                    "completed_task_count": s.completed_task_count,
-                    "failed_task_count": s.failed_task_count,
-                    "priced_task_count": s.priced_task_count,
-                    "total_input_tokens": s.total_input_tokens,
-                    "total_output_tokens": s.total_output_tokens,
-                    "total_cache_creation_tokens": s.total_cache_creation_tokens,
-                    "total_cache_read_tokens": s.total_cache_read_tokens,
-                    "total_cost_microusd": s.total_cost_microusd,
-                    "total_cost": s.total_cost_microusd as f64 / 1_000_000.0,
-                    "total_duration_ms": s.total_duration_ms,
-                    "archive_dirty": s.archive_dirty,
-                    "latest_provider": s.latest_provider,
-                    "latest_model": s.latest_model,
-                    "latest_upstream": s.latest_upstream,
-                },
-                "requests": requests,
-            }))
-            .into_response()
-        }
-        (Ok(None), _) => {
-            (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
-        }
-        (Err(e), _) | (_, Err(e)) => (
+    match state.store.session_get(&sid).await {
+        Ok(Some(s)) => Json(json!({
+            "session": {
+                "id": s.id,
+                "label": s.name,
+                "name": s.name,
+                "status": s.status,
+                "client_type": s.client_type,
+                "client_session_id": s.client_session_id,
+                "cwd": s.cwd,
+                "project_key": s.project_key,
+                "created_at": s.created_at,
+                "started_at": s.created_at,
+                "last_activity_at": s.last_activity_at,
+                "ended_at": s.ended_at.unwrap_or(s.last_activity_at),
+                "task_count": s.task_count,
+                "request_count": s.task_count,
+                "completed_task_count": s.completed_task_count,
+                "failed_task_count": s.failed_task_count,
+                "priced_task_count": s.priced_task_count,
+                "total_input_tokens": s.total_input_tokens,
+                "total_output_tokens": s.total_output_tokens,
+                "total_cache_creation_tokens": s.total_cache_creation_tokens,
+                "total_cache_read_tokens": s.total_cache_read_tokens,
+                "total_cost_microusd": s.total_cost_microusd,
+                "total_cost": s.total_cost_microusd as f64 / 1_000_000.0,
+                "total_duration_ms": s.total_duration_ms,
+                "archive_dirty": s.archive_dirty,
+                "latest_provider": s.latest_provider,
+                "latest_model": s.latest_model,
+                "latest_upstream": s.latest_upstream,
+            }
+        }))
+        .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
