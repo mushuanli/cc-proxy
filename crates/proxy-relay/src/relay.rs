@@ -449,7 +449,9 @@ async fn proxy_request(
     // ── Model name translation ──
     // Replace the original model name with the provider-specific resolved name
     // so the upstream receives the correct model identifier.
-    if !is_transparent && route.resolved_model != request_model {
+    // When resolved_model is empty, pass the original model through unchanged
+    // (transparent mode: default has only provider, no model override).
+    if !is_transparent && !route.resolved_model.is_empty() && route.resolved_model != request_model {
         body_json["model"] = serde_json::json!(route.resolved_model);
         tracing::debug!(
             "[{}] model translation: {} -> {}",

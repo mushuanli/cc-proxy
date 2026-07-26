@@ -270,4 +270,17 @@ mod tests {
         assert_eq!(route.provider, "anthropic");
         assert_eq!(route.configured_model, "claude-opus");
     }
+
+    #[test]
+    fn default_empty_model_passthrough() {
+        let mut config = make_config();
+        config.proxy.upstreams[0].default = Some(crate::upstream::TierRule {
+            provider: "anthropic".into(),
+            model: String::new(), // transparent: no model override
+        });
+        // Haiku doesn't match opus tier, falls through to default
+        let route = resolve_route(&config, "claude-haiku").unwrap();
+        assert_eq!(route.provider, "anthropic");
+        assert_eq!(route.configured_model, ""); // empty → passthrough
+    }
 }

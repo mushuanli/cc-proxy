@@ -92,16 +92,39 @@ token = "sk-..."
 # proxy = ""   # force direct connection, bypass global http_proxy
 
 # ── Upstreams ─────────────────────────────────────────────────────────────────
+# Every upstream MUST have a default tier. The proxy will refuse to start
+# if default is missing.
+#
 # Three tiers match on incoming model name (case-insensitive substring):
 #   high (Opus) → mid (Sonnet) → low (Haiku) → default (fallback)
 #
 # provider: API endpoint (from [[proxy.providers]]). Can be omitted when same as
 #           default, in which case it inherits default's provider.
 # model:    logical ID resolved via model_pricing.providers, or raw provider name.
-#           Empty model → pass original request model name through.
+#           Empty → transparent passthrough, original request model is forwarded
+#           unchanged. Use this when the provider supports dynamic model routing.
 #
 # effort (optional): inject effort level when this upstream is active.
 #   Options: auto | low | medium | high | xhigh | max | ultracode
+#
+# ── Examples ──
+#
+# Passthrough mode — forward all requests as-is to a single provider:
+#   [[proxy.upstreams]]
+#   name = "passthrough"
+#   default = { provider = "deepseek" }
+#
+# Fixed model mode — all requests resolve to the same model:
+#   [[proxy.upstreams]]
+#   name = "fixed"
+#   default = { provider = "deepseek", model = "deepseek-v4-pro" }
+#
+# Tiered routing — different models per tier, defaults inherited:
+#   [[proxy.upstreams]]
+#   name = "tiered"
+#   high    = { model = "claude-opus" }
+#   low     = { model = "claude-haiku" }
+#   default = { provider = "anthropic", model = "claude-sonnet" }
 
 [[proxy.upstreams]]
 name    = "deepseek-pro"

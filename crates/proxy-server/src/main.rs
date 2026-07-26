@@ -168,7 +168,12 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!("└{}┴{}┘", "─".repeat(pw), "─".repeat(uw));
 
-    // ── Upstreams header ──
+    // ── Upstreams: validate + table ──
+    for u in &config.proxy.upstreams {
+        if u.default.is_none() {
+            anyhow::bail!("upstream '{}' is missing a default tier", u.name);
+        }
+    }
     tracing::info!(
         "{} upstream(s) — * = active, (effort) = tier override:",
         config.proxy.upstreams.len()
@@ -245,7 +250,13 @@ async fn main() -> anyhow::Result<()> {
             &cell(u.low.as_ref()),
             &u.default
                 .as_ref()
-                .map(|d| format!("{}/{}", d.provider, d.model))
+                .map(|d| {
+                    if d.model.is_empty() {
+                        format!("{} (passthrough)", d.provider)
+                    } else {
+                        format!("{}/{}", d.provider, d.model)
+                    }
+                })
                 .unwrap_or_else(|| "—".into()),
         ]);
     }
