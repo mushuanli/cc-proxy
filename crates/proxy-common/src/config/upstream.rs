@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TierRule {
     #[serde(default)]
-    pub keywords: Vec<String>,
-    #[serde(default)]
     pub provider: String,
     #[serde(default)]
     pub model: String,
@@ -13,15 +11,21 @@ pub struct TierRule {
 
 impl TierRule {
     pub fn is_active(&self) -> bool {
-        !self.provider.is_empty() && self.keywords.iter().any(|kw| !kw.is_empty())
+        !self.provider.is_empty() || !self.model.is_empty()
     }
 
-    pub fn matches(&self, model_lower: &str) -> bool {
-        self.is_active()
-            && self
-                .keywords
-                .iter()
-                .any(|kw| !kw.is_empty() && model_lower.contains(kw.to_lowercase().as_str()))
+    pub fn matches(&self, model_lower: &str, tier_label: &str) -> bool {
+        self.is_active() && model_lower.contains(tier_label)
+    }
+
+    /// Resolve the effective provider, inheriting from default when empty.
+    pub fn provider_or(&self, default: Option<&TierRule>) -> String {
+        if !self.provider.is_empty() {
+            self.provider.clone()
+        } else {
+            default.and_then(|d| if !d.provider.is_empty() { Some(d.provider.clone()) } else { None })
+                .unwrap_or_default()
+        }
     }
 }
 

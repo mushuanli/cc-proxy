@@ -144,17 +144,26 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
     for u in &proxy.upstreams {
         let mut ut = toml_edit::Table::new();
         ut.insert("name", toml_edit::value(u.name.as_str()));
-        if let Some(ref high) = u.high {
-            ut.insert("high", tier_rule_to_item(high));
-        }
-        if let Some(ref mid) = u.mid {
-            ut.insert("mid", tier_rule_to_item(mid));
-        }
-        if let Some(ref low) = u.low {
-            ut.insert("low", tier_rule_to_item(low));
+
+        let def = u.default.as_ref();
+        let def_provider = def.map(|d| d.provider.as_str());
+
+        for (tier, rule) in [
+            ("high", u.high.as_ref()),
+            ("mid", u.mid.as_ref()),
+            ("low", u.low.as_ref()),
+        ] {
+            if let Some(r) = rule {
+                if let Some(d) = def {
+                    if r.provider == d.provider && r.model == d.model {
+                        continue;
+                    }
+                }
+                ut.insert(tier, tier_rule_to_item(r, def_provider));
+            }
         }
         if let Some(ref default) = u.default {
-            ut.insert("default", tier_rule_to_item(default));
+            ut.insert("default", tier_rule_to_item(default, None));
         }
         if let Some(ref effort) = u.effort {
             ut.insert("effort", toml_edit::value(effort.as_str()));
@@ -166,17 +175,11 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
     doc["proxy"] = toml_edit::Item::Table(tbl);
 }
 
-fn tier_rule_to_item(rule: &TierRule) -> toml_edit::Item {
+fn tier_rule_to_item(rule: &TierRule, def_provider: Option<&str>) -> toml_edit::Item {
     let mut tbl = toml_edit::Table::new();
-    let mut kw_arr = toml_edit::Array::new();
-    for k in &rule.keywords {
-        kw_arr.push(k.as_str());
+    if def_provider.map_or(true, |dp| rule.provider != dp) {
+        tbl.insert("provider", toml_edit::value(rule.provider.as_str()));
     }
-    tbl.insert(
-        "keywords",
-        toml_edit::value(toml_edit::Value::Array(kw_arr)),
-    );
-    tbl.insert("provider", toml_edit::value(rule.provider.as_str()));
     tbl.insert("model", toml_edit::value(rule.model.as_str()));
     toml_edit::Item::Table(tbl)
 }

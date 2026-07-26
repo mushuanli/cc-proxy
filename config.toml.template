@@ -3,15 +3,14 @@
 #
 # Three-layer architecture:
 #   model_pricing  — logical model families with canonical pricing (defined once)
-#   providers      — API endpoints: URL + token only (no model list here)
-#   proxy.upstreams — routing strategies: map Claude tier keywords → provider + model
+#   providers      — API endpoints: URL + token only
+#   proxy.upstreams — routing strategies: map Opus/Sonnet/Haiku tiers → provider + model
 #
 # Routing flow:
 #   Request(model="claude-sonnet-4-6")
-#     → active upstream tier keyword match ("sonnet")
+#     → tier match on model name (opus / sonnet / haiku)
 #     → provider lookup  →  token injection
-#     → model translation: logical ID "claude-sonnet"
-#         → providers["anthropic"][0] = "claude-4.6-sonnet"
+#     → model translation: logical ID → provider-specific model name
 #     → cost lookup via model_pricing
 
 # ── Global Model Pricing ──────────────────────────────────────────────────────
@@ -21,7 +20,6 @@
 #
 # providers.<name> = []          model name at that provider = logical id
 # providers.<name> = ["a","b"]   routing uses "a"; reverse-lookup matches "a" or "b"
-# key absent                     that provider does not support this model
 
 model_pricing = [
     { id = "claude-fable",      price = [10.0, 50.0, 12.50, 1.0], providers = { anthropic = ["claude-fable-5"] } },
@@ -36,6 +34,7 @@ model_pricing = [
 
     { id = "deepseek-v4-flash", price = [0.1429, 0.2857, 0.1429, 0.0029],    providers = { deepseek = [] } },
 ]
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 [logging]
 level = "info"   # trace | debug | info | warn | error
@@ -92,51 +91,39 @@ url   = "https://api.deepseek.com/anthropic"
 token = "sk-..."
 # proxy = ""   # force direct connection, bypass global http_proxy
 
-# ── Upstream: deepseek-only ───────────────────────────────────────────────────
-# Routes all Claude tiers to DeepSeek (cost-efficient, no Anthropic account needed).
+# ── Upstreams ─────────────────────────────────────────────────────────────────
+# Three tiers match on incoming model name (case-insensitive substring):
+#   high (Opus) → mid (Sonnet) → low (Haiku) → default (fallback)
 #
-# Tier matching: case-insensitive keyword substring match on incoming model name.
-#   high → checked first   low → checked last   default → fallback
-#
-# model field: logical ID (e.g. "claude-opus") resolved via model_pricing.providers,
-#              or raw provider model name (passed through unchanged).
-#              Empty model → pass original request model name through.
+# provider: API endpoint (from [[proxy.providers]]). Can be omitted when same as
+#           default, in which case it inherits default's provider.
+# model:    logical ID resolved via model_pricing.providers, or raw provider name.
+#           Empty model → pass original request model name through.
 #
 # effort (optional): inject effort level when this upstream is active.
 #   Options: auto | low | medium | high | xhigh | max | ultracode
-#   Absent or "auto" = pass through client value unchanged.
 
 [[proxy.upstreams]]
 name    = "deepseek-pro"
-high    = { keywords = ["opus"],  provider = "deepseek", model = "deepseek-v4-pro" }
-mid     = { keywords = ["sonnet"],         provider = "deepseek", model = "deepseek-v4-pro" }
-low     = { keywords = ["haiku"],          provider = "deepseek", model = "deepseek-v4-flash" }
+low     = { model = "deepseek-v4-flash" }
 default = { provider = "deepseek", model = "deepseek-v4-pro" }
 
 [[proxy.upstreams]]
 name    = "deepseek"
-high    = { keywords = ["opus"],  provider = "deepseek", model = "deepseek-v4-pro" }
-mid     = { keywords = ["sonnet"],         provider = "deepseek", model = "deepseek-v4-flash" }
-low     = { keywords = ["haiku"],          provider = "deepseek", model = "deepseek-v4-flash" }
+mid     = { model = "deepseek-v4-flash" }
+low     = { model = "deepseek-v4-flash" }
 default = { provider = "deepseek", model = "deepseek-v4-pro" }
 
 [[proxy.upstreams]]
 name    = "deepseek-flash"
-high    = { keywords = ["opus"],  provider = "deepseek", model = "deepseek-v4-flash" }
-mid     = { keywords = ["sonnet"],         provider = "deepseek", model = "deepseek-v4-flash" }
-low     = { keywords = ["haiku"],          provider = "deepseek", model = "deepseek-v4-flash" }
-default = { provider = "deepseek", model = "deepseek-v4-pro" }
-
-# ── Upstream: anthropic-native ────────────────────────────────────────────────
-# Routes to real Anthropic models using logical IDs.
+default = { provider = "deepseek", model = "deepseek-v4-flash" }
 
 [[proxy.upstreams]]
 name    = "anthropic-fable"
-high    = { keywords = ["opus"],  provider = "anthropic", model = "claude-fable" }
-mid     = { keywords = ["sonnet"],   provider = "anthropic", model = "claude-sonnet" }
-low     = { keywords = ["haiku"],  provider = "anthropic", model = "claude-haiku" }
+high    = { model = "claude-fable" }
+low     = { model = "claude-haiku" }
 default = { provider = "anthropic", model = "claude-sonnet" }
-effort  = "high"   # override global effort when this upstream is active
+effort  = "high"
 
 [[proxy.upstreams]]
 name    = "anthropic-sonnet5"
@@ -144,14 +131,12 @@ default = { provider = "anthropic", model = "claude-sonnet5" }
 
 [[proxy.upstreams]]
 name    = "anthropic"
-high    = { keywords = ["opus"],  provider = "anthropic", model = "claude-opus" }
-mid     = { keywords = ["sonnet"],   provider = "anthropic", model = "claude-sonnet" }
-low     = { keywords = ["haiku"],  provider = "anthropic", model = "claude-haiku" }
+high    = { model = "claude-opus" }
+low     = { model = "claude-haiku" }
 default = { provider = "anthropic", model = "claude-sonnet" }
 
 [[proxy.upstreams]]
 name    = "mix"
-high    = { keywords = ["opus"],  provider = "anthropic", model = "claude-opus" }
-mid     = { keywords = ["sonnet"],   provider = "deepseek", model = "deepseek-v4-pro" }
-low     = { keywords = ["haiku"],  provider = "deepseek", model = "deepseek-v4-flash" }
+high    = { provider = "anthropic", model = "claude-opus" }
+low     = { model = "deepseek-v4-flash" }
 default = { provider = "deepseek", model = "deepseek-v4-pro" }

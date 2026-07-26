@@ -189,6 +189,14 @@ td.col-req { padding: 6px 10px; white-space: normal; overflow: visible; }
     width: 14px;
     text-align: center;
 }
+.tl-session {
+    font-weight: 600;
+    color: var(--accent2);
+    background: color-mix(in srgb, var(--accent2) 12%, transparent);
+    padding: 0 4px;
+    border-radius: 3px;
+    font-size: 0.68rem;
+}
 .tl-recording .tl-status { color: var(--accent, #4a90a4); animation: tl-pulse 2s ease-in-out infinite; }
 .tl-completed .tl-status { color: var(--success, #2e7d32); }
 .tl-failed .tl-status { color: var(--error, #c62828); }

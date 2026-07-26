@@ -331,7 +331,6 @@ pub struct ProviderInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TierRuleInfo {
-    pub keywords: Vec<String>,
     pub provider: String,
     pub model: String,
 }
@@ -339,7 +338,6 @@ pub struct TierRuleInfo {
 impl From<&crate::config::upstream::TierRule> for TierRuleInfo {
     fn from(t: &crate::config::upstream::TierRule) -> Self {
         Self {
-            keywords: t.keywords.clone(),
             provider: t.provider.clone(),
             model: t.model.clone(),
         }

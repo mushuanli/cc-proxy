@@ -61,9 +61,12 @@ export function renderTimeline() {
             : '';
         const dur = item.duration_ms != null ? `${item.duration_ms}ms` : '';
 
+        const sidLabel = state.sessionCache[item.session_id] || shortSid(item.session_id);
+
         div.innerHTML = `
             <div class="timeline-row1">${summary}</div>
             <div class="timeline-row2">
+                <span class="tl-session">${esc(sidLabel)}</span>
                 <span class="tl-status">${statusLabel(item.status)}</span>
                 <span>${esc(time)}</span>
                 ${statusCode ? `<span>${esc(statusCode)}</span>` : ''}

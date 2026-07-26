@@ -59,13 +59,17 @@ pub fn resolve_route_for(
 /// Match the tier rules for a request model.
 fn resolve_tier(upstream: &UpstreamConfig, request_model: &str) -> (String, String) {
     let lower = request_model.to_lowercase();
+    let def = upstream.default.as_ref();
 
-    for rule in [&upstream.high, &upstream.mid, &upstream.low]
-        .into_iter()
-        .flatten()
-    {
-        if rule.matches(&lower) {
-            return (rule.provider.clone(), rule.model.clone());
+    for (rule, label) in [
+        (&upstream.high, "opus"),
+        (&upstream.mid, "sonnet"),
+        (&upstream.low, "haiku"),
+    ] {
+        if let Some(ref r) = rule {
+            if r.matches(&lower, label) {
+                return (r.provider_or(def), r.model.clone());
+            }
         }
     }
 
@@ -143,14 +147,12 @@ mod tests {
         config.proxy.upstreams.push(UpstreamConfig {
             name: "default".into(),
             high: Some(crate::upstream::TierRule {
-                keywords: vec!["opus".into()],
                 provider: "anthropic".into(),
                 model: "claude-opus".into(),
             }),
             mid: None,
             low: None,
             default: Some(crate::upstream::TierRule {
-                keywords: vec![],
                 provider: "anthropic".into(),
                 model: "claude-sonnet".into(),
             }),
@@ -218,7 +220,6 @@ mod tests {
             mid: None,
             low: None,
             default: Some(crate::upstream::TierRule {
-                keywords: vec![],
                 provider: "anthropic".into(),
                 model: "raw-model".into(),
             }),
@@ -239,7 +240,6 @@ mod tests {
             mid: None,
             low: None,
             default: Some(crate::upstream::TierRule {
-                keywords: vec![],
                 provider: "anthropic".into(),
                 model: String::new(),
             }),
@@ -257,5 +257,17 @@ mod tests {
         assert_eq!(billing.pricing_model_id, "claude-sonnet");
         assert_eq!(billing.rates.input_microusd, 3_000_000);
         assert_eq!(billing.rates.output_microusd, 15_000_000);
+    }
+
+    #[test]
+    fn tier_inherits_provider_from_default() {
+        let mut config = make_config();
+        config.proxy.upstreams[0].high = Some(crate::upstream::TierRule {
+            provider: String::new(), // inherit from default
+            model: "claude-opus".into(),
+        });
+        let route = resolve_route(&config, "claude-opus-4-6").unwrap();
+        assert_eq!(route.provider, "anthropic");
+        assert_eq!(route.configured_model, "claude-opus");
     }
 }

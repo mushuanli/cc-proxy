@@ -567,9 +567,9 @@ export function renderUpstreamTable() {
             Transparent Proxy<span class="ut-proxy-th-active">${isForbid ? '⊘ Forbid' : (isAuto ? '◉ Auto' : esc(proxyActiveName))}</span>
         </th>
         <th class="ut-th ut-col-active">Relay</th>
-        <th class="ut-th ut-col-tier">${t('settings.tier_high')}</th>
-        <th class="ut-th ut-col-tier">${t('settings.tier_mid')}</th>
-        <th class="ut-th ut-col-tier">${t('settings.tier_low')}</th>
+        <th class="ut-th ut-col-tier">Opus</th>
+        <th class="ut-th ut-col-tier">Sonnet</th>
+        <th class="ut-th ut-col-tier">Haiku</th>
         <th class="ut-th ut-col-tier">${t('settings.tier_default')}</th>
         <th class="ut-th ut-col-effort">${t('settings.effort')}</th>
         <th class="ut-th ut-col-actions"></th>
@@ -579,13 +579,20 @@ export function renderUpstreamTable() {
         body.innerHTML = `<tr><td colspan="9" class="mx-empty">${t('settings.no_upstreams')}</td></tr>`;
         return;
     }
-    body.innerHTML = state.upstreamList.map(u => upstreamRowHtml(u)).join('');
+    const sorted = [...state.upstreamList].sort((a, b) => a.name.localeCompare(b.name));
+    body.innerHTML = sorted.map(u => upstreamRowHtml(u)).join('');
     bindUpstreamTableEvents();
 }
 
-function tierCellHtml(rule) {
+function tierCellHtml(rule, defRule) {
     if (!rule) return '<span class="mx-none">—</span>';
-    const val = [rule.provider, rule.model].filter(Boolean).join('/');
+    if (defRule && rule.provider === defRule.provider && rule.model === defRule.model) {
+        return '<span class="mx-none">—</span>';
+    }
+    const sameProvider = defRule && rule.provider === defRule.provider;
+    const val = sameProvider
+        ? (rule.model || rule.provider)
+        : [rule.provider, rule.model].filter(Boolean).join('/');
     return `<span class="ut-tier-val has-val">${esc(val)}</span>`;
 }
 
@@ -596,13 +603,14 @@ function upstreamRowHtml(u) {
     const proxyCell = u.proxy_active
         ? `<span class="ut-proxy-on" title="Transparent proxy active (click to change)">◉</span>`
         : `<span class="ut-proxy-off" title="Click to use as transparent proxy">◯</span>`;
+    const defRule = u.default || null;
     return `<tr class="ut-row${u.active ? ' ut-row-active' : ''}" id="ut-row-${esc(u.name)}">
         <td class="ut-td ut-col-name"><span class="ut-name">${esc(u.name)}</span>${u.active ? `<span class="active-badge">${t('settings.active_badge')}</span>` : ''}</td>
         <td class="ut-td ut-col-active ut-proxy-cell" data-name="${esc(u.name)}">${proxyCell}</td>
         <td class="ut-td ut-col-active">${activeCell}</td>
-        <td class="ut-td ut-col-tier">${tierCellHtml(u.high)}</td>
-        <td class="ut-td ut-col-tier">${tierCellHtml(u.mid)}</td>
-        <td class="ut-td ut-col-tier">${tierCellHtml(u.low)}</td>
+        <td class="ut-td ut-col-tier">${tierCellHtml(u.high, defRule)}</td>
+        <td class="ut-td ut-col-tier">${tierCellHtml(u.mid, defRule)}</td>
+        <td class="ut-td ut-col-tier">${tierCellHtml(u.low, defRule)}</td>
         <td class="ut-td ut-col-tier">${tierCellHtml(u.default)}</td>
         <td class="ut-td ut-col-effort">${esc(u.effort || 'auto')}</td>
         <td class="ut-td ut-col-actions">
@@ -621,8 +629,6 @@ function upstreamEditRowHtml(name, u, simpleTransparent = false) {
         const rule = u?.[tier];
         return `<div class="ut-edit-tier-row">
             <span class="tier-badge ${badge}">${t(`settings.tier_${tier}`)}</span>
-            <label>KW</label>
-            <input type="text" class="ue-kw" data-tier="${tier}" value="${rule ? esc(rule.keywords.join(', ')) : ''}">
             <label>${t('settings.provider')}</label>
             <select class="ut-provider-select ue-provider" data-tier="${tier}"><option value="">— none —</option></select>
             <label>Relay Model</label>
@@ -729,12 +735,11 @@ export function closeUpstreamTableEdit() {
 export function getTierPayload(tier) {
     const form = document.querySelector('.ut-edit-row');
     if (!form) return null;
-    const kw = form.querySelector(`.ue-kw[data-tier="${tier}"]`)?.value.trim() ?? '';
     const provider = form.querySelector(`.ue-provider[data-tier="${tier}"]`)?.value ?? '';
     const model = form.querySelector(`.ue-model[data-tier="${tier}"]`)?.value.trim() ?? '';
     if (!provider && !model) return null;
     return {
-        keywords: tier !== 'default' && kw ? kw.split(',').map(s => s.trim()).filter(Boolean) : [],
+        keywords: [],
         provider,
         model,
     };

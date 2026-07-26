@@ -904,6 +904,11 @@ export function renderDetailBody(headers, body) {
 export function formatSseContent(req) {
     const parts = [];
 
+    // Collapse single newlines into spaces, preserve paragraph breaks (double newlines)
+    function collapseText(s) {
+        return s.replace(/\n\n/g, '\x00').replace(/\n/g, ' ').replace(/\x00/g, '\n\n');
+    }
+
     // New architecture: response_body is a NormalizedResponse object
     const body = typeof req.response_body === 'object' && req.response_body !== null
         ? req.response_body : null;
@@ -911,12 +916,12 @@ export function formatSseContent(req) {
     if (body) {
         if (body.thinking && body.thinking.length > 0) {
             parts.push('=== Thinking ===');
-            body.thinking.forEach(t => parts.push(t));
+            body.thinking.forEach(t => parts.push(collapseText(t)));
             parts.push('');
         }
         if (body.text && body.text.length > 0) {
             parts.push('=== Response ===');
-            body.text.forEach(t => parts.push(t));
+            body.text.forEach(t => parts.push(collapseText(t)));
             parts.push('');
         }
         if (body.tool_calls && body.tool_calls.length > 0) {

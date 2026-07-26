@@ -205,10 +205,10 @@ async fn handle_connect_tunnel(request: &mut axum::extract::Request, uri: Uri) -
                 let mut upgraded = hyper_util::rt::TokioIo::new(upgraded);
                 let mut upstream = upstream;
                 if let Err(e) = tokio::io::copy_bidirectional(&mut upgraded, &mut upstream).await {
-                    tracing::debug!("[proxy] CONNECT {} closed: {}", target, e);
+                    tracing::debug!("CONNECT {} closed: {}", target, e);
                 }
             }
-            Err(e) => tracing::debug!("[proxy] CONNECT upgrade failed: {}", e),
+            Err(e) => tracing::debug!("CONNECT upgrade failed: {}", e),
         }
     });
 
@@ -345,7 +345,7 @@ async fn proxy_request(
             ),
             None => {
                 tracing::error!(
-                    "[proxy] auto-detect failed: no provider matches request URL: {}",
+                    "auto-detect failed: no provider matches request URL: {}",
                     path_or_url
                 );
                 return Response::builder()
@@ -385,20 +385,13 @@ async fn proxy_request(
 
     // session_id is validated (ASCII-only), safe for byte slicing
     let sid_s = session_id.as_str();
-    let sid_short = if sid_s.len() > 8 {
-        &sid_s[sid_s.len() - 8..]
+    let sid_short: String = if sid_s.len() > 8 {
+        sid_s[sid_s.len() - 8..].to_string()
     } else {
-        sid_s
+        sid_s.to_string()
     };
     tracing::info!(
-        "[relay] {}:{} => [{}:{}]",
-        sid_short,
-        request_model,
-        route.provider,
-        route.resolved_model,
-    );
-    tracing::info!(
-        "[proxy] [{}] {}[{}] => [{}:{}]",
+        "[{}] {}[{}] => [{}:{}]",
         sid_short,
         request_model,
         msg_count,
@@ -459,7 +452,7 @@ async fn proxy_request(
     if !is_transparent && route.resolved_model != request_model {
         body_json["model"] = serde_json::json!(route.resolved_model);
         tracing::debug!(
-            "[relay] [{}] model translation: {} -> {}",
+            "[{}] model translation: {} -> {}",
             sid_short,
             request_model,
             route.resolved_model,
@@ -603,7 +596,7 @@ async fn proxy_request(
         Ok(r) => Some(r),
         Err(e) => {
             tracing::error!(
-                "[proxy] [{}] task_start failed: {} — aborting upstream dispatch",
+                "[{}] task_start failed: {} — aborting upstream dispatch",
                 sid_short,
                 e
             );
@@ -629,7 +622,7 @@ async fn proxy_request(
     {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::error!("[proxy] [{}] upstream dispatch failed: {}", sid_short, e);
+            tracing::error!("[{}] upstream dispatch failed: {}", sid_short, e);
 
             let failed_at = chrono::Utc::now().timestamp_millis();
             let duration_ms = start.elapsed().as_millis() as i64;
@@ -896,7 +889,8 @@ async fn proxy_request(
                     .map(|t| safe_truncate_bytes(t, 200).to_string())
                     .unwrap_or_default();
                 tracing::warn!(
-                    "[proxy] [stream] {} -> {} HTTP {} err={} body={}",
+                    "[stream] [{}] {} -> {} HTTP {} err={} body={}",
+                    sid_short,
                     log_model,
                     resolved_model,
                     meta.status_code,
@@ -905,7 +899,8 @@ async fn proxy_request(
                 );
             } else {
                 tracing::info!(
-                    "[proxy] [stream] {} in={} out={} dur={}ms",
+                    "[stream] [{}] {} in={} out={} dur={}ms",
+                    sid_short,
                     resolved_model,
                     meta.input_tokens,
                     meta.output_tokens,
@@ -927,7 +922,7 @@ async fn proxy_request(
             .map(|t| safe_truncate_bytes(t, 200).to_string())
             .unwrap_or_default();
         tracing::warn!(
-            "[proxy] [{}] {} -> {} (provider={}) HTTP {} err={} body={}",
+            "[{}] {} -> {} (provider={}) HTTP {} err={} body={}",
             sid_short,
             request_model,
             route.resolved_model,
@@ -1056,7 +1051,7 @@ async fn proxy_request(
     if upstream_response.error.is_some() || is_http_error {
         let err_detail = upstream_response.error.as_deref().unwrap_or("no body");
         tracing::error!(
-            "[proxy] [{}] {} HTTP {} err={} in={} out={} dur={}ms",
+            "[{}] {} HTTP {} err={} in={} out={} dur={}ms",
             sid_short,
             route.resolved_model,
             upstream_response.status_code,
@@ -1073,7 +1068,7 @@ async fn proxy_request(
                 / 1_000_000.0
                 / 1_000_000.0;
         tracing::info!(
-            "[proxy] [{}] {} in={} out={} cache_w={} cache_r={} cost=${:.6} dur={}ms",
+            "[{}] {} in={} out={} cache_w={} cache_r={} cost=${:.6} dur={}ms",
             sid_short,
             route.resolved_model,
             upstream_response.input_tokens,

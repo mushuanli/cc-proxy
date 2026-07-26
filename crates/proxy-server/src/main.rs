@@ -8,6 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tracing_subscriber::fmt::FormatEvent;
+use tracing_subscriber::fmt::FormatFields;
+use tracing_subscriber::layer::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use proxy_common::{ConfigStore, EventBus};
@@ -85,11 +90,51 @@ impl AppState {
     }
 }
 
+// ── Custom log format: HH:MM:SS.mmm [I] module: message ──
+
+struct CompactFormat;
+
+impl<S, N> FormatEvent<S, N> for CompactFormat
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::format::FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        // Timestamp
+        let now = chrono::Local::now();
+        write!(writer, "{} ", now.format("%H:%M:%S%.3f"))?;
+        // Level
+        let meta = event.metadata();
+        let level = match *meta.level() {
+            tracing::Level::ERROR => 'E',
+            tracing::Level::WARN => 'W',
+            tracing::Level::INFO => 'I',
+            tracing::Level::DEBUG => 'D',
+            tracing::Level::TRACE => 'T',
+        };
+        let target = meta.target().trim_start_matches("proxy_");
+        write!(writer, "[{level}] {target}: ")?;
+        // Fields (message)
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(CompactFormat)
+                .with_filter(
+                    EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| EnvFilter::new("info")),
+                ),
         )
         .init();
 
@@ -129,58 +174,7 @@ async fn main() -> anyhow::Result<()> {
         config.proxy.upstreams.len()
     );
 
-    // Find the dominant keyword for each tier column
-    let modal_kw = |rules: &[Option<&str>]| {
-        let kws: Vec<&str> = rules
-            .iter()
-            .filter_map(|&r| r)
-            .filter(|k| !k.is_empty())
-            .collect();
-        if kws.is_empty() {
-            return "—".into();
-        }
-        let first = kws[0];
-        if kws.iter().all(|&k| k == first) {
-            first.to_string()
-        } else {
-            "—".into()
-        }
-    };
-    let h_kws: Vec<Option<&str>> = config
-        .proxy
-        .upstreams
-        .iter()
-        .map(|u| {
-            u.high
-                .as_ref()
-                .and_then(|t| t.keywords.first().map(|s| s.as_str()))
-        })
-        .collect();
-    let m_kws: Vec<Option<&str>> = config
-        .proxy
-        .upstreams
-        .iter()
-        .map(|u| {
-            u.mid
-                .as_ref()
-                .and_then(|t| t.keywords.first().map(|s| s.as_str()))
-        })
-        .collect();
-    let l_kws: Vec<Option<&str>> = config
-        .proxy
-        .upstreams
-        .iter()
-        .map(|u| {
-            u.low
-                .as_ref()
-                .and_then(|t| t.keywords.first().map(|s| s.as_str()))
-        })
-        .collect();
-    let hkw = modal_kw(&h_kws);
-    let mkw = modal_kw(&m_kws);
-    let lkw = modal_kw(&l_kws);
-
-    let ww = [20, 22, 22, 22, 26];
+    let ww = [20, 20, 20, 20, 32];
     let hline = |w: usize| "─".repeat(w);
     let sep = |l: &str, m: &str, r: &str| {
         tracing::info!(
@@ -216,27 +210,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     sep("┌", "┬", "┐");
-    row([
-        "upstream",
-        &format!("high ({hkw})"),
-        &format!("mid ({mkw})"),
-        &format!("low ({lkw})"),
-        "default",
-    ]);
+    row(["upstream", "Opus", "Sonnet", "Haiku", "default"]);
     sep("├", "┼", "┤");
     for u in &config.proxy.upstreams {
-        let dp = u
-            .default
-            .as_ref()
-            .map(|d| d.provider.as_str())
-            .unwrap_or("");
+        let def = u.default.as_ref();
         let cell = |t: Option<&proxy_common::TierRule>| -> String {
             match t {
-                Some(r) if !r.keywords.is_empty() => {
-                    if r.provider == dp || r.provider.is_empty() {
-                        r.model.clone()
-                    } else {
-                        format!("{}/{}", r.provider, r.model)
+                Some(r) if r.is_active() => {
+                    let dp = r.provider_or(def);
+                    match def {
+                        Some(d) if r.provider == d.provider && r.model == d.model => "—".into(),
+                        Some(d) if r.provider.is_empty() || r.provider == d.provider => r.model.clone(),
+                        _ => format!("{}/{}", dp, r.model),
                     }
                 }
                 _ => "—".into(),
@@ -295,7 +280,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     tracing::info!("Dashboard: http://{http_addr}");
-    tracing::info!("Anthropic proxy: http://{proxy_addr}");
+    tracing::info!("API relay: http://{proxy_addr}");
 
     let http_listener = TcpListener::bind(http_addr).await?;
     let proxy_listener = TcpListener::bind(proxy_addr).await?;
