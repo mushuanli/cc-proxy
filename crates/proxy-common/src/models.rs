@@ -288,6 +288,9 @@ pub struct ProxiedRequest {
     /// Whether a configured pricing rule matched this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priced: Option<bool>,
+    /// Cost in USD, computed from token usage × frozen rates. None while Recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +315,7 @@ pub struct SessionSnapshot {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cost_microusd: i64,
+    pub total_cost: f64,
     pub latest_model: Option<String>,
     pub latest_provider: Option<String>,
 }

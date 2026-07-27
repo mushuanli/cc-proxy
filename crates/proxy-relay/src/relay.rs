@@ -713,6 +713,7 @@ async fn proxy_request(
         let ws_include_bodies_val = ws_include_bodies;
         let msg_count_val = msg_count;
         let priced_val = priced;
+        let rates_val = billing.rates;
         let is_transparent_val = is_transparent;
         let body_clone = body.clone();
         let body_json_clone = body_json.clone();
@@ -816,6 +817,16 @@ async fn proxy_request(
             };
 
             let current_operation = response_operation_preview(&meta.normalized);
+            let cost = if priced_val {
+                let micro_usd = (meta.input_tokens as f64 * rates_val.input_microusd as f64
+                    + meta.output_tokens as f64 * rates_val.output_microusd as f64
+                    + meta.cache_creation_tokens as f64 * rates_val.cache_write_microusd as f64
+                    + meta.cache_read_tokens as f64 * rates_val.cache_read_microusd as f64)
+                    / 1_000_000.0;
+                Some(micro_usd / 1_000_000.0)
+            } else {
+                None
+            };
             let mut proxied = proxy_common::models::ProxiedRequest {
                 id: task_id.as_str().to_string(),
                 timestamp: chrono::DateTime::from_timestamp_millis(task_started_at)
@@ -855,6 +866,7 @@ async fn proxy_request(
                 prompt: prompt_clone,
                 current_operation,
                 priced: Some(priced_val),
+                cost,
                 sse_events: meta.sse_events.clone(),
                 ..Default::default()
             };

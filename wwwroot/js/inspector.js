@@ -194,7 +194,7 @@ export function getSessionGroups() {
             g.totalOut = meta?.total_output_tokens ?? g.requests.reduce((s, r) => s + (r.output_tokens || 0), 0);
             g.totalCacheCreate = meta?.total_cache_creation_tokens ?? g.requests.reduce((s, r) => s + (r.cache_creation_input_tokens || 0), 0);
             g.totalCacheRead = meta?.total_cache_read_tokens ?? g.requests.reduce((s, r) => s + (r.cache_read_input_tokens || 0), 0);
-            g.totalCost = meta?.total_cost ?? g.requests.reduce((s, r) => s + formatCostNum(r), 0);
+            g.totalCost = meta?.total_cost ?? (meta?.total_cost_microusd != null ? meta.total_cost_microusd / 1_000_000 : g.requests.reduce((s, r) => s + formatCostNum(r), 0));
             g.unpricedCount = g.requests.filter(r => r.priced === false).length;
             g.models = Array.from(g.models);
             g.request_count = Math.max(g.requests.length, meta?.request_count || g._metaRequestCount || 0);

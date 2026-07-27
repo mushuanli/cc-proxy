@@ -435,6 +435,7 @@ impl ProxyStore {
             total_input_tokens: session.total_input_tokens,
             total_output_tokens: session.total_output_tokens,
             total_cost_microusd: session.total_cost_microusd,
+            total_cost: session.total_cost_microusd as f64 / 1_000_000.0,
             latest_model: session.latest_model.clone(),
             latest_provider: session.latest_provider.clone(),
         }
