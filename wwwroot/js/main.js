@@ -152,6 +152,17 @@ function handleMessage(msg) {
             console.warn('[ws] Resync received — running full resync');
             resyncState('lagged');
             break;
+        case 'UpstreamChanged':
+            applyUpstreamState(
+                msg.payload.active_upstream,
+                msg.payload.active_proxy_upstream,
+                msg.payload.upstreams,
+                msg.payload.providers,
+                msg.payload.active_effort,
+                msg.payload.model_pricing,
+                msg.payload.http_proxy,
+            );
+            break;
     }
 }
 

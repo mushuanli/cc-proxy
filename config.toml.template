@@ -21,19 +21,47 @@
 # providers.<name> = []          model name at that provider = logical id
 # providers.<name> = ["a","b"]   routing uses "a"; reverse-lookup matches "a" or "b"
 
-model_pricing = [
-    { id = "claude-fable",      price = [10.0, 50.0, 12.50, 1.0], providers = { anthropic = ["claude-fable-5"] } },
-    { id = "claude-opus",       price = [5.0, 25.0, 6.25, 0.5], providers = { anthropic = ["claude-opus-4-8"] } },
+[[model_pricing]]
+id = "claude-fable"
+price = [10.0, 50.0, 12.50, 1.0]
+[model_pricing.providers]
+anthropic = ["claude-fable-5"]
 
-    { id = "claude-sonnet5",     price = [3.0, 15.0, 3.75, 0.3], providers = { anthropic = ["claude-sonnet-5"] } },
-    { id = "claude-sonnet",     price = [3.0, 15.0, 3.75, 0.3], providers = { anthropic = ["claude-sonnet-4-6"] } },
+[[model_pricing]]
+id = "claude-opus"
+price = [5.0, 25.0, 6.25, 0.5]
+[model_pricing.providers]
+anthropic = ["claude-opus-4-8"]
 
-    { id = "claude-haiku",      price = [0.8, 4.0, 1.0, 0.08],  providers = { anthropic = ["claude-haiku-4-5"] } },
+[[model_pricing]]
+id = "claude-sonnet5"
+price = [3.0, 15.0, 3.75, 0.3]
+[model_pricing.providers]
+anthropic = ["claude-sonnet-5"]
 
-    { id = "deepseek-v4-pro",   price = [0.4286, 0.8571, 0.4286, 0.0036],    providers = { deepseek = [] } },
+[[model_pricing]]
+id = "claude-sonnet"
+price = [3.0, 15.0, 3.75, 0.3]
+[model_pricing.providers]
+anthropic = ["claude-sonnet-4-6"]
 
-    { id = "deepseek-v4-flash", price = [0.1429, 0.2857, 0.1429, 0.0029],    providers = { deepseek = [] } },
-]
+[[model_pricing]]
+id = "claude-haiku"
+price = [0.8, 4.0, 1.0, 0.08]
+[model_pricing.providers]
+anthropic = ["claude-haiku-4-5"]
+
+[[model_pricing]]
+id = "deepseek-v4-pro"
+price = [0.4286, 0.8571, 0.4286, 0.0036]
+[model_pricing.providers]
+deepseek = []
+
+[[model_pricing]]
+id = "deepseek-v4-flash"
+price = [0.1429, 0.2857, 0.1429, 0.0029]
+[model_pricing.providers]
+deepseek = []
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 [logging]

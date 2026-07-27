@@ -58,32 +58,31 @@ async fn atomic_write(path: &Path, content: &str) -> ConfigResult<()> {
 }
 
 fn write_model_pricing(doc: &mut toml_edit::DocumentMut, pricing: &[ModelPricing]) {
-    let mut arr = toml_edit::Array::new();
+    doc.remove("model_pricing");
+    if pricing.is_empty() {
+        return;
+    }
+    let mut arr = toml_edit::ArrayOfTables::new();
     for mp in pricing {
-        let mut tbl = toml_edit::InlineTable::new();
-        tbl.insert("id", mp.id.as_str().into());
-
-        let mut price_arr = toml_edit::Array::new();
-        for &p in &mp.price {
-            price_arr.push(p);
-        }
-        tbl.insert("price", toml_edit::Value::Array(price_arr));
-
+        let mut tbl = toml_edit::Table::new();
+        tbl.insert("id", toml_edit::value(mp.id.as_str()));
+        tbl.insert("price", toml_edit::value(toml_edit::Value::Array(
+            mp.price.iter().copied().collect(),
+        )));
         if !mp.providers.is_empty() {
-            let mut pt = toml_edit::InlineTable::new();
+            let mut providers_tbl = toml_edit::Table::new();
             for (k, v) in &mp.providers {
                 let mut names_arr = toml_edit::Array::new();
                 for n in v {
                     names_arr.push(n.as_str());
                 }
-                pt.insert(k.as_str(), toml_edit::Value::Array(names_arr));
+                providers_tbl.insert(k.as_str(), toml_edit::value(toml_edit::Value::Array(names_arr)));
             }
-            tbl.insert("providers", toml_edit::Value::InlineTable(pt));
+            tbl.insert("providers", toml_edit::Item::Table(providers_tbl));
         }
-
         arr.push(tbl);
     }
-    doc["model_pricing"] = toml_edit::value(arr);
+    doc["model_pricing"] = toml_edit::Item::ArrayOfTables(arr);
 }
 
 fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
