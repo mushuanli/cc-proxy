@@ -219,7 +219,7 @@ export function buildArchivedSessionHTML(group) {
                 ${dateStr ? `<span class="session-date">${esc(dateStr)}</span>` : ''}
                 <span class="session-label">${esc(group.label)}</span>
                 <span class="session-summary">
-                    <span class="session-summary-item">${reqCount} ${reqCount !== 1 ? t('common.req_plural', { n: reqCount }) : t('common.req_singular', { n: reqCount })}</span>
+                    <span class="session-summary-item">${reqCount !== 1 ? t('common.req_plural', { n: reqCount }) : t('common.req_singular', { n: reqCount })}</span>
                     <span class="session-summary-item archived-badge">${t('common.archived')}</span>
                     <span class="session-summary-item">${timeStr}</span>
                     <span class="session-summary-item">${tokens}</span>
@@ -250,7 +250,7 @@ export function buildSessionHeaderHTML(group, isExpanded) {
                 ${dateStr ? `<span class="session-date">${esc(dateStr)}</span>` : ''}
                 <span class="session-label">${esc(group.label)}</span>
                 <span class="session-summary">
-                    <span class="session-summary-item">${reqCount} ${reqCount > 1 ? t('common.req_plural', { n: reqCount }) : t('common.req_singular', { n: reqCount })}</span>
+                    <span class="session-summary-item">${reqCount > 1 ? t('common.req_plural', { n: reqCount }) : t('common.req_singular', { n: reqCount })}</span>
                     ${models ? `<span class="session-summary-item">${esc(models)}</span>` : ''}
                     <span class="session-summary-item">${timeRange}</span>
                     <span class="session-summary-item">${tokens}</span>
