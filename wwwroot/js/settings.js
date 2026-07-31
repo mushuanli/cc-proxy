@@ -39,7 +39,7 @@ export function populateUpstreamSelect(upstreams, active) {
         select.innerHTML = '<option value="">— no upstreams —</option>';
         return;
     }
-    upstreams.forEach(u => {
+    [...upstreams].sort((a, b) => a.name.localeCompare(b.name)).forEach(u => {
         const opt = document.createElement('option');
         opt.value = u.name;
         opt.textContent = u.name + (u.active ? ' ✓' : '');
@@ -218,11 +218,15 @@ export async function saveMpField(id, fields) {
     const mp = state.modelPricingList.find(m => m.id === id);
     if (!mp) return;
     const body = { id, price: mp.price || [], providers: mp.providers || {}, ...fields };
-    await fetch(`/api/model-pricing/${encodeURIComponent(id)}`, {
+    const resp = await fetch(`/api/model-pricing/${encodeURIComponent(id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
     });
+    if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        alert(err.error || `Failed to update model pricing (${resp.status})`);
+    }
 }
 
 // ── Provider cell popover ──
@@ -402,8 +406,12 @@ export function openAddProviderPopover() {
     pop.querySelector('.mx-pop-cancel').addEventListener('click', closeMatrixPopover);
 }
 
-// Close popover on outside click
-document.addEventListener('click', () => closeMatrixPopover());
+// Close popover on outside click (ignore clicks inside the popover itself)
+document.addEventListener('click', (e) => {
+    if (!state._matrixPopover) return;
+    if (e.target.closest('.mx-popover')) return;
+    closeMatrixPopover();
+});
 
 // ── Add model dialog ──
 
@@ -677,7 +685,7 @@ function bindUpstreamTableEvents() {
         const proxyTh = e.target.closest('.ut-proxy-th');
         if (proxyTh) activateProxyUpstream(proxyTh.dataset.name);
     };
-    document.getElementById('upstream-table-body').addEventListener('click', e => {
+    document.getElementById('upstream-table-body').onclick = e => {
         const editBtn = e.target.closest('.ut-edit-btn');
         if (editBtn) { openUpstreamTableEdit(editBtn.dataset.name); return; }
         const delBtn = e.target.closest('.ut-del-btn');
@@ -690,7 +698,7 @@ function bindUpstreamTableEvents() {
         if (saveBtn) { saveUpstream(); return; }
         const cancelBtn = e.target.closest('.ut-cancel-btn');
         if (cancelBtn) { closeUpstreamTableEdit(); return; }
-    });
+    };
 }
 
 export function openUpstreamTableEdit(name, simpleTransparent = false) {
