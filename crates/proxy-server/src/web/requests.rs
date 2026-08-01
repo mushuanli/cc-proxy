@@ -1,12 +1,17 @@
+use std::collections::HashSet;
+use std::io::{Cursor, Write};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use chrono::TimeZone;
 use proxy_common::{SessionId, TaskId};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use zip::write::FileOptions;
+use zip::ZipWriter;
 
 use crate::AppState;
 
@@ -20,6 +25,14 @@ pub struct ListQuery {
 pub struct SessionTasksQuery {
     pub limit: Option<u32>,
     pub before_sequence: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ExportTasksRequest {
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+    #[serde(default)]
+    pub ids: Vec<String>,
 }
 
 /// Transform TaskListItem to match frontend expectations (session_id, timestamp, model, cost).
@@ -59,7 +72,7 @@ pub(crate) fn task_to_json(
 }
 
 /// Transform full Task to ProxiedRequest-compatible JSON for detail view.
-fn task_to_full_json(task: &proxy_store::Task) -> Value {
+pub(crate) fn task_to_full_json(task: &proxy_store::Task) -> Value {
     let raw_response = task
         .metadata
         .get("raw_response_body")
@@ -299,5 +312,115 @@ pub async fn summary(
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// Export full raw task data as a zip archive (in memory).
+///
+/// `session_ids` are expanded to all their tasks server-side; `ids` are added
+/// as-is. Tasks are deduplicated by id. Every entry is `{session_id}-{datetime}.json`.
+pub async fn export_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ExportTasksRequest>,
+) -> impl IntoResponse {
+    if body.session_ids.is_empty() && body.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no session_ids or ids provided"})),
+        )
+            .into_response();
+    }
+
+    let mut tasks: Vec<proxy_store::Task> = Vec::new();
+    let mut seen: HashSet<TaskId> = HashSet::new();
+
+    for sid in &body.session_ids {
+        let Ok(sid) = SessionId::new(sid.clone()) else { continue };
+        if let Ok(list) = state.store.task_list_full(&sid).await {
+            for task in list {
+                if seen.insert(task.id.clone()) {
+                    tasks.push(task);
+                }
+            }
+        }
+    }
+
+    for id in &body.ids {
+        let tid = TaskId::new(id.clone());
+        if !seen.insert(tid.clone()) {
+            continue;
+        }
+        if let Ok(task) = state.store.task_info(&tid).await {
+            tasks.push(task);
+        }
+    }
+
+    if tasks.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no tasks found for export"})),
+        )
+            .into_response();
+    }
+
+    match build_export_zip(&tasks) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [("content-type", "application/zip")],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Build a zip archive of full task JSON, one entry per task.
+fn build_export_zip(tasks: &[proxy_store::Task]) -> anyhow::Result<Vec<u8>> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = FileOptions::default();
+    let mut seen_names: HashSet<String> = HashSet::new();
+
+    for task in tasks {
+        let time = format_task_time(task.started_at);
+        let mut name = format!("{}-{}.json", task.session_id, time);
+        if !seen_names.insert(name.clone()) {
+            name = format!("{}-{}-{}.json", task.session_id, time, task.sequence_no);
+        }
+        let mut json = task_to_full_json(task);
+        sanitize_task_response(&mut json);
+        let content = serde_json::to_string_pretty(&json)?;
+        writer.start_file(name, options)?;
+        writer.write_all(content.as_bytes())?;
+    }
+
+    Ok(writer.finish()?.into_inner())
+}
+
+fn format_task_time(started_at_ms: i64) -> String {
+    let Some(dt) = chrono::Local.timestamp_millis_opt(started_at_ms).single() else {
+        return "unknown".into();
+    };
+    dt.format("%Y%m%d-%H%M%S").to_string()
+}
+
+/// Convert control characters in the response portion of an exported task.
+fn sanitize_task_response(task_json: &mut Value) {
+    for key in ["response_body", "normalized_response", "sse_events", "content_text"] {
+        if let Some(value) = task_json.get_mut(key) {
+            sanitize_json_control_chars(value);
+        }
+    }
+}
+
+fn sanitize_json_control_chars(value: &mut Value) {
+    match value {
+        Value::String(s) => *s = proxy_common::sanitize_text(s),
+        Value::Array(items) => items.iter_mut().for_each(sanitize_json_control_chars),
+        Value::Object(map) => map.values_mut().for_each(sanitize_json_control_chars),
+        _ => {}
     }
 }

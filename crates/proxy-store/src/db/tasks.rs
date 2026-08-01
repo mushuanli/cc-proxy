@@ -181,6 +181,24 @@ pub fn get_task(conn: &Connection, id: &TaskId) -> StoreResult<Option<Task>> {
     rows.next().transpose().map_err(Into::into)
 }
 
+/// Get full task details for every task in a session (ordered by sequence).
+pub fn list_full_tasks(conn: &Connection, session_id: &SessionId) -> StoreResult<Vec<Task>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.*, d.request_headers_json, d.request_body,
+         d.response_headers_json, d.response_body, d.metadata_json,
+         s.summary_json, s.created_at AS summary_created_at
+         FROM tasks t
+         LEFT JOIN task_details d ON d.task_id = t.id
+         LEFT JOIN task_summaries s ON s.task_id = t.id
+         WHERE t.session_id = ?1
+         ORDER BY t.sequence_no ASC",
+    )?;
+
+    let rows = stmt.query_map(params![session_id.as_str()], row_to_task)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 /// List tasks for a session (lightweight, no body).
 pub fn list_tasks(
     conn: &Connection,

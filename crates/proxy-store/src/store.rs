@@ -564,6 +564,17 @@ impl ProxyStore {
         .await
     }
 
+    /// List full task details (with request/response bodies) for a session.
+    pub async fn task_list_full(&self, session_id: &SessionId) -> StoreResult<Vec<Task>> {
+        let this = self.clone();
+        let sid = session_id.clone();
+        Self::blocking(move || {
+            let conn = this.inner.conn.lock().unwrap();
+            db::tasks::list_full_tasks(&conn, &sid)
+        })
+        .await
+    }
+
     /// Rename a session.
     pub async fn session_rename(
         &self,

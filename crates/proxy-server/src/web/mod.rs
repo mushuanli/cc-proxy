@@ -125,6 +125,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             get(requests::get).delete(requests::delete_one),
         )
         .route("/api/request/:id/summary", get(requests::summary))
+        .route("/api/tasks/export", post(requests::export_tasks))
         // Settings (config)
         .route(
             "/api/model-pricing",

@@ -1272,32 +1272,31 @@ document.getElementById('btn-summary-selected').addEventListener('click', async 
     }
 });
 
-// Export selected
+// Export selected — sessions expand to all their tasks, server returns a zip
+// of per-task JSON files named `{session_id}-{datetime}.json`.
 document.getElementById('btn-export-selected').addEventListener('click', async () => {
-    const sessionCount = state.selectedSessionIds.size;
-    const reqCount = state.selectedIds.size;
-    if (sessionCount === 0 && reqCount === 0) return;
+    const sessionIds = Array.from(state.selectedSessionIds);
+    const taskIds = Array.from(state.selectedIds);
+    if (sessionIds.length === 0 && taskIds.length === 0) return;
 
-    const result = [];
-    const coveredRequestIds = new Set();
-
-    for (const sid of state.selectedSessionIds) {
-        const resp = await fetch(`/api/session/${encodeURIComponent(sid)}/export?format=json`);
-        if (!resp.ok) continue;
-        const data = await resp.json();
-        result.push(data);
-        if (Array.isArray(data.requests)) {
-            data.requests.forEach(r => coveredRequestIds.add(r.id));
-        }
+    let resp;
+    try {
+        resp = await fetch('/api/tasks/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_ids: sessionIds, ids: taskIds }),
+        });
+    } catch (e) {
+        alert(t('inspector.export_failed'));
+        return;
+    }
+    if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        alert(data.error || t('inspector.export_failed'));
+        return;
     }
 
-    for (const id of state.selectedIds) {
-        if (coveredRequestIds.has(id)) continue;
-        const req = state.requestRows.get(id);
-        if (req) result.push(_normalizeRequestBody(req));
-    }
-
-    const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' });
+    const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1309,9 +1308,11 @@ document.getElementById('btn-export-selected').addEventListener('click', async (
         + String(now.getHours()).padStart(2, '0')
         + String(now.getMinutes()).padStart(2, '0')
         + String(now.getSeconds()).padStart(2, '0');
-    a.download = `ccproxy-${ts}.json`;
+    a.download = `ccproxy-export-${ts}.zip`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
 // Filter events
@@ -1356,14 +1357,3 @@ document.getElementById('btn-toggle-expand').addEventListener('click', () => {
     }
     renderPage();
 });
-
-// Internal helper for export (avoids circular dep with session.js)
-function _normalizeRequestBody(item) {
-    if (typeof item.request_body === 'string' && item.request_body) {
-        try { item = { ...item, request_body: JSON.parse(item.request_body) }; } catch (e) { /* keep as string */ }
-    }
-    if (Array.isArray(item.requests)) {
-        item = { ...item, requests: item.requests.map(_normalizeRequestBody) };
-    }
-    return item;
-}

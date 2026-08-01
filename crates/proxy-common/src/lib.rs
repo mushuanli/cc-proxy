@@ -15,4 +15,4 @@ pub use models::{
     ProviderCost, ProviderInfo, ProxiedRequest, SessionCost, SessionId, SseEvent, TaskId,
     TaskStatus, TaskUsage, TierRuleInfo, ToolCallRecord, UpstreamInfo, WsMessage,
 };
-pub use response::normalize_response;
+pub use response::{normalize_response, sanitize_text};

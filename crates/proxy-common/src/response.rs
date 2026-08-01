@@ -2,7 +2,7 @@ use crate::models::{NormalizedResponse, ToolCallRecord, ToolResultRecord};
 use serde_json::Value;
 
 /// Sanitize text by removing control characters except \n, \r, \t.
-fn sanitize_text(input: &str) -> String {
+pub fn sanitize_text(input: &str) -> String {
     input
         .chars()
         .filter(|ch| matches!(ch, '\n' | '\r' | '\t') || !ch.is_control())

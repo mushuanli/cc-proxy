@@ -42,6 +42,7 @@
     "recording": "录制中…",
     "rec_dot": "录制",
     "export_selected": "导出选中",
+    "export_failed": "导出失败",
     "save_summaries": "保存摘要",
     "delete_selected": "删除选中",
     "expand_all": "+ 展开",
