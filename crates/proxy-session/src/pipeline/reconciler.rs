@@ -194,8 +194,32 @@ impl Reconciler {
         run_kind: RunKind,
         prompt_text: Option<String>,
     ) -> SessionResult<()> {
-        let interaction_id = self.ensure_interaction_for_run(conn, session_id, &run_kind, prompt_text.as_deref())?;
-        let run_id = format!("run-{session_id}-{}-{}", run_kind.as_str(), call.sequence_no);
+        let interaction_id = if run_kind == RunKind::Main {
+            self.ensure_interaction_for_run(conn, session_id, &run_kind, prompt_text.as_deref())?
+        } else {
+            // Internal/subagent runs attach to the most recent main interaction.
+            self.latest_main_interaction(conn, session_id)?
+        };
+        // Reuse the existing run of the same kind under this interaction so a
+        // user prompt's tool loop groups into one main execution run instead
+        // of one run per model call.
+        let run_id = match &interaction_id {
+            Some(iid) => {
+                let existing: Option<String> = conn
+                    .query_row(
+                        "SELECT id FROM execution_runs
+                         WHERE session_id = ?1 AND interaction_id = ?2 AND run_kind = ?3
+                         ORDER BY started_at ASC LIMIT 1",
+                        params![session_id, iid, run_kind.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                existing.unwrap_or_else(|| {
+                    format!("run-{session_id}-{}-{}", run_kind.as_str(), call.sequence_no)
+                })
+            }
+            None => format!("run-{session_id}-{}-{}", run_kind.as_str(), call.sequence_no),
+        };
         conn.execute(
             "INSERT OR IGNORE INTO execution_runs (
                 id, session_id, interaction_id, run_kind, started_at, status
@@ -217,6 +241,22 @@ impl Reconciler {
         Ok(())
     }
 
+    /// The most recent main interaction, if any.
+    fn latest_main_interaction(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+    ) -> SessionResult<Option<String>> {
+        Ok(conn
+            .query_row(
+                "SELECT id FROM interactions
+                 WHERE session_id = ?1 ORDER BY started_at DESC LIMIT 1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     fn ensure_interaction_for_run(
         &self,
         conn: &Connection,
@@ -225,21 +265,28 @@ impl Reconciler {
         prompt_text: Option<&str>,
     ) -> SessionResult<Option<String>> {
         if *run_kind == RunKind::Main {
-            // A real user prompt maps to the prompt-backed interaction if any;
-            // otherwise create one from the model call's prompt text.
-            let existing: Option<String> = conn
+            // Reuse the latest interaction whose prompt matches, else create one.
+            let existing: Option<(String, Option<String>)> = conn
                 .query_row(
-                    "SELECT id FROM interactions WHERE session_id = ?1 ORDER BY started_at ASC LIMIT 1",
+                    "SELECT id, prompt_text FROM interactions
+                     WHERE session_id = ?1 ORDER BY started_at DESC LIMIT 1",
                     params![session_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if existing.is_some() {
-                return Ok(existing);
+            if let Some((id, existing_prompt)) = existing {
+                let same_prompt = match (existing_prompt.as_deref(), prompt_text) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, _) => true, // no prompt recorded — keep grouping
+                    _ => false,
+                };
+                if same_prompt {
+                    return Ok(Some(id));
+                }
             }
             match prompt_text {
                 Some(text) => {
-                    let id = format!("inter-{session_id}-main");
+                    let id = format!("inter-{session_id}-{}", chrono::Utc::now().timestamp_millis());
                     let now = chrono::Utc::now().timestamp_millis();
                     conn.execute(
                         "INSERT OR IGNORE INTO interactions (
