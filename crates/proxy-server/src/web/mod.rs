@@ -114,6 +114,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         )
         .route("/api/session/:id/export", get(sessions::export_))
         .route("/api/session/:id/summary", get(sessions::summary))
+        .route("/api/session/:id/timeline", get(sessions::timeline))
         .route("/api/session/:id/tasks", get(requests::list_session_tasks))
         // Requests (Tasks)
         .route(

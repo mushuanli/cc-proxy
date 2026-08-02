@@ -244,6 +244,26 @@ pub async fn summary(
     .into_response()
 }
 
+/// Serve the full session task timeline (SQLite live data, reconciler-backed).
+pub async fn timeline(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let sid = match parse_session_id(id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let reader = proxy_session::TimelineReader::new(state.session.clone());
+    match reader.load(sid.as_str()) {
+        Ok(doc) => Json(doc).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn export_(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

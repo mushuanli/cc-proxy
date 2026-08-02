@@ -112,6 +112,7 @@ impl SessionRepo {
     ) -> SessionResult<Vec<ModelCallRow>> {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, sequence_no, previous_model_call_id,
+                    execution_run_id,
                     client_request_id, provider_request_id, started_at, status,
                     requested_model, resolved_model, provider, upstream,
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
@@ -148,6 +149,63 @@ impl SessionRepo {
             .query_map(params![call_id], |row| ToolInvocationRow::from_row(row))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// List interactions for a session.
+    pub fn list_interactions(&self, session_id: &str) -> SessionResult<Vec<crate::domain::interaction::InteractionRow>> {
+        let conn = self.inner.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, external_prompt_id, prompt_text, started_at,
+                    ended_at, status, classification_source, classification_confidence, classifier_version
+             FROM interactions
+             WHERE session_id = ?1
+             ORDER BY started_at ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(crate::domain::interaction::InteractionRow {
+                id: row.get("id")?,
+                session_id: row.get("session_id")?,
+                external_prompt_id: row.get("external_prompt_id")?,
+                prompt_text: row.get("prompt_text")?,
+                started_at: row.get("started_at")?,
+                ended_at: row.get("ended_at")?,
+                status: row.get("status")?,
+                classification_source: row.get("classification_source")?,
+                classification_confidence: row.get("classification_confidence")?,
+                classifier_version: row.get("classifier_version")?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List execution runs for a session.
+    pub fn list_execution_runs(&self, session_id: &str) -> SessionResult<Vec<crate::domain::execution_run::ExecutionRunRow>> {
+        let conn = self.inner.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, interaction_id, run_kind, agent_run_id, started_at,
+                    foreground_completed_at, settled_at, status, classification_source, classification_confidence
+             FROM execution_runs
+             WHERE session_id = ?1
+             ORDER BY started_at ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(crate::domain::execution_run::ExecutionRunRow {
+                id: row.get("id")?,
+                session_id: row.get("session_id")?,
+                interaction_id: row.get("interaction_id")?,
+                run_kind: crate::domain::execution_run::RunKind::from(
+                    row.get::<_, String>("run_kind")?.as_str(),
+                ),
+                agent_run_id: row.get("agent_run_id")?,
+                started_at: row.get("started_at")?,
+                foreground_completed_at: row.get("foreground_completed_at")?,
+                settled_at: row.get("settled_at")?,
+                status: row.get("status")?,
+                classification_source: row.get("classification_source")?,
+                classification_confidence: row.get("classification_confidence")?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Find the model call id for a given tool_use_id.

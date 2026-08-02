@@ -209,6 +209,11 @@ impl Reconciler {
                 call.status.as_str(),
             ],
         )?;
+        // Link the model call to its execution run.
+        conn.execute(
+            "UPDATE model_calls SET execution_run_id = ?2 WHERE id = ?1",
+            params![call.id, run_id],
+        )?;
         Ok(())
     }
 

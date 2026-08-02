@@ -1,7 +1,9 @@
+pub mod archive;
 pub mod domain;
 pub mod ingest;
 pub mod persist;
 pub mod pipeline;
+pub mod query;
 pub mod source;
 
 pub use domain::model_call::ModelCallRow;
@@ -11,6 +13,8 @@ pub use error::{SessionError, SessionResult};
 pub use ingest::observation::{Observation, ObservationKind, TokenUsage};
 pub use ingest::{SessionIngest, SessionIngestExt};
 pub use persist::repo::{SessionRepo, SessionRepoConfig};
+pub use query::{TimelineDocument, TimelineReader};
+pub use source::{AnthropicParser, CodexParser, HeuristicClassifier, HookParser, OtelParser};
 
 mod error {
     use thiserror::Error;

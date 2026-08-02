@@ -621,6 +621,22 @@ pub async fn hook_event(
             }
         }
     }
+
+    // Ingest hook observations for session timeline correlation.
+    if let Some(raw_sid) = body
+        .get("session_id")
+        .or_else(|| body.get("sessionId"))
+        .and_then(|v| v.as_str())
+    {
+        let parser = proxy_session::HookParser::default();
+        let hook_input = body.get("hook_input").unwrap_or(&body);
+        let observations = parser.parse_hook_event(raw_sid, event_name, &body, hook_input);
+        for obs in observations {
+            if let Err(e) = state.session.record_observation(&obs) {
+                tracing::warn!("[api] failed to record hook observation: {}", e);
+            }
+        }
+    }
     Json(json!({"ok": true})).into_response()
 }
 

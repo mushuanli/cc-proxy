@@ -25,6 +25,7 @@ pub struct AppState {
     pub events: EventBus,
     pub relay: RelayHandler,
     pub capture: CaptureControl,
+    pub session: std::sync::Arc<proxy_session::SessionRepo>,
 }
 
 impl AppState {
@@ -69,15 +70,15 @@ impl AppState {
         let capture = CaptureControl::new(PathBuf::from("captures"), events.clone());
 
         // Session timeline collector (independent connection, own tables).
-        let session_repo = proxy_session::SessionRepo::open(
-            proxy_session::SessionRepoConfig {
+        let session_repo = std::sync::Arc::new(
+            proxy_session::SessionRepo::open(proxy_session::SessionRepoConfig {
                 database_path: PathBuf::from("data/datav2.db"),
                 ..Default::default()
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("failed to open session repo: {e}"))?;
+            })
+            .map_err(|e| anyhow::anyhow!("failed to open session repo: {e}"))?,
+        );
         let session_ingest: std::sync::Arc<dyn proxy_session::SessionIngest> =
-            std::sync::Arc::new(session_repo);
+            session_repo.clone();
 
         let relay = RelayHandler::new(
             config.clone(),
@@ -98,6 +99,7 @@ impl AppState {
             events,
             relay,
             capture,
+            session: session_repo,
         })
     }
 }

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
     session_id              TEXT NOT NULL,
     sequence_no             INTEGER NOT NULL,
     previous_model_call_id  TEXT,
+    execution_run_id        TEXT,
     client_request_id       TEXT,
     provider_request_id     TEXT,
     started_at              INTEGER NOT NULL DEFAULT 0,
