@@ -374,3 +374,17 @@
 .timeline-op-status.succeeded { color: #3a9a5f; }
 .timeline-op-status.failed { color: #d45a5a; }
 .timeline-op-status.emitted, .timeline-op-status.running { color: #d0a030; }
+
+/* Maximized state: summary fills the whole viewport */
+.summary-panel.maximized {
+    width: 100vw;
+    border-left: none;
+}
+.summary-panel.maximized .summary-inner {
+    border-left: none;
+}
+.summary-panel.maximized .summary-content {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 16px 24px;
+}

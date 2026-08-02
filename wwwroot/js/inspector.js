@@ -1118,6 +1118,42 @@ document.getElementById('btn-fullscreen-detail').addEventListener('click', () =>
     document.getElementById('fullscreen-overlay').classList.remove('hidden');
 });
 
+// Copy current detail tab content to clipboard.
+function detailTabText(tab, req) {
+    switch (tab) {
+        case 'request':
+            return (formatHeaders(req.request_headers) + '\n\n' + serializeBody(req.request_body)).trim();
+        case 'response':
+            return (formatHeaders(req.response_headers) + '\n\n' + serializeBody(req.response_body)).trim();
+        case 'sse':
+            return formatSseContent(req);
+        default:
+            return '';
+    }
+}
+
+function serializeBody(body) {
+    if (body === undefined || body === null || body === '') return '';
+    return typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+}
+
+document.getElementById('btn-copy-detail').addEventListener('click', async () => {
+    const req = selectedRequestDetail();
+    if (!req) return;
+    const activeTab = document.querySelector('.detail-tabs .tab.active')?.dataset.tab || 'request';
+    const text = detailTabText(activeTab, req);
+    if (!text) return;
+    try {
+        await navigator.clipboard.writeText(text);
+        const btn = document.getElementById('btn-copy-detail');
+        const prev = btn.textContent;
+        btn.textContent = '✓';
+        setTimeout(() => { btn.textContent = prev; }, 1200);
+    } catch (e) {
+        console.error('Copy failed:', e);
+    }
+});
+
 document.getElementById('fullscreen-content').addEventListener('click', (e) => {
     const btn = e.target.closest('.fs-detail-tabs .tab');
     if (!btn) return;

@@ -142,6 +142,11 @@ td.col-req { padding: 6px 10px; white-space: normal; overflow: visible; }
 #view-inspector.summary-open.summary-collapsed .detail-panel { margin-right: 48px; }
 #view-inspector.summary-open.summary-collapsed .pagination { margin-right: 48px; }
 
+/* Maximized summary hides the inspector content behind it */
+#view-inspector.summary-open.summary-maximized .table-container { margin-right: 0; }
+#view-inspector.summary-open.summary-maximized .detail-panel { margin-right: 0; }
+#view-inspector.summary-open.summary-maximized .pagination { margin-right: 0; }
+
 /* ── Conversation timeline ── */
 .timeline-item {
     padding: 6px 10px;

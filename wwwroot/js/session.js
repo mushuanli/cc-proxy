@@ -15,14 +15,23 @@ export function toggleSummaryPanel() {
     document.getElementById('btn-summary-toggle').textContent = state.summaryCollapsed ? '\u203a' : '\u2039';
 }
 
+export function toggleSummaryMaximize() {
+    const panel = document.getElementById('summary-panel');
+    const inspector = document.getElementById('view-inspector');
+    const maximized = panel.classList.toggle('maximized');
+    inspector.classList.toggle('summary-maximized', maximized);
+    document.getElementById('btn-summary-maximize').textContent = maximized ? '\u2715' : '\u26f6';
+}
+
 export function bindSummarySidebarActions(sid) {
     const renameBtn = document.getElementById('btn-summary-rename');
     const exportBtn = document.getElementById('btn-summary-export');
     const exportJsonBtn = document.getElementById('btn-summary-export-json');
     const exportYamlBtn = document.getElementById('btn-summary-export-yaml');
     const deleteBtn = document.getElementById('btn-summary-delete');
+    const maximizeBtn = document.getElementById('btn-summary-maximize');
 
-    [renameBtn, exportBtn, deleteBtn].forEach(b => b.classList.remove('hidden'));
+    [renameBtn, exportBtn, deleteBtn, maximizeBtn].forEach(b => b.classList.remove('hidden'));
 
     renameBtn.onclick = async () => {
         const current = state.sessionCache[sid] || shortSid(sid);
@@ -466,6 +475,7 @@ export function normalizeRequestBody(item) {
 
 document.getElementById('btn-summary-toggle').addEventListener('click', toggleSummaryPanel);
 document.getElementById('summary-tab-strip').addEventListener('click', toggleSummaryPanel);
+document.getElementById('btn-summary-maximize').addEventListener('click', toggleSummaryMaximize);
 
 // Export dropdown toggle
 document.getElementById('btn-summary-export').addEventListener('click', (e) => {

@@ -63,7 +63,8 @@
     "sse_tab": "SSE 事件",
     "streaming": "（流式输出中…）",
     "delete": "删除",
-    "select_all_title": "全选"
+    "select_all_title": "全选",
+    "copy": "复制当前页"
   },
   "pagination": {
     "per_page_20": "20 条/页",
@@ -236,7 +237,8 @@
     "user_prompts_count": "用户输入",
     "calls": "轮",
     "tools": "工具",
-    "no_prompt": "(无输入)"
+    "no_prompt": "(无输入)",
+    "maximize": "最大化"
   },
   "conversation": {
     "hook_prefix": "钩子",
