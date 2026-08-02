@@ -9,12 +9,14 @@ pub mod codex;
 pub mod heuristic;
 pub mod hook;
 pub mod otel;
+pub mod stream;
 
 pub use anthropic::AnthropicParser;
 pub use codex::CodexParser;
 pub use heuristic::HeuristicClassifier;
 pub use hook::HookParser;
 pub use otel::OtelParser;
+pub use stream::ToolStreamParser;
 
 use proxy_common::ClientType;
 use proxy_common::NormalizedResponse;

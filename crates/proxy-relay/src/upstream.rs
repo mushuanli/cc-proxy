@@ -230,6 +230,7 @@ impl StreamCtx {
     fn record(&self, kind: proxy_session::ObservationKind) {
         let Some(ingest) = &self.ingest else { return };
         let now = chrono::Utc::now().timestamp_millis();
+        let kind = self.normalize_kind(kind);
         if let Err(e) = ingest.record(proxy_session::Observation {
             event_id: format!(
                 "stream-{}-{}",
@@ -266,6 +267,24 @@ impl StreamCtx {
             kind,
         }) {
             tracing::warn!("[proxy] failed to record observation: {}", e);
+        }
+    }
+
+    /// Fill protocol-level blanks (e.g. ToolEmitted.call_id) with context.
+    fn normalize_kind(&self, kind: proxy_session::ObservationKind) -> proxy_session::ObservationKind {
+        match kind {
+            proxy_session::ObservationKind::ToolEmitted {
+                call_id: _,
+                tool_use_id,
+                tool_name,
+                started_at,
+            } => proxy_session::ObservationKind::ToolEmitted {
+                call_id: self.call_id.clone(),
+                tool_use_id,
+                tool_name,
+                started_at,
+            },
+            other => other,
         }
     }
 }
@@ -411,8 +430,8 @@ pub fn stream_upstream_response(
         let mut normalized = NormalizedResponse::default();
         let mut parser = SseParser::new();
         let mut byte_stream = response.bytes_stream();
-        // Track tool_use blocks in flight: index → (tool_use_id, name, accumulated input).
-        let mut tool_blocks: Vec<Option<(String, String, String)>> = Vec::new();
+        // Stateful tool_use stream parser (protocol logic lives in proxy-session).
+        let mut tool_stream = proxy_session::ToolStreamParser::new();
 
         loop {
             match byte_stream.next().await {
@@ -503,28 +522,8 @@ pub fn stream_upstream_response(
                                                 capture_truncated = true;
                                             }
                                         }
-                                        // Accumulate tool_use input_json deltas.
-                                        let delta = parsed.get("delta");
-                                        if delta
-                                            .and_then(|d| d.get("type"))
-                                            .and_then(|v| v.as_str())
-                                            == Some("input_json_delta")
-                                        {
-                                            let index = parsed
-                                                .get("index")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0) as usize;
-                                            if let Some(Some((_, _, acc))) =
-                                                tool_blocks.get_mut(index)
-                                            {
-                                                if let Some(partial) = delta
-                                                    .and_then(|d| d.get("partial_json"))
-                                                    .and_then(|v| v.as_str())
-                                                {
-                                                    acc.push_str(partial);
-                                                }
-                                            }
-                                        }
+                                        // Feed tool_use input_json deltas to the stream parser.
+                                        let _ = tool_stream.feed(&parsed);
                                     }
                                     Some("error") => {
                                         if let Some(err) = parsed.get("error") {
@@ -535,49 +534,13 @@ pub fn stream_upstream_response(
                                         }
                                     }
                                     Some("content_block_start") => {
-                                        let block = parsed.get("content_block");
-                                        let is_tool_use = block
-                                            .and_then(|b| b.get("type"))
-                                            .and_then(|v| v.as_str())
-                                            == Some("tool_use");
-                                        if is_tool_use {
-                                            let index = parsed
-                                                .get("index")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0) as usize;
-                                            if let (Some(id), Some(name)) = (
-                                                block.and_then(|b| b.get("id")).and_then(|v| v.as_str()),
-                                                block.and_then(|b| b.get("name")).and_then(|v| v.as_str()),
-                                            ) {
-                                                tool_blocks.resize(index + 1, None);
-                                                tool_blocks[index] =
-                                                    Some((id.to_string(), name.to_string(), String::new()));
-                                                ctx.record(proxy_session::ObservationKind::ToolEmitted {
-                                                    call_id: ctx.call_id.clone(),
-                                                    tool_use_id: id.to_string(),
-                                                    tool_name: name.to_string(),
-                                                    started_at: start.elapsed().as_millis() as i64,
-                                                });
-                                            }
+                                        for kind in tool_stream.feed(&parsed) {
+                                            ctx.record(kind);
                                         }
                                     }
                                     Some("content_block_stop") => {
-                                        let index = parsed
-                                            .get("index")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0) as usize;
-                                        if let Some(Some((tool_use_id, _, input))) =
-                                            tool_blocks.get_mut(index)
-                                        {
-                                            let id = tool_use_id.clone();
-                                            let input = std::mem::take(input);
-                                            ctx.record(proxy_session::ObservationKind::ToolInputComplete {
-                                                tool_use_id: id,
-                                                input_json: input,
-                                            });
-                                        }
-                                        if index < tool_blocks.len() {
-                                            tool_blocks[index] = None;
+                                        for kind in tool_stream.feed(&parsed) {
+                                            ctx.record(kind);
                                         }
                                     }
                                     _ => {}
@@ -594,6 +557,10 @@ pub fn stream_upstream_response(
             }
         }
         drop(chunk_tx);
+        // Mark any in-flight tool_use blocks as abandoned on stream end.
+        for kind in tool_stream.finish() {
+            ctx.record(kind);
+        }
 
         let meta = UpstreamResponse {
             status_code,

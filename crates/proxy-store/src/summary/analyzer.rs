@@ -508,84 +508,19 @@ fn analyze_body(
 }
 
 // ── Message classification ──
+// Shared Anthropic message parsing lives in proxy_common::messages; these
+// wrappers preserve the existing public surface without duplicating logic.
 
 fn is_tool_result(msg: &Value) -> bool {
-    msg.get("content")
-        .and_then(|c| c.as_array())
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-        })
-        .unwrap_or(false)
+    proxy_common::is_tool_result(msg)
 }
 
 pub fn is_real_user_prompt(msg: &Value) -> bool {
-    let content = match msg.get("content").and_then(|c| c.as_array()) {
-        Some(c) => c,
-        None => {
-            // content may be a plain string in some edge cases
-            let s = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            return !s.trim_start().starts_with("<system-reminder>") && !s.is_empty();
-        }
-    };
-
-    // Must be all text blocks
-    let all_text = content.iter().all(|b| {
-        matches!(
-            b.get("type").and_then(|t| t.as_str()),
-            Some("text" | "input_text")
-        )
-    });
-    if !all_text {
-        return false;
-    }
-
-    // None of the blocks should be tool_result
-    let has_tool_result = content
-        .iter()
-        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
-    if has_tool_result {
-        return false;
-    }
-
-    // Filter out system-reminder blocks, then check if any real text remains
-    let text = content
-        .iter()
-        .filter_map(block_text)
-        .filter(|t| !t.trim_start().starts_with("<system-reminder>"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    !text.trim().is_empty()
+    proxy_common::is_real_user_prompt(msg)
 }
 
 pub fn extract_user_text(msg: &Value) -> String {
-    match msg.get("content") {
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|b| {
-                if matches!(
-                    b.get("type").and_then(|t| t.as_str()),
-                    Some("text" | "input_text")
-                ) {
-                    block_text(b)
-                } else {
-                    None
-                }
-            })
-            .filter(|t| !t.trim_start().starts_with("<system-reminder>"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Some(Value::String(s)) => {
-            if s.trim_start().starts_with("<system-reminder>") {
-                String::new()
-            } else {
-                s.clone()
-            }
-        }
-        _ => String::new(),
-    }
+    proxy_common::extract_user_text(msg)
 }
 
 fn get_tool_uses(blocks: &[Value]) -> Vec<&Value> {

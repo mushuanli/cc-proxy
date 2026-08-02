@@ -14,7 +14,9 @@ pub use ingest::observation::{Observation, ObservationKind, TokenUsage};
 pub use ingest::{SessionIngest, SessionIngestExt};
 pub use persist::repo::{SessionRepo, SessionRepoConfig};
 pub use query::{TimelineDocument, TimelineReader};
-pub use source::{AnthropicParser, CodexParser, HeuristicClassifier, HookParser, OtelParser};
+pub use source::{
+    AnthropicParser, CodexParser, HeuristicClassifier, HookParser, OtelParser, ToolStreamParser,
+};
 
 mod error {
     use thiserror::Error;

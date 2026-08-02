@@ -230,50 +230,15 @@ fn parse_tool_use_stop(_parsed: &Value) -> Vec<Observation> {
 }
 
 fn is_tool_result(msg: &Value) -> bool {
-    msg.get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-        })
-        .unwrap_or(false)
+    proxy_common::is_tool_result(msg)
 }
 
 fn is_real_user_prompt(msg: &Value) -> bool {
-    let content = match msg.get("content").and_then(Value::as_array) {
-        Some(c) => c,
-        None => return false,
-    };
-    let all_text = content
-        .iter()
-        .all(|b| matches!(b.get("type").and_then(Value::as_str), Some("text" | "input_text")));
-    if !all_text {
-        return false;
-    }
-    let text = content
-        .iter()
-        .filter_map(|b| b.get("text").and_then(Value::as_str))
-        .filter(|t| !t.trim_start().starts_with("<system-reminder>"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    !text.trim().is_empty()
+    proxy_common::is_real_user_prompt(msg)
 }
 
 fn extract_user_text(msg: &Value) -> Option<String> {
-    let blocks = msg.get("content").and_then(Value::as_array)?;
-    let text = blocks
-        .iter()
-        .filter_map(|b| {
-            if matches!(b.get("type").and_then(Value::as_str), Some("text" | "input_text")) {
-                b.get("text").and_then(Value::as_str)
-            } else {
-                None
-            }
-        })
-        .filter(|t| !t.trim_start().starts_with("<system-reminder>"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = proxy_common::extract_user_text(msg);
     (!text.trim().is_empty()).then_some(text)
 }
 

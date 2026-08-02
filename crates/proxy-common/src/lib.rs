@@ -1,5 +1,6 @@
 pub mod config;
 pub(crate) mod core;
+pub mod messages;
 pub mod models;
 pub mod response;
 
@@ -15,4 +16,5 @@ pub use models::{
     ProviderCost, ProviderInfo, ProxiedRequest, SessionCost, SessionId, SseEvent, TaskId,
     TaskStatus, TaskUsage, TierRuleInfo, ToolCallRecord, UpstreamInfo, WsMessage,
 };
+pub use messages::{extract_user_text, is_real_user_prompt, is_tool_result};
 pub use response::{normalize_response, sanitize_text};
