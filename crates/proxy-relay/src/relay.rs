@@ -561,6 +561,18 @@ async fn proxy_request(
 
     // Apply capture trimming to the recording task before persistence
     let mut recording_task = recording_task;
+    // Collect tool_results from the COMPLETE body BEFORE capture trimming
+    // removes them (capture off strips to the last user message).
+    if let Some(full_body) = recording_task.request_body.clone() {
+        let session_id_str = session_id.as_str().to_string();
+        for obs in proxy_session::AnthropicParser::extract_tool_results(&full_body, &session_id_str) {
+            if let Some(ingest) = &relay.session_ingest {
+                if let Err(e) = ingest.record(obs) {
+                    tracing::warn!("[relay] failed to record pre-trim tool_result: {}", e);
+                }
+            }
+        }
+    }
     finalize_task(&mut recording_task, session_id.as_str(), &relay.capture);
     let current_operation = recording_task
         .summary_json
@@ -1250,7 +1262,6 @@ async fn start_and_publish(
 ) -> StoreResult<proxy_store::TaskStartResult> {
     let result = store.task_start(session_id, task).await?;
     emit_model_call_start(ingest.as_ref(), &result.task);
-    emit_tool_results(ingest.as_ref(), &result.task);
     events.publish(WsMessage::SessionUpdated(ProxyStore::session_snapshot(
         &result.session,
     )));
@@ -1308,17 +1319,6 @@ fn emit_model_call_start(
 /// Protocol parsing lives in proxy-session's AnthropicParser; relay only
 /// feeds it the complete (pre-trim) request body, so capture-off sessions
 /// still carry tool results.
-fn emit_tool_results(ingest: Option<&Arc<dyn proxy_session::SessionIngest>>, task: &proxy_store::Task) {
-    let Some(ingest) = ingest else { return };
-    let Some(body) = task.request_body.as_deref() else { return };
-    let session_id = task.session_id.as_str().to_string();
-    for obs in proxy_session::AnthropicParser::extract_tool_results(body, &session_id) {
-        if let Err(e) = ingest.record(obs) {
-            tracing::warn!("[relay] failed to record tool_result: {}", e);
-        }
-    }
-}
-
 /// Finalize a Recording task and publish RequestUpdated + SessionUpdated + CostUpdated.
 /// Only publishes events if the finalization actually transitioned the task.
 #[allow(clippy::too_many_arguments)]
