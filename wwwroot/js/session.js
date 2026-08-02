@@ -374,6 +374,65 @@ function fmtTime(ts) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// Collect Task* tool operations across an interaction and aggregate them by
+// task id ("Task #N" from results, or taskId from update/stop inputs).
+function collectTaskRelations(interaction) {
+    const tasks = new Map(); // key: "1" | "b8izd4ugh" | auto
+    const ops = [];
+    for (const run of (interaction.runs || [])) {
+        for (const call of (run.model_calls || [])) {
+            for (const op of (call.operations || [])) {
+                if (!op.tool_name || !op.tool_name.startsWith('Task')) continue;
+                ops.push(op);
+            }
+        }
+    }
+    for (const op of ops) {
+        let id = null;
+        let status = null;
+        let subject = null;
+        // Parse inputs from input_preview (JSON string).
+        let input = {};
+        try { input = JSON.parse(op.input_preview || '{}'); } catch (e) { /* not json */ }
+        if (op.tool_name === 'TaskCreate') {
+            subject = input.subject || '';
+            // result_preview like "Task #1 created successfully: ..."
+            const m = /Task #(\d+)/.exec(op.result_preview || '');
+            id = m ? m[1] : `c${ops.indexOf(op)}`;
+            status = 'created';
+        } else if (op.tool_name === 'TaskUpdate') {
+            id = String(input.taskId ?? '');
+            status = input.status || '';
+            if (!tasks.has(id)) { tasks.set(id, { id, subject: '' }); }
+        } else if (op.tool_name === 'TaskStop') {
+            id = input.task_id || '';
+            status = 'stopped';
+        }
+        if (id === null || id === '') continue;
+        if (!tasks.has(id)) tasks.set(id, { id, subject: '' });
+        const t = tasks.get(id);
+        if (subject) t.subject = subject;
+        t.status = status || t.status;
+        t.last = op;
+    }
+    return Array.from(tasks.values());
+}
+
+function renderTaskRelations(interaction) {
+    const tasks = collectTaskRelations(interaction);
+    if (tasks.length === 0) return '';
+    const rows = tasks.map(t => {
+        const subject = t.subject ? esc(t.subject.slice(0, 60)) : `Task #${esc(t.id)}`;
+        const status = t.status ? `<span class="timeline-task-status ${esc(t.status)}">${esc(t.status)}</span>` : '';
+        return `<div class="timeline-task-row">
+            <span class="timeline-task-id">#${esc(t.id)}</span>
+            <span class="timeline-task-subject">${subject}</span>
+            ${status}
+        </div>`;
+    }).join('');
+    return `<div class="timeline-tasks"><div class="timeline-tasks-title">Tasks</div>${rows}</div>`;
+}
+
 export function renderSessionTimeline(d) {
     const fmt = n => n != null ? n.toLocaleString() : '—';
     const icons = RUN_KIND_LABELS;
@@ -399,6 +458,8 @@ export function renderSessionTimeline(d) {
             <span class="timeline-interaction-icon">${icon}</span>
             <span class="timeline-interaction-text">${esc(interaction.prompt_text || t('summary.no_prompt'))}</span>
         </div>`;
+
+        html += renderTaskRelations(interaction);
 
         for (const run of (interaction.runs || [])) {
             const runIcon = icons[run.run_kind] || '⚙';
@@ -426,6 +487,7 @@ export function renderSessionTimeline(d) {
                         <span class="timeline-op-icon">${tlToolIcon(op.tool_name)}</span>
                         <span class="timeline-op-name">${esc(op.tool_name)}</span>
                         <span class="timeline-op-input">${esc(op.input_preview || '')}</span>
+                        ${op.result_preview ? `<span class="timeline-op-result">${esc(op.result_preview)}</span>` : ''}
                         <span class="timeline-op-status ${esc(op.status)}">${esc(op.status)}</span>
                     </div>`;
                 }

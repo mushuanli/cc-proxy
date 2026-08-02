@@ -304,6 +304,52 @@
 /* ── Session timeline tree ── */
 .timeline-tree { font-size: 0.78rem; }
 
+/* Task relation tracker within an interaction */
+.timeline-tasks {
+    border: 1px solid rgba(180,184,196,0.25);
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin: 4px 0 8px;
+    background: rgba(255,255,255,0.02);
+}
+.timeline-tasks-title {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent2, #4a8fd0);
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+.timeline-task-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 1px 0;
+    font-size: 0.75rem;
+}
+.timeline-task-id {
+    font-family: var(--font-mono);
+    color: var(--accent2, #4a8fd0);
+    flex-shrink: 0;
+}
+.timeline-task-subject {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+}
+.timeline-task-status {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+.timeline-task-status.completed { color: #3a9a5f; }
+.timeline-task-status.failed, .timeline-task-status.stopped { color: #d45a5a; }
+.timeline-task-status.in_progress { color: #d0a030; }
+
 .timeline-interaction {
     border-left: 3px solid rgba(180,184,196,0.35);
     padding-left: 10px;
@@ -373,6 +419,16 @@
     word-break: break-word;
 }
 .timeline-op-status { font-size: 0.62rem; text-transform: uppercase; margin-left: auto; flex-shrink: 0; }
+.timeline-op-result {
+    color: var(--text);
+    background: rgba(90,140,90,0.12);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 0.72rem;
+    max-width: 100%;
+    overflow-wrap: break-word;
+    word-break: break-word;
+}
 .timeline-op-status.succeeded { color: #3a9a5f; }
 .timeline-op-status.failed { color: #d45a5a; }
 .timeline-op-status.emitted, .timeline-op-status.running { color: #d0a030; }

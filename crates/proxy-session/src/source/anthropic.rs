@@ -89,6 +89,73 @@ impl ClientParser for AnthropicParser {
     }
 }
 
+impl AnthropicParser {
+    /// Extract tool_result blocks from a request body into ToolResult observations.
+    ///
+    /// The request body carries accumulated tool_result blocks from prior
+    /// turns; each links back to its originating tool_use via `tool_use_id`.
+    /// Protocol parsing lives here (not in relay) so other clients can plug a
+    /// different parser into the same observation pipeline.
+    pub fn extract_tool_results(request_body: &str, session_id: &str) -> Vec<Observation> {
+        let Ok(value) = serde_json::from_str::<Value>(request_body) else {
+            return Vec::new();
+        };
+        let Some(messages) = value.get("messages").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut out = Vec::new();
+        for msg in messages {
+            if msg.get("role").and_then(Value::as_str) != Some("user") {
+                continue;
+            }
+            let Some(blocks) = msg.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                let Some(tool_use_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let preview = match block.get("content") {
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .filter_map(|i| i.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    Some(Value::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let status = if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                    "failed"
+                } else {
+                    "succeeded"
+                };
+                let event_id = format!("tool-result-{tool_use_id}");
+                out.push(Observation {
+                    event_id: event_id.clone(),
+                    session_id: session_id.to_string(),
+                    source: "proxy".into(),
+                    occurred_at: now,
+                    received_at: now,
+                    source_sequence: None,
+                    source_version: None,
+                    payload_hash: event_id,
+                    kind: ObservationKind::ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        raw_result_preview: Some(truncate(&preview, 500)),
+                        effective_result_preview: None,
+                        status: status.into(),
+                    },
+                });
+            }
+        }
+        out
+    }
+}
+
 fn parse_tool_use_start(parsed: &Value, ctx: &ParseContext) -> Vec<Observation> {
     let Some(block) = parsed.get("content_block") else {
         return Vec::new();
@@ -217,5 +284,42 @@ fn truncate(s: &str, max_chars: usize) -> String {
         format!("{preview}…")
     } else {
         preview
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_tool_results_with_task_number() {
+        let body = r#"{
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "TaskCreate", "input": {"subject": "修复导出"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "Task #1 created successfully: 修复导出"}]}
+            ]
+        }"#;
+        let obs = AnthropicParser::extract_tool_results(body, "sess-1");
+        assert_eq!(obs.len(), 1);
+        let ObservationKind::ToolResult { tool_use_id, raw_result_preview, status, .. } = &obs[0].kind else {
+            panic!("expected ToolResult");
+        };
+        assert_eq!(tool_use_id, "call_1");
+        assert_eq!(raw_result_preview.as_deref(), Some("Task #1 created successfully: 修复导出"));
+        assert_eq!(status, "succeeded");
+    }
+
+    #[test]
+    fn tool_result_error_sets_failed_status() {
+        let body = r#"{
+            "messages": [
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_2", "is_error": true, "content": "boom"}]}
+            ]
+        }"#;
+        let obs = AnthropicParser::extract_tool_results(body, "sess-1");
+        assert_eq!(obs.len(), 1);
+        let ObservationKind::ToolResult { status, .. } = &obs[0].kind else { panic!() };
+        assert_eq!(status, "failed");
     }
 }

@@ -1250,6 +1250,7 @@ async fn start_and_publish(
 ) -> StoreResult<proxy_store::TaskStartResult> {
     let result = store.task_start(session_id, task).await?;
     emit_model_call_start(ingest.as_ref(), &result.task);
+    emit_tool_results(ingest.as_ref(), &result.task);
     events.publish(WsMessage::SessionUpdated(ProxyStore::session_snapshot(
         &result.session,
     )));
@@ -1299,6 +1300,22 @@ fn emit_model_call_start(
         },
     }) {
         tracing::warn!("[relay] failed to record model_call_start: {}", e);
+    }
+}
+
+/// Emit ToolResult observations from tool_result blocks in the request body.
+///
+/// Protocol parsing lives in proxy-session's AnthropicParser; relay only
+/// feeds it the complete (pre-trim) request body, so capture-off sessions
+/// still carry tool results.
+fn emit_tool_results(ingest: Option<&Arc<dyn proxy_session::SessionIngest>>, task: &proxy_store::Task) {
+    let Some(ingest) = ingest else { return };
+    let Some(body) = task.request_body.as_deref() else { return };
+    let session_id = task.session_id.as_str().to_string();
+    for obs in proxy_session::AnthropicParser::extract_tool_results(body, &session_id) {
+        if let Err(e) = ingest.record(obs) {
+            tracing::warn!("[relay] failed to record tool_result: {}", e);
+        }
     }
 }
 
