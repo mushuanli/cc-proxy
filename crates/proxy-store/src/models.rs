@@ -283,6 +283,8 @@ pub struct ArchiveSnippet {
 pub struct ArchiveOptions {
     pub task_retention_hours: u32,
     pub force: bool,
+    /// Whether archiving also runs retention cleanup of old tasks.
+    pub cleanup: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -174,6 +174,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // Summaries (generate + persist)
         .route("/api/summaries", post(settings::summarize))
         .route("/api/summaries/all", post(settings::summarize_all))
+        .route("/api/summaries/status/:id", get(settings::summary_status))
         // Clear
         .route("/api/clear", post(settings::clear_all))
         // Hook (session lifecycle from Claude Code)

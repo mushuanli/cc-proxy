@@ -5,6 +5,7 @@ import {
     showRequestDetail, updateFilterOptions, getSessionGroups,
     setSessionPanelFns, applyFiltersAndRender, updatePagination,
     toggleSession, selectSession, expandAllSessions, collapseAllSessions,
+    runSummaryJob,
 } from './inspector.js';
 import {
     toggleSummaryPanel, openSummaryPanel, openRequestSummaryPanel,
@@ -485,9 +486,7 @@ Object.assign(window, {
         btn.disabled = true;
         btn.textContent = t('settings.summarizing');
         try {
-            const resp = await fetch('/api/summaries/all', { method: 'POST' });
-            const data = await resp.json();
-            if (!resp.ok) throw new Error(data.error || 'summary generation failed');
+            const data = await runSummaryJob('/api/summaries/all', { method: 'POST' });
             const result = document.getElementById('ret-cleanup-result');
             if (data.summarized && data.summarized.length > 0) {
                 result.className = 'cleanup-result success';

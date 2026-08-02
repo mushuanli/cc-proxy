@@ -3,10 +3,13 @@
 mod web;
 mod ws;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tracing_subscriber::fmt::FormatEvent;
 use tracing_subscriber::fmt::FormatFields;
@@ -26,6 +29,7 @@ pub struct AppState {
     pub relay: RelayHandler,
     pub capture: CaptureControl,
     pub session: std::sync::Arc<proxy_session::SessionRepo>,
+    pub summary_jobs: Arc<SummaryJobs>,
 }
 
 impl AppState {
@@ -100,7 +104,79 @@ impl AppState {
             relay,
             capture,
             session: session_repo,
+            summary_jobs: Arc::new(SummaryJobs::new()),
         })
+    }
+}
+
+// ── Background summary-generation jobs ──
+
+/// Registry of background summary jobs so the dashboard can poll status
+/// without blocking on a long-running archive pass.
+pub struct SummaryJobs {
+    inner: Mutex<HashMap<u64, Arc<SummaryJob>>>,
+    next_id: AtomicU64,
+}
+
+pub struct SummaryJob {
+    state: Mutex<SummaryJobState>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SummaryJobState {
+    Running,
+    Done {
+        summarized: Vec<String>,
+        errors: Vec<String>,
+    },
+    Failed(String),
+}
+
+impl SummaryJobs {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Register a running job and return its id and handle.
+    pub fn start(&self) -> (u64, Arc<SummaryJob>) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let job = Arc::new(SummaryJob {
+            state: Mutex::new(SummaryJobState::Running),
+        });
+        self.inner.lock().unwrap().insert(id, job.clone());
+        (id, job)
+    }
+
+    pub fn get(&self, id: u64) -> Option<Arc<SummaryJob>> {
+        self.inner.lock().unwrap().get(&id).cloned()
+    }
+}
+
+impl SummaryJob {
+    pub fn snapshot(&self) -> SummaryJobState {
+        self.state.lock().unwrap().clone()
+    }
+
+    /// Transition the job to Done or Failed based on the archive result.
+    pub fn finish(
+        &self,
+        result: Result<Vec<proxy_store::ArchiveInfo>, proxy_store::StoreError>,
+    ) {
+        let state = match result {
+            Ok(items) => SummaryJobState::Done {
+                summarized: items
+                    .iter()
+                    .map(|a| a.session_id.as_str().to_string())
+                    .collect(),
+                errors: Vec::new(),
+            },
+            Err(error) => SummaryJobState::Failed(error.to_string()),
+        };
+        *self.state.lock().unwrap() = state;
     }
 }
 

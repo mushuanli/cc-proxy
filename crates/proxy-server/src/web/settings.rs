@@ -687,6 +687,7 @@ fn bad_request(error: &str) -> axum::response::Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response()
 }
 
+/// Kick off a background archive pass and return a pollable job id.
 async fn generate_summaries(
     state: &Arc<AppState>,
     session_ids: Option<&[proxy_common::SessionId]>,
@@ -694,25 +695,32 @@ async fn generate_summaries(
     let config = state.config.get().await;
     let options = proxy_store::ArchiveOptions {
         task_retention_hours: config.proxy.request_retention_hours,
-        force: true,
+        force: false,
+        cleanup: false,
     };
-    match state.store.archive_create(session_ids, options).await {
-        Ok(results) => {
-            let summarized: Vec<String> = results
-                .iter()
-                .map(|a| a.session_id.as_str().to_string())
-                .collect();
-            tracing::info!("[api] generated {} session summaries", summarized.len());
-            Json(json!({"summarized": summarized, "errors": []})).into_response()
-        }
-        Err(e) => {
-            tracing::error!("[api] summary generation failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-                .into_response()
-        }
+    let ids: Option<Vec<proxy_common::SessionId>> = session_ids.map(|ids| ids.to_vec());
+    let (job_id, job) = state.summary_jobs.start();
+    let store = state.store.clone();
+    tokio::spawn(async move {
+        let result = store.archive_create(ids.as_deref(), options).await;
+        job.finish(result);
+    });
+    tracing::info!("[api] summary job {job_id} started");
+    (StatusCode::ACCEPTED, Json(json!({"job_id": job_id}))).into_response()
+}
+
+/// Poll the status of a background summary job.
+pub async fn summary_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.summary_jobs.get(id) {
+        Some(job) => (StatusCode::OK, Json(job.snapshot())).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("summary job {id} not found")})),
+        )
+            .into_response(),
     }
 }
 

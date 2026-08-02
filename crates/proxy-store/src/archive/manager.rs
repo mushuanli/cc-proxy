@@ -86,7 +86,7 @@ impl ArchiveManager {
             &checkpoint_task_id,
             checkpoint_seq,
         )?;
-        if options.task_retention_hours > 0 {
+        if options.cleanup && options.task_retention_hours > 0 {
             let cutoff_ms = now_ms - (options.task_retention_hours as i64 * 3600 * 1000);
             tasks::cleanup_old_tasks(conn, session_id, checkpoint_seq, cutoff_ms)?;
         }
@@ -111,15 +111,11 @@ impl ArchiveManager {
         conn: &Connection,
         session_id: &SessionId,
     ) -> StoreResult<Vec<crate::models::Task>> {
-        let items = tasks::list_tasks(conn, session_id, None, 10_000, None)?;
-        let mut result = Vec::with_capacity(items.len());
-        for item in items {
-            if let Some(mut task) = tasks::get_task(conn, &item.id)? {
-                Self::ensure_task_summary(conn, &mut task)?;
-                result.push(task);
-            }
+        let mut tasks = tasks::list_full_tasks(conn, session_id)?;
+        for task in &mut tasks {
+            Self::ensure_task_summary(conn, task)?;
         }
-        Ok(result)
+        Ok(tasks)
     }
 
     fn ensure_task_summary(conn: &Connection, task: &mut crate::models::Task) -> StoreResult<()> {

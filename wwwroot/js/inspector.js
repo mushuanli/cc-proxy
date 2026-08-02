@@ -1241,6 +1241,23 @@ document.getElementById('btn-delete-selected').addEventListener('click', async (
     renderPage(); updateFilterOptions(); updateRequestCount();
 });
 
+// Start a summary-generation job and poll until it finishes.
+// The server returns a job_id immediately and runs the archive pass in the background.
+export async function runSummaryJob(path, options) {
+    const resp = await fetch(path, options);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'summary generation failed');
+    const jobId = data.job_id;
+    if (jobId == null) return data;
+    for (let i = 0; i < 600; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        const s = await fetch(`/api/summaries/status/${jobId}`).then((r) => r.json());
+        if (s.state === 'done') return { summarized: s.summarized || [], errors: s.errors || [] };
+        if (s.state === 'failed') throw new Error(s.error || 'summary generation failed');
+    }
+    throw new Error('summary job timed out');
+}
+
 // Generate readable summaries for selected sessions.
 document.getElementById('btn-summary-selected').addEventListener('click', async () => {
     const sids = Array.from(state.selectedSessionIds);
@@ -1252,26 +1269,22 @@ document.getElementById('btn-summary-selected').addEventListener('click', async 
         : t('common.summarize_session_multi', { n: sids.length });
     if (!confirm(confirmMsg)) return;
 
-    const resp = await fetch('/api/summaries', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_ids: sids }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-        alert(data.error || t('common.summary_fail_alert'));
-        return;
-    }
-
-    if (data.summarized && data.summarized.length > 0) {
-        alert(t('common.summarized_sessions_alert', { n: data.summarized.length }));
-    }
-
-    if (data.errors && data.errors.length > 0) {
-        alert(t('common.summary_fail_alert') + '\n' + data.errors.join('\n'));
+    try {
+        const data = await runSummaryJob('/api/summaries', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_ids: sids }),
+        });
+        if (data.summarized && data.summarized.length > 0) {
+            alert(t('common.summarized_sessions_alert', { n: data.summarized.length }));
+        }
+        if (data.errors && data.errors.length > 0) {
+            alert(t('common.summary_fail_alert') + '\n' + data.errors.join('\n'));
+        }
+    } catch (e) {
+        alert(e.message || t('common.summary_fail_alert'));
     }
 });
-
 // Export selected — sessions expand to all their tasks, server returns a zip
 // of per-task JSON files named `{session_id}-{datetime}.json`.
 document.getElementById('btn-export-selected').addEventListener('click', async () => {

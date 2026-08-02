@@ -1047,6 +1047,7 @@ mod tests {
                 ArchiveOptions {
                     task_retention_hours: 0,
                     force: true,
+                    cleanup: false,
                 },
             )
             .await
@@ -1079,6 +1080,7 @@ mod tests {
                 ArchiveOptions {
                     task_retention_hours: 1,
                     force: true,
+                    cleanup: true,
                 },
             )
             .await
@@ -1090,6 +1092,7 @@ mod tests {
                 ArchiveOptions {
                     task_retention_hours: 0,
                     force: true,
+                    cleanup: false,
                 },
             )
             .await
