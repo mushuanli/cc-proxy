@@ -14,8 +14,8 @@ SOLID / DRY / KISS / YAGNI / CoC / LoD — 函数≤30行，圈复杂度≤10
 Claude Code API 透明代理 — 拦截、可视化、分析 AI Coding Agent 的 API 流量。
 - **语言**: Rust (2021 edition, Cargo workspace)
 - **前端**: Vanilla JS/HTML/CSS，通过 `rust-embed` 内嵌到二进制，支持 i18n（`wwwroot/assets/zh.json`）
-- **数据库**: SQLite（`data.db`，WAL 模式）
-- **Session**: 相同 `session_id` 的一组请求（Request）。Session 状态机：Recording → Stopped/Archived（cleanup 时保留最新请求作为"墓碑"）
+- **数据库**: SQLite（`data/datav2.db`，WAL 模式）
+- **Session**: 相同 `session_id` 的一组请求（Request）,里面每个请求都是一个task。Session 状态机：Recording → Stopped/Archived（cleanup 时保留最新请求作为"墓碑"）
 - **Model Pricing**: 全局模型定价（`ModelPricing`），含 `price: [input, output, cache_write?, cache_read?]` 和 `providers: {provider → [model_names]}` 映射
 
 ## 文档索引
