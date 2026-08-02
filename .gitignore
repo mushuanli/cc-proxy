@@ -1,9 +1,11 @@
 data.db*
 data/
-proxy-server
+#proxy-server
 config.toml
 *.o
 sessions/
 target/
 cf2.toml
 release/
+tmp/
+captures/
