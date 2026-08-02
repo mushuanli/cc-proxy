@@ -61,6 +61,7 @@ mod tests {
                 total_model_calls: 1,
                 user_interactions: 1,
                 interactions: vec![],
+                summary: None,
             },
         };
         let yaml = write_archive_v4(&doc).unwrap();

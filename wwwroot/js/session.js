@@ -374,6 +374,53 @@ function fmtTime(ts) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// Render the aggregated conversation/stats summary above the timeline tree.
+function renderTimelineSummary(s) {
+    if (!s) return '';
+    const fmt = n => n != null ? n.toLocaleString() : '—';
+    const parts = [];
+
+    // Stats
+    parts.push(`<div class="summary-section-title">${t('summary.stats')}</div>`);
+    parts.push(`<table class="summary-stats-table">
+        <tr><td>${t('summary.total_messages')}</td><td>${fmt(s.total_messages)}</td></tr>
+        <tr><td>${t('summary.user_prompts')}</td><td>${fmt((s.user_prompts || []).length)}</td></tr>
+        <tr><td>${t('summary.tool_calls')}</td><td>${fmt(s.tool_call_count)}</td></tr>
+        <tr><td>${t('summary.tool_results')}</td><td>${fmt(s.tool_result_count)}</td></tr>
+        <tr><td>${t('summary.thinking_blocks')}</td><td>${fmt(s.thinking_block_count)}</td></tr>
+    </table>`);
+
+    // Conversation (user prompts)
+    const prompts = s.user_prompts || [];
+    if (prompts.length > 0) {
+        parts.push(`<div class="summary-section-title">${t('summary.conversation')}</div>`);
+        parts.push(`<div class="timeline-summary-prompts">`);
+        for (const p of prompts) {
+            parts.push(`<div class="summary-prompt-header"><span class="summary-prompt-icon">💬</span><span class="summary-prompt-text">${esc(p)}</span></div>`);
+        }
+        parts.push(`</div>`);
+    }
+
+    // Touched files
+    const files = s.touched_files || [];
+    if (files.length > 0) {
+        parts.push(`<div class="summary-section-title">${t('summary.touched_files')}</div>`);
+        parts.push(`<table class="summary-files-table"><tbody>`);
+        for (const f of files) {
+            parts.push(`<tr><td>${esc(f)}</td></tr>`);
+        }
+        parts.push(`</tbody></table>`);
+    }
+
+    // Final response
+    if (s.final_response) {
+        parts.push(`<div class="summary-section-title">${t('summary.final_response')}</div>`);
+        parts.push(`<div class="summary-final-response">${esc(s.final_response)}</div>`);
+    }
+
+    return parts.join('');
+}
+
 // Collect Task* tool operations across an interaction and aggregate them by
 // task id ("Task #N" from results, or taskId from update/stop inputs).
 function collectTaskRelations(interaction) {
@@ -446,7 +493,7 @@ export function renderSessionTimeline(d) {
             <span class="summary-meta-item">${t('summary.timeline')}</span>
         </div>`;
 
-    let html = header + '<div class="timeline-tree">';
+    let html = header + renderTimelineSummary(d.summary) + '<div class="timeline-tree">';
 
     for (const interaction of (d.interactions || [])) {
         const hasUserRun = (interaction.runs || []).some(isUserPrompt);

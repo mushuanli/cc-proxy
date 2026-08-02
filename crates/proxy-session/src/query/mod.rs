@@ -1,3 +1,6 @@
 pub mod timeline;
 
-pub use timeline::{ExecutionRunNode, InteractionNode, ModelCallNode, TimelineDocument, TimelineReader, ToolNode};
+pub use timeline::{
+    ExecutionRunNode, InteractionNode, ModelCallNode, TimelineDocument, TimelineReader,
+    TimelineSummary, ToolNode,
+};

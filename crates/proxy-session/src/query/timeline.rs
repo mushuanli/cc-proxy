@@ -18,6 +18,23 @@ pub struct TimelineDocument {
     pub total_model_calls: usize,
     pub user_interactions: usize,
     pub interactions: Vec<InteractionNode>,
+    /// Optional aggregated conversation summary (filled by the API layer
+    /// from the store's task summaries; empty when unavailable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<TimelineSummary>,
+}
+
+/// Aggregated conversation/folder/stats summary across a session's tasks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TimelineSummary {
+    pub user_prompts: Vec<String>,
+    pub assistant_actions: usize,
+    pub touched_files: Vec<String>,
+    pub final_response: String,
+    pub total_messages: usize,
+    pub tool_call_count: usize,
+    pub tool_result_count: usize,
+    pub thinking_block_count: usize,
 }
 
 /// A user interaction with its execution runs.
@@ -199,6 +216,7 @@ impl TimelineReader {
             total_model_calls: total,
             user_interactions,
             interactions: interaction_nodes,
+            summary: None,
         })
     }
 }

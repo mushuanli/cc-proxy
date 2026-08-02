@@ -255,13 +255,54 @@ pub async fn timeline(
     };
     let reader = proxy_session::TimelineReader::new(state.session.clone());
     match reader.load(sid.as_str()) {
-        Ok(doc) => Json(doc).into_response(),
+        Ok(mut doc) => {
+            doc.summary = aggregate_session_summary(&state, &sid).await;
+            Json(doc).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
     }
+}
+
+/// Aggregate conversation/stats from the store's task summaries for a session.
+async fn aggregate_session_summary(
+    state: &Arc<AppState>,
+    sid: &proxy_common::SessionId,
+) -> Option<proxy_session::TimelineSummary> {
+    use proxy_store::summary::analyzer::TaskSummaryV1;
+    let tasks = match state.store.task_list_full(sid).await {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+    let mut out = proxy_session::TimelineSummary::default();
+    let mut any = false;
+    for task in &tasks {
+        let Some(json) = task.summary_json.as_deref() else { continue };
+        let Ok(summary) = serde_json::from_str::<TaskSummaryV1>(json) else { continue };
+        any = true;
+        for up in summary.user_prompts {
+            if !out.user_prompts.contains(&up.text) {
+                out.user_prompts.push(up.text);
+            }
+        }
+        out.assistant_actions += summary.assistant_actions.len();
+        for f in summary.touched_files {
+            if !out.touched_files.contains(&f.path) {
+                out.touched_files.push(f.path);
+            }
+        }
+        if !summary.final_response.is_empty() && out.final_response.is_empty() {
+            out.final_response = summary.final_response;
+        }
+        out.total_messages += summary.stats.total_messages;
+        out.tool_call_count += summary.stats.tool_call_count;
+        out.tool_result_count += summary.stats.tool_result_count;
+        out.thinking_block_count += summary.stats.thinking_block_count;
+    }
+    any.then_some(out)
 }
 
 pub async fn export_(

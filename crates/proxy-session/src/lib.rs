@@ -13,7 +13,10 @@ pub use error::{SessionError, SessionResult};
 pub use ingest::observation::{Observation, ObservationKind, TokenUsage};
 pub use ingest::{SessionIngest, SessionIngestExt};
 pub use persist::repo::{SessionRepo, SessionRepoConfig};
-pub use query::{TimelineDocument, TimelineReader};
+pub use query::{
+    ExecutionRunNode, InteractionNode, ModelCallNode, TimelineDocument, TimelineReader,
+    TimelineSummary, ToolNode,
+};
 pub use source::{
     AnthropicParser, CodexParser, HeuristicClassifier, HookParser, OtelParser, ToolStreamParser,
 };
