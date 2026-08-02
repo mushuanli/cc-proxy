@@ -4,6 +4,7 @@ members = [
     "crates/proxy-common",
     "crates/proxy-relay",
     "crates/proxy-server",
+    "crates/proxy-session",
     "crates/proxy-store",
 ]
 

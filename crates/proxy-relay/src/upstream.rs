@@ -217,6 +217,59 @@ pub fn message_count(protocol: ApiProtocol, body: &serde_json::Value) -> u32 {
 
 // ── Response from upstream dispatch ──
 
+/// Streaming context: carries session metadata needed to emit observations.
+#[derive(Clone)]
+pub struct StreamCtx {
+    pub call_id: String,
+    pub session_id: String,
+    pub ingest: Option<std::sync::Arc<dyn proxy_session::SessionIngest>>,
+}
+
+impl StreamCtx {
+    /// Record an observation, logging but not propagating failures.
+    fn record(&self, kind: proxy_session::ObservationKind) {
+        let Some(ingest) = &self.ingest else { return };
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Err(e) = ingest.record(proxy_session::Observation {
+            event_id: format!(
+                "stream-{}-{}",
+                self.call_id,
+                match &kind {
+                    proxy_session::ObservationKind::ToolEmitted { tool_use_id, .. } => {
+                        format!("emit-{tool_use_id}")
+                    }
+                    proxy_session::ObservationKind::ToolInputComplete { tool_use_id, .. } => {
+                        format!("input-{tool_use_id}")
+                    }
+                    _ => "evt".into(),
+                }
+            ),
+            session_id: self.session_id.clone(),
+            source: "proxy".into(),
+            occurred_at: now,
+            received_at: now,
+            source_sequence: None,
+            source_version: None,
+            payload_hash: format!(
+                "stream-{}-{}",
+                self.call_id,
+                match &kind {
+                    proxy_session::ObservationKind::ToolEmitted { tool_use_id, .. } => {
+                        format!("emit-{tool_use_id}")
+                    }
+                    proxy_session::ObservationKind::ToolInputComplete { tool_use_id, .. } => {
+                        format!("input-{tool_use_id}")
+                    }
+                    _ => "evt".into(),
+                }
+            ),
+            kind,
+        }) {
+            tracing::warn!("[proxy] failed to record observation: {}", e);
+        }
+    }
+}
+
 /// Result of dispatching a request upstream.
 pub struct UpstreamResponse {
     pub status_code: u16,
@@ -327,6 +380,7 @@ pub fn stream_upstream_response(
     response: reqwest::Response,
     start: Instant,
     protocol: ApiProtocol,
+    ctx: StreamCtx,
 ) -> StreamingResponse {
     use futures::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
@@ -357,6 +411,8 @@ pub fn stream_upstream_response(
         let mut normalized = NormalizedResponse::default();
         let mut parser = SseParser::new();
         let mut byte_stream = response.bytes_stream();
+        // Track tool_use blocks in flight: index → (tool_use_id, name, accumulated input).
+        let mut tool_blocks: Vec<Option<(String, String, String)>> = Vec::new();
 
         loop {
             match byte_stream.next().await {
@@ -447,6 +503,28 @@ pub fn stream_upstream_response(
                                                 capture_truncated = true;
                                             }
                                         }
+                                        // Accumulate tool_use input_json deltas.
+                                        let delta = parsed.get("delta");
+                                        if delta
+                                            .and_then(|d| d.get("type"))
+                                            .and_then(|v| v.as_str())
+                                            == Some("input_json_delta")
+                                        {
+                                            let index = parsed
+                                                .get("index")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(0) as usize;
+                                            if let Some(Some((_, _, acc))) =
+                                                tool_blocks.get_mut(index)
+                                            {
+                                                if let Some(partial) = delta
+                                                    .and_then(|d| d.get("partial_json"))
+                                                    .and_then(|v| v.as_str())
+                                                {
+                                                    acc.push_str(partial);
+                                                }
+                                            }
+                                        }
                                     }
                                     Some("error") => {
                                         if let Some(err) = parsed.get("error") {
@@ -454,6 +532,52 @@ pub fn stream_upstream_response(
                                                 .get("message")
                                                 .and_then(|v| v.as_str())
                                                 .map(String::from);
+                                        }
+                                    }
+                                    Some("content_block_start") => {
+                                        let block = parsed.get("content_block");
+                                        let is_tool_use = block
+                                            .and_then(|b| b.get("type"))
+                                            .and_then(|v| v.as_str())
+                                            == Some("tool_use");
+                                        if is_tool_use {
+                                            let index = parsed
+                                                .get("index")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(0) as usize;
+                                            if let (Some(id), Some(name)) = (
+                                                block.and_then(|b| b.get("id")).and_then(|v| v.as_str()),
+                                                block.and_then(|b| b.get("name")).and_then(|v| v.as_str()),
+                                            ) {
+                                                tool_blocks.resize(index + 1, None);
+                                                tool_blocks[index] =
+                                                    Some((id.to_string(), name.to_string(), String::new()));
+                                                ctx.record(proxy_session::ObservationKind::ToolEmitted {
+                                                    call_id: ctx.call_id.clone(),
+                                                    tool_use_id: id.to_string(),
+                                                    tool_name: name.to_string(),
+                                                    started_at: start.elapsed().as_millis() as i64,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Some("content_block_stop") => {
+                                        let index = parsed
+                                            .get("index")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0) as usize;
+                                        if let Some(Some((tool_use_id, _, input))) =
+                                            tool_blocks.get_mut(index)
+                                        {
+                                            let id = tool_use_id.clone();
+                                            let input = std::mem::take(input);
+                                            ctx.record(proxy_session::ObservationKind::ToolInputComplete {
+                                                tool_use_id: id,
+                                                input_json: input,
+                                            });
+                                        }
+                                        if index < tool_blocks.len() {
+                                            tool_blocks[index] = None;
                                         }
                                     }
                                     _ => {}
@@ -897,7 +1021,16 @@ mod tests {
                 .unwrap(),
         );
         let started = Instant::now();
-        let streaming = stream_upstream_response(response, started, ApiProtocol::Anthropic);
+        let streaming = stream_upstream_response(
+            response,
+            started,
+            ApiProtocol::Anthropic,
+            StreamCtx {
+                call_id: "call-1".into(),
+                session_id: "sess-1".into(),
+                ingest: None,
+            },
+        );
         let mut body = streaming.body.into_data_stream();
         let first = tokio::time::timeout(std::time::Duration::from_millis(200), body.next())
             .await

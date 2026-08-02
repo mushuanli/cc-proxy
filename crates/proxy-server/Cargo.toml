@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 proxy-common = { path = "../proxy-common" }
 proxy-relay = { path = "../proxy-relay" }
+proxy-session = { path = "../proxy-session" }
 proxy-store = { path = "../proxy-store" }
 
 axum = { version = "0.7", features = ["ws"] }

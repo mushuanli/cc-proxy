@@ -65,6 +65,7 @@ pub struct RelayHandler {
     retry_count: u32,
     request_timeout_secs: u64,
     capture: CaptureControl,
+    session_ingest: Option<Arc<dyn proxy_session::SessionIngest>>,
 }
 
 impl RelayHandler {
@@ -85,7 +86,14 @@ impl RelayHandler {
             retry_count: 3,
             request_timeout_secs: 120,
             capture,
+            session_ingest: None,
         }
+    }
+
+    /// Attach a session ingest collector (observations feed).
+    pub fn with_session_ingest(mut self, ingest: Arc<dyn proxy_session::SessionIngest>) -> Self {
+        self.session_ingest = Some(ingest);
+        self
     }
 
     /// Get or create an HTTP client for a given proxy URL.
@@ -592,6 +600,7 @@ async fn proxy_request(
         &session_id,
         recording_task,
         recording_proxied,
+        relay.session_ingest.clone(),
     )
     .await
     {
@@ -674,8 +683,15 @@ async fn proxy_request(
                 ..Default::default()
             };
 
-            finalize_and_publish(&relay.store, &relay.events, &task_id, finalization, proxied)
-                .await;
+            finalize_and_publish(
+                &relay.store,
+                &relay.events,
+                &task_id,
+                finalization,
+                proxied,
+                relay.session_ingest.clone(),
+            )
+            .await;
 
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -691,7 +707,12 @@ async fn proxy_request(
         upstream_response =
             upstream::handle_non_streaming_response(response, start, protocol).await;
     } else {
-        let stream = upstream::stream_upstream_response(response, start, protocol);
+        let stream_ctx = upstream::StreamCtx {
+            call_id: task_id.as_str().to_string(),
+            session_id: session_id.as_str().to_string(),
+            ingest: relay.session_ingest.clone(),
+        };
+        let stream = upstream::stream_upstream_response(response, start, protocol, stream_ctx);
         let client_resp = Response::builder()
             .status(stream.status_code)
             .body(stream.body)
@@ -700,6 +721,7 @@ async fn proxy_request(
 
         let store = relay.store.clone();
         let events = relay.events.clone();
+        let ingest = relay.session_ingest.clone();
         let session_id_clone = session_id.clone();
         let log_model = request_model.clone();
         let effective_model_clone = effective_model.clone();
@@ -762,6 +784,7 @@ async fn proxy_request(
                             priced: Some(priced_val),
                             ..Default::default()
                         },
+                        ingest,
                     )
                     .await;
                     return;
@@ -877,7 +900,7 @@ async fn proxy_request(
                 proxied.sse_events.clear();
             }
 
-            finalize_and_publish(&store, &events, &task_id, finalization, proxied).await;
+            finalize_and_publish(&store, &events, &task_id, finalization, proxied, ingest).await;
 
             capture.record_exchange(
                 session_id_clone.as_str(),
@@ -1042,7 +1065,15 @@ async fn proxy_request(
         proxied.sse_events.clear();
     }
 
-    finalize_and_publish(&relay.store, &relay.events, &task_id, finalization, proxied).await;
+    finalize_and_publish(
+        &relay.store,
+        &relay.events,
+        &task_id,
+        finalization,
+        proxied,
+        relay.session_ingest.clone(),
+    )
+    .await;
 
     // ── Capture recording ──
     relay.capture.record_exchange(
@@ -1215,8 +1246,10 @@ async fn start_and_publish(
     session_id: &SessionId,
     task: NewTask,
     proxied: proxy_common::models::ProxiedRequest,
+    ingest: Option<Arc<dyn proxy_session::SessionIngest>>,
 ) -> StoreResult<proxy_store::TaskStartResult> {
     let result = store.task_start(session_id, task).await?;
+    emit_model_call_start(ingest.as_ref(), &result.task);
     events.publish(WsMessage::SessionUpdated(ProxyStore::session_snapshot(
         &result.session,
     )));
@@ -1224,17 +1257,54 @@ async fn start_and_publish(
     Ok(result)
 }
 
+/// Emit a ModelCallStart observation carrying the store-assigned sequence_no.
+fn emit_model_call_start(
+    ingest: Option<&Arc<dyn proxy_session::SessionIngest>>,
+    task: &proxy_store::Task,
+) {
+    let Some(ingest) = ingest else { return };
+    let started_at = task.started_at;
+    let model = task.resolved_model.clone();
+    let session_id = task.session_id.as_str().to_string();
+    let call_id = task.id.as_str().to_string();
+    let client_request_id = task
+        .request_headers
+        .as_ref()
+        .and_then(|h| h.get("x-request-id").and_then(|v| v.as_str()))
+        .map(String::from);
+    if let Err(e) = ingest.record(proxy_session::Observation {
+        event_id: format!("call-start-{call_id}"),
+        session_id: session_id.clone(),
+        source: "proxy".into(),
+        occurred_at: started_at,
+        received_at: chrono::Utc::now().timestamp_millis(),
+        source_sequence: Some(task.sequence_no.to_string()),
+        source_version: None,
+        payload_hash: format!("call-start-{call_id}"),
+        kind: proxy_session::ObservationKind::ModelCallStart {
+            call_id,
+            client_request_id,
+            requested_model: if model == "unknown" { None } else { Some(model) },
+            started_at,
+        },
+    }) {
+        tracing::warn!("[relay] failed to record model_call_start: {}", e);
+    }
+}
+
 /// Finalize a Recording task and publish RequestUpdated + SessionUpdated + CostUpdated.
 /// Only publishes events if the finalization actually transitioned the task.
+#[allow(clippy::too_many_arguments)]
 async fn finalize_and_publish(
     store: &ProxyStore,
     events: &EventBus,
     task_id: &TaskId,
     finalization: proxy_store::TaskFinalization,
     proxied: proxy_common::models::ProxiedRequest,
+    ingest: Option<Arc<dyn proxy_session::SessionIngest>>,
 ) {
     match store.task_finalize(task_id, finalization).await {
-        Ok(proxy_store::TaskFinalizeResult::Applied { session, .. }) => {
+        Ok(proxy_store::TaskFinalizeResult::Applied { session, task }) => {
             if let Ok(stats) = store.usage_cost_stats().await {
                 events.publish(WsMessage::CostUpdated(stats));
             }
@@ -1242,6 +1312,7 @@ async fn finalize_and_publish(
                 &session,
             )));
             events.publish(WsMessage::RequestUpdated(proxied));
+            emit_model_call_end(ingest.as_ref(), &task);
         }
         Ok(proxy_store::TaskFinalizeResult::AlreadyFinalized { .. }) => {
             tracing::debug!(
@@ -1252,6 +1323,46 @@ async fn finalize_and_publish(
         Err(e) => {
             tracing::error!("[relay] task_finalize failed for {}: {}", task_id, e);
         }
+    }
+}
+
+/// Emit a ModelCallEnd observation from a finalized task's frozen fields.
+fn emit_model_call_end(
+    ingest: Option<&Arc<dyn proxy_session::SessionIngest>>,
+    task: &proxy_store::Task,
+) {
+    let Some(ingest) = ingest else { return };
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e) = ingest.record(proxy_session::Observation {
+        event_id: format!("call-end-{}", task.id),
+        session_id: task.session_id.as_str().to_string(),
+        source: "proxy".into(),
+        occurred_at: now,
+        received_at: now,
+        source_sequence: None,
+        source_version: None,
+        payload_hash: format!("call-end-{}", task.id),
+        kind: proxy_session::ObservationKind::ModelCallEnd {
+            call_id: task.id.as_str().to_string(),
+            status: task.status.as_str().to_string(),
+            tokens: proxy_session::TokenUsage {
+                input_tokens: task.input_tokens,
+                output_tokens: task.output_tokens,
+                cache_creation_tokens: task.cache_creation_tokens,
+                cache_read_tokens: task.cache_read_tokens,
+            },
+            stop_reason: task.stop_reason.clone(),
+            cost_microusd: task.cost_microusd,
+            ended_at: task.ended_at.unwrap_or(now),
+            provider_request_id: task.upstream_message_id.clone(),
+            error: task
+                .error_message
+                .clone()
+                .filter(|e| !e.is_empty()),
+            http_status_code: task.http_status_code,
+        },
+    }) {
+        tracing::warn!("[relay] failed to record model_call_end: {}", e);
     }
 }
 

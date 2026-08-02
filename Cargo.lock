@@ -1121,6 +1121,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "proxy-common",
+ "proxy-session",
  "proxy-store",
  "reqwest",
  "serde",
@@ -1143,6 +1144,7 @@ dependencies = [
  "mime_guess",
  "proxy-common",
  "proxy-relay",
+ "proxy-session",
  "proxy-store",
  "reqwest",
  "rust-embed",
@@ -1156,6 +1158,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zip",
+]
+
+[[package]]
+name = "proxy-session"
+version = "3.0.1"
+dependencies = [
+ "chrono",
+ "proxy-common",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]

@@ -68,6 +68,17 @@ impl AppState {
 
         let capture = CaptureControl::new(PathBuf::from("captures"), events.clone());
 
+        // Session timeline collector (independent connection, own tables).
+        let session_repo = proxy_session::SessionRepo::open(
+            proxy_session::SessionRepoConfig {
+                database_path: PathBuf::from("data/datav2.db"),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("failed to open session repo: {e}"))?;
+        let session_ingest: std::sync::Arc<dyn proxy_session::SessionIngest> =
+            std::sync::Arc::new(session_repo);
+
         let relay = RelayHandler::new(
             config.clone(),
             store.clone(),
@@ -75,6 +86,7 @@ impl AppState {
             client.clone(),
             capture.clone(),
         )
+        .with_session_ingest(session_ingest)
         .with_retry_config(
             config_snapshot.proxy.retry_count,
             config_snapshot.proxy.request_timeout_secs,
