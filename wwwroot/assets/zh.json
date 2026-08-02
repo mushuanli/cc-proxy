@@ -8,7 +8,6 @@
     "settings": "设置",
     "summaries": "摘要"
   },
-
   "status": {
     "connected": "已连接",
     "disconnected": "已断开",
@@ -17,7 +16,6 @@
     "silent": "已连接（静默 {sec}s）",
     "requests": "{n} 条请求"
   },
-
   "table": {
     "time": "时间",
     "summary": "摘要",
@@ -34,7 +32,6 @@
     "request_body": "请求体",
     "response_body": "响应体"
   },
-
   "inspector": {
     "unpriced": "未定价",
     "cache_hit_rate": "缓存命中率",
@@ -68,7 +65,6 @@
     "delete": "删除",
     "select_all_title": "全选"
   },
-
   "pagination": {
     "per_page_20": "20 条/页",
     "per_page_50": "50 条/页",
@@ -79,7 +75,6 @@
     "page_of": "第 {curr} / {total} 页",
     "count": "{sessions} 个会话 · {requests} 条请求"
   },
-
   "cost": {
     "today": "今天",
     "this_week": "本周",
@@ -118,7 +113,6 @@
     "chart_title_month": "每月费用（近10个月）",
     "click_drilldown": "点击查看明细"
   },
-
   "settings": {
     "providers_title": "服务商",
     "upstreams_title": "上游",
@@ -147,13 +141,11 @@
     "hint_models_price": "（¥ / M tokens · in / cache-write / cache-read / out）",
     "model_id": "模型 ID",
     "keep_current_token": "留空保留现有令牌",
-
     "add_provider": "+ Provider",
     "add_model": "+ Model",
     "model_matrix_hint": "每行一个逻辑模型，每列一个 Provider，点击价格格子内联编辑，点击 Provider 格子编辑支持的 model name。",
     "mx_alias_hint": "Model 别名（逗号分隔）。留空 = 使用 model id。",
     "mx_alias_remove": "删除支持",
-
     "model_pricing_title": "模型定价",
     "model_pricing_hint": "为每个逻辑模型定义一次定价，Provider 通过 ID 或别名引用，可在 Provider 层覆盖。",
     "new_model_pricing": "新建模型定价",
@@ -161,7 +153,6 @@
     "mp_alias": "别名",
     "mp_prices": "定价",
     "failed_save": "保存失败",
-
     "tier_high": "高",
     "tier_mid": "中",
     "tier_low": "低",
@@ -172,14 +163,12 @@
     "tier_default_desc": "无匹配时的兜底",
     "auto_inherit": "自动（继承全局）",
     "effort_hint": "激活此上游时自动生效",
-
     "confirm_delete_provider": "确认删除服务商「{name}」？",
     "confirm_delete_upstream": "确认删除上游「{name}」？",
     "name_url_required": "名称和地址为必填项",
     "name_required": "名称为必填项",
     "failed_save_provider": "保存服务商失败",
     "failed_save_upstream": "保存上游失败",
-
     "data_retention": "数据保留",
     "keep_all_hours": "请求保留时长（小时）",
     "max_sessions": "最大会话数",
@@ -199,7 +188,6 @@
     "saved": "已保存",
     "summarized_sessions": "已保存 {n} 个会话摘要",
     "confirm_summarize_all": "确认重新生成所有会话的可读摘要？",
-
     "global_proxy": "全局代理",
     "global_proxy_label": "HTTP 代理地址",
     "global_proxy_hint": "留空=无全局代理，Provider 级别代理会覆盖此项",
@@ -207,7 +195,6 @@
     "proxy_save_failed": "保存代理设置失败",
     "saving": "保存中…"
   },
-
   "summary": {
     "title": "概要",
     "session_summary": "会话概要",
@@ -243,26 +230,28 @@
     "collapse_panel": "收起面板",
     "expand_panel": "展开面板",
     "archived_no_summary": "此会话的在线明细已清理，请查看已保存摘要。",
-    "open_in_archive": "在摘要中查看 →"
+    "open_in_archive": "在摘要中查看 →",
+    "timeline": "时间线",
+    "requests": "请求",
+    "user_prompts_count": "用户输入",
+    "calls": "轮",
+    "tools": "工具",
+    "no_prompt": "(无输入)"
   },
-
   "conversation": {
     "hook_prefix": "钩子",
     "timeline_meta": "{method} {path} — {status} | {model} | {tokens} | {session}",
     "timeline_time": "{time} | {duration}ms"
   },
-
   "mcp": {
     "destination": "MCP 目标地址",
     "destination_placeholder": "例: https://gitmcp.io/user/repo",
     "set": "设置",
     "clear": "清空"
   },
-
   "hooks": {
     "clear_hooks": "清空钩子"
   },
-
   "common": {
     "delete": "删除",
     "archived": "已归档",
@@ -288,7 +277,6 @@
     "invalid_effort": "无效的 Effort 值「{val}」。可选：{valid}",
     "mcp_config_dest": "配置 MCP 目标"
   },
-
   "archive": {
     "search_placeholder": "搜索会话摘要",
     "file_count": "{n} 个摘要",

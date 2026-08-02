@@ -165,8 +165,20 @@ export async function openSummaryPanel(sid) {
     if (state.summaryCollapsed) toggleSummaryPanel();
 
     try {
-        const resp = await fetch(`/api/session/${encodeURIComponent(sid)}/summary`);
-        if (!resp.ok) {
+        const resp = await fetch(`/api/session/${encodeURIComponent(sid)}/timeline`);
+        if (resp.ok) {
+            const data = await resp.json();
+            // If the timeline has real content, render it; otherwise fall back
+            // to the classic summary for archived/empty sessions.
+            if (data.interactions && data.interactions.length > 0) {
+                document.getElementById('summary-title').textContent =
+                    t('summary.summary_of', { label: (state.sessionCache[sid] || sid).slice(-20) });
+                content.innerHTML = renderSessionTimeline(data);
+                return;
+            }
+        }
+        const summaryResp = await fetch(`/api/session/${encodeURIComponent(sid)}/summary`);
+        if (!summaryResp.ok) {
             // Archived session with no summary_json — offer link to Archive tab
             const shortId = sid.slice(-8);
             content.innerHTML = `<div class="summary-archived-notice">
@@ -185,7 +197,7 @@ export async function openSummaryPanel(sid) {
             });
             return;
         }
-        const data = await resp.json();
+        const data = await summaryResp.json();
         document.getElementById('summary-title').textContent =
             t('summary.summary_of', { label: (state.sessionCache[sid] || sid).slice(-20) });
         content.innerHTML = renderSummaryHTML(data);
@@ -320,6 +332,103 @@ export function renderSummaryHTML(d) {
         </table>`;
 
     return meta + actionsHtml + filesHtml + responseHtml + statsHtml;
+}
+
+// ── Session timeline (tree of interactions → runs → model calls → tools) ──
+
+const TIMELINE_TOOL_ICONS = {
+    Read: '📄', Write: '💾', Edit: '✏️', Bash: '⚡', Glob: '🔍',
+    Grep: '🔎', Agent: '🤖', WebFetch: '🌐', WebSearch: '🌐',
+    NotebookEdit: '📓', LSP: '🔗',
+};
+const tlToolIcon = name => TIMELINE_TOOL_ICONS[name] || '⚙';
+const RUN_KIND_LABELS = {
+    main: '💬',
+    subagent: '⤷',
+    title: '⚙',
+    memory: '⚙',
+    recap: '⚙',
+    compact: '⚙',
+    system: '⚙',
+};
+
+function fmtDur(ms) {
+    if (ms == null) return '—';
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    return (ms / 60000).toFixed(1) + 'm';
+}
+
+function fmtTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+export function renderSessionTimeline(d) {
+    const fmt = n => n != null ? n.toLocaleString() : '—';
+    const icons = RUN_KIND_LABELS;
+    const isUserPrompt = run => run.run_kind === 'main';
+
+    // Header stats
+    const header = `
+        <div class="summary-meta">
+            <span class="summary-meta-item">${fmt(d.total_model_calls)} ${t('summary.requests')}</span>
+            <span class="summary-meta-item">${fmt(d.user_interactions)} ${t('summary.user_prompts_count')}</span>
+            <span class="summary-meta-item">${t('summary.timeline')}</span>
+        </div>`;
+
+    let html = header + '<div class="timeline-tree">';
+
+    for (const interaction of (d.interactions || [])) {
+        const hasUserRun = (interaction.runs || []).some(isUserPrompt);
+        // Interaction header: highlight when it carries a user prompt.
+        const cls = hasUserRun ? 'timeline-interaction timeline-interaction-user' : 'timeline-interaction';
+        html += `<div class="${cls}">`;
+        const icon = hasUserRun ? '💬' : '⚙';
+        html += `<div class="timeline-interaction-header">
+            <span class="timeline-interaction-icon">${icon}</span>
+            <span class="timeline-interaction-text">${esc(interaction.prompt_text || t('summary.no_prompt'))}</span>
+        </div>`;
+
+        for (const run of (interaction.runs || [])) {
+            const runIcon = icons[run.run_kind] || '⚙';
+            const isSubagent = run.run_kind === 'subagent';
+            const subCls = isSubagent ? ' timeline-run-subagent' : '';
+            html += `<div class="timeline-run${subCls}">
+                <div class="timeline-run-header">
+                    <span class="timeline-run-icon">${runIcon}</span>
+                    <span class="timeline-run-kind">${esc(run.run_kind)}</span>
+                    <span class="timeline-run-meta">${fmt(run.model_calls.length)} ${t('summary.calls')} · ${fmt(run.tool_call_count)} ${t('summary.tools')}</span>
+                </div>
+                <div class="timeline-calls">`;
+            for (const call of (run.model_calls || [])) {
+                html += `<div class="timeline-call" data-call-id="${esc(call.id)}">
+                    <span class="timeline-call-time">${fmtTime(call.started_at)}</span>
+                    <span class="timeline-call-model">${esc(call.resolved_model)}</span>
+                    <span class="timeline-call-status ${esc(call.status)}">${esc(call.status)}</span>
+                    <span class="timeline-call-tokens">${fmt(call.input_tokens)}/${fmt(call.output_tokens)}</span>
+                    <span class="timeline-call-dur">${fmtDur(call.duration_ms)}</span>
+                    <span class="timeline-call-cost">$${(call.cost_microusd / 1e6).toFixed(4)}</span>
+                    ${call.stop_reason ? `<span class="timeline-call-stop">${esc(call.stop_reason)}</span>` : ''}
+                    <div class="timeline-ops">`;
+                for (const op of (call.operations || [])) {
+                    html += `<div class="timeline-op">
+                        <span class="timeline-op-icon">${tlToolIcon(op.tool_name)}</span>
+                        <span class="timeline-op-name">${esc(op.tool_name)}</span>
+                        <span class="timeline-op-input">${esc(op.input_preview || '')}</span>
+                        <span class="timeline-op-status ${esc(op.status)}">${esc(op.status)}</span>
+                    </div>`;
+                }
+                html += '</div></div>';
+            }
+            html += '</div></div>';
+        }
+        html += '</div>';
+    }
+    html += '</div>';
+
+    return html;
 }
 
 export function bindSummaryEvents(container) {

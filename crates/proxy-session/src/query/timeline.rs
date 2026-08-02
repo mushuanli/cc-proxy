@@ -233,3 +233,131 @@ fn call_to_node(call: &ModelCallRow, tools: Vec<ToolInvocationRow>) -> ModelCall
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::observation::{Observation, ObservationKind, TokenUsage};
+    use crate::persist::repo::{SessionRepo, SessionRepoConfig};
+    use std::sync::Arc;
+
+    fn repo() -> (Arc<SessionRepo>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline-test.db");
+        let repo = Arc::new(
+            SessionRepo::open(SessionRepoConfig {
+                database_path: path.clone(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        (repo, dir)
+    }
+
+    fn obs(session_id: &str, seq: usize, kind: ObservationKind) -> Observation {
+        Observation {
+            event_id: format!("ev-{session_id}-{seq}"),
+            session_id: session_id.into(),
+            source: "proxy".into(),
+            occurred_at: 1_700_000_000_000 + seq as i64,
+            received_at: 1_700_000_000_000 + seq as i64,
+            source_sequence: Some(seq.to_string()),
+            source_version: None,
+            payload_hash: format!("hash-{session_id}-{seq}"),
+            kind,
+        }
+    }
+
+    #[test]
+    fn timeline_groups_main_and_subagent_runs() {
+        let (repo, dir) = repo();
+        let sid = "sess-tl";
+        let start_main = ObservationKind::ModelCallStart {
+            call_id: "call-1".into(),
+            client_request_id: None,
+            requested_model: Some("m".into()),
+            prompt_text: Some("修复导出按钮".into()),
+            started_at: 1_700_000_000_000,
+        };
+        let end_main = ObservationKind::ModelCallEnd {
+            call_id: "call-1".into(),
+            status: "completed".into(),
+            tokens: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
+            stop_reason: Some("tool_use".into()),
+            cost_microusd: 1000,
+            ended_at: 1_700_000_001_000,
+            provider_request_id: None,
+            error: None,
+            http_status_code: Some(200),
+        };
+        let tool = ObservationKind::ToolEmitted {
+            call_id: "call-1".into(),
+            tool_use_id: "tool-1".into(),
+            tool_name: "Bash".into(),
+            started_at: 1_700_000_000_500,
+        };
+        let tool_done = ObservationKind::ToolInputComplete {
+            tool_use_id: "tool-1".into(),
+            input_json: r#"{"command":"ls"}"#.into(),
+        };
+        let start_sub = ObservationKind::ModelCallStart {
+            call_id: "call-2".into(),
+            client_request_id: None,
+            requested_model: Some("m".into()),
+            prompt_text: Some("<transcript>\nUser: 排查".into()),
+            started_at: 1_700_000_000_600,
+        };
+        let end_sub = ObservationKind::ModelCallEnd {
+            call_id: "call-2".into(),
+            status: "completed".into(),
+            tokens: TokenUsage::default(),
+            stop_reason: Some("stop_sequence".into()),
+            cost_microusd: 200,
+            ended_at: 1_700_000_000_900,
+            provider_request_id: None,
+            error: None,
+            http_status_code: Some(200),
+        };
+
+        for (i, kind) in [start_main, end_main, tool, tool_done, start_sub, end_sub]
+            .into_iter()
+            .enumerate()
+        {
+            repo.record_observation(&obs(sid, i, kind)).unwrap();
+        }
+
+        let reader = TimelineReader::new(repo.clone());
+        let doc = reader.load(sid).unwrap();
+
+        assert_eq!(doc.total_model_calls, 2);
+        assert_eq!(doc.user_interactions, 1);
+
+        // Two interactions: one main (user prompt), one internal (subagent orphan).
+        let main = doc
+            .interactions
+            .iter()
+            .find(|i| i.runs.iter().any(|r| r.run_kind == "main"))
+            .expect("main interaction present");
+        assert_eq!(main.prompt_text.as_deref(), Some("修复导出按钮"));
+        let main_run = main.runs.iter().find(|r| r.run_kind == "main").unwrap();
+        assert_eq!(main_run.model_calls.len(), 1);
+        assert_eq!(main_run.tool_call_count, 1);
+        assert_eq!(main_run.model_calls[0].operations[0].tool_name, "Bash");
+        assert_eq!(main_run.model_calls[0].operations[0].input_preview.as_deref(), Some(r#"{"command":"ls"}"#));
+        assert_eq!(main_run.model_calls[0].cost_microusd, 1000);
+
+        let sub = doc
+            .interactions
+            .iter()
+            .flat_map(|i| i.runs.iter())
+            .find(|r| r.run_kind == "subagent")
+            .expect("subagent run present");
+        assert_eq!(sub.model_calls.len(), 1);
+        drop(repo);
+        let _ = dir;
+    }
+}
+
