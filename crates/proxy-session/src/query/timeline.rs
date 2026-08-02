@@ -275,6 +275,7 @@ mod tests {
             call_id: "call-1".into(),
             client_request_id: None,
             requested_model: Some("m".into()),
+            resolved_model: Some("m".into()),
             prompt_text: Some("修复导出按钮".into()),
             started_at: 1_700_000_000_000,
         };
@@ -288,6 +289,7 @@ mod tests {
             },
             stop_reason: Some("tool_use".into()),
             cost_microusd: 1000,
+            duration_ms: Some(1000),
             ended_at: 1_700_000_001_000,
             provider_request_id: None,
             error: None,
@@ -307,6 +309,7 @@ mod tests {
             call_id: "call-2".into(),
             client_request_id: None,
             requested_model: Some("m".into()),
+            resolved_model: Some("m".into()),
             prompt_text: Some("<transcript>\nUser: 排查".into()),
             started_at: 1_700_000_000_600,
         };
@@ -316,6 +319,7 @@ mod tests {
             tokens: TokenUsage::default(),
             stop_reason: Some("stop_sequence".into()),
             cost_microusd: 200,
+            duration_ms: Some(300),
             ended_at: 1_700_000_000_900,
             provider_request_id: None,
             error: None,
@@ -348,6 +352,8 @@ mod tests {
         assert_eq!(main_run.model_calls[0].operations[0].tool_name, "Bash");
         assert_eq!(main_run.model_calls[0].operations[0].input_preview.as_deref(), Some(r#"{"command":"ls"}"#));
         assert_eq!(main_run.model_calls[0].cost_microusd, 1000);
+        assert_eq!(main_run.model_calls[0].resolved_model, "m");
+        assert_eq!(main_run.model_calls[0].duration_ms, Some(1000));
 
         let sub = doc
             .interactions

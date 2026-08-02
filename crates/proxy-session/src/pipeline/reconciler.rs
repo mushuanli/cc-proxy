@@ -344,6 +344,7 @@ mod tests {
             call_id: "call-1".into(),
             client_request_id: None,
             requested_model: Some("deepseek-v4-flash".into()),
+            resolved_model: Some("deepseek-v4-flash".into()),
             prompt_text: Some("梳理代码，查找错误".into()),
             started_at: 1_700_000_000_000,
         };
@@ -351,6 +352,7 @@ mod tests {
             call_id: "call-2".into(),
             client_request_id: None,
             requested_model: Some("deepseek-v4-flash".into()),
+            resolved_model: Some("deepseek-v4-flash".into()),
             prompt_text: Some("<transcript>\nUser: 梳理代码".into()),
             started_at: 1_700_000_000_100,
         };

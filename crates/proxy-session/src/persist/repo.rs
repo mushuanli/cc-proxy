@@ -268,6 +268,7 @@ impl SessionRepo {
                     tokens: TokenUsage::default(),
                     stop_reason: None,
                     cost_microusd: 0,
+                    duration_ms: None,
                     ended_at: 0,
                     provider_request_id: None,
                     error: Some("unparseable observation payload".into()),
@@ -296,6 +297,7 @@ impl SessionRepo {
                 call_id,
                 client_request_id,
                 requested_model,
+                resolved_model,
                 started_at,
                 ..
             } => {
@@ -306,9 +308,18 @@ impl SessionRepo {
                     .unwrap_or(0);
                 conn.execute(
                     "INSERT OR IGNORE INTO model_calls (
-                        id, session_id, sequence_no, client_request_id, requested_model, started_at, status
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'in_progress')",
-                    params![call_id, obs.session_id, sequence_no, client_request_id, requested_model, started_at],
+                        id, session_id, sequence_no, client_request_id, requested_model,
+                        resolved_model, started_at, status
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'in_progress')",
+                    params![
+                        call_id,
+                        obs.session_id,
+                        sequence_no,
+                        client_request_id,
+                        requested_model,
+                        resolved_model,
+                        started_at,
+                    ],
                 )?;
             }
             ObservationKind::ModelCallFirstToken { call_id, ttft_ms } => {
@@ -383,6 +394,7 @@ impl SessionRepo {
                 tokens,
                 stop_reason,
                 cost_microusd,
+                duration_ms,
                 ended_at,
                 provider_request_id,
                 error,
@@ -411,7 +423,7 @@ impl SessionRepo {
                         tokens.cache_creation_tokens as i64,
                         tokens.cache_read_tokens as i64,
                         cost_microusd,
-                        ended_at.saturating_sub(0),
+                        duration_ms,
                         stop_reason,
                         provider_request_id,
                         if error.is_some() { Some("upstream_error") } else { None },
@@ -515,6 +527,7 @@ mod tests {
                 call_id: "call-1".into(),
                 client_request_id: None,
                 requested_model: Some("model".into()),
+                resolved_model: Some("model".into()),
                 prompt_text: None,
                 started_at: 1_700_000_000_000,
             },
@@ -542,6 +555,7 @@ mod tests {
                 call_id: "call-1".into(),
                 client_request_id: Some("req-1".into()),
                 requested_model: Some("m1".into()),
+                resolved_model: Some("m1".into()),
                 prompt_text: None,
                 started_at: 1_700_000_000_000,
             },
@@ -580,6 +594,7 @@ mod tests {
                 },
                 stop_reason: Some("tool_use".into()),
                 cost_microusd: 42,
+                duration_ms: Some(200),
                 ended_at: 1_700_000_000_200,
                 provider_request_id: None,
                 error: None,

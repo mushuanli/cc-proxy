@@ -19,6 +19,9 @@ pub enum ObservationKind {
         call_id: String,
         client_request_id: Option<String>,
         requested_model: Option<String>,
+        #[serde(default)]
+        resolved_model: Option<String>,
+        #[serde(default)]
         prompt_text: Option<String>,
         started_at: i64,
     },
@@ -52,6 +55,8 @@ pub enum ObservationKind {
         tokens: TokenUsage,
         stop_reason: Option<String>,
         cost_microusd: i64,
+        #[serde(default)]
+        duration_ms: Option<i64>,
         ended_at: i64,
         provider_request_id: Option<String>,
         error: Option<String>,

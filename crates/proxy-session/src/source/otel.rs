@@ -61,6 +61,10 @@ impl OtelParser {
                     .get("model")
                     .and_then(Value::as_str)
                     .map(String::from),
+                resolved_model: span
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(String::from),
                 prompt_text: span
                     .get("prompt")
                     .and_then(Value::as_str)

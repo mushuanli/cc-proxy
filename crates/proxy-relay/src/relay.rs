@@ -1284,7 +1284,8 @@ fn emit_model_call_start(
         kind: proxy_session::ObservationKind::ModelCallStart {
             call_id,
             client_request_id,
-            requested_model: if model == "unknown" { None } else { Some(model) },
+            requested_model: if model == "unknown" { None } else { Some(model.clone()) },
+            resolved_model: if model == "unknown" { None } else { Some(model) },
             prompt_text: task.prompt_text.clone().map(|t| {
                 let mut chars = t.chars();
                 let preview: String = chars.by_ref().take(1000).collect();
@@ -1362,6 +1363,7 @@ fn emit_model_call_end(
             },
             stop_reason: task.stop_reason.clone(),
             cost_microusd: task.cost_microusd,
+            duration_ms: task.duration_ms,
             ended_at: task.ended_at.unwrap_or(now),
             provider_request_id: task.upstream_message_id.clone(),
             error: task
