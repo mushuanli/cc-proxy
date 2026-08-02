@@ -484,11 +484,13 @@ export function renderSessionTimeline(d) {
                     <div class="timeline-ops">`;
                 for (const op of (call.operations || [])) {
                     html += `<div class="timeline-op">
-                        <span class="timeline-op-icon">${tlToolIcon(op.tool_name)}</span>
-                        <span class="timeline-op-name">${esc(op.tool_name)}</span>
-                        <span class="timeline-op-input">${esc(op.input_preview || '')}</span>
-                        ${op.result_preview ? `<span class="timeline-op-result">${esc(op.result_preview)}</span>` : ''}
-                        <span class="timeline-op-status ${esc(op.status)}">${esc(op.status)}</span>
+                        <div class="timeline-op-head">
+                            <span class="timeline-op-icon">${tlToolIcon(op.tool_name)}</span>
+                            <span class="timeline-op-name">${esc(op.tool_name)}</span>
+                            <span class="timeline-op-status ${esc(op.status)}">${esc(op.status)}</span>
+                        </div>
+                        ${op.input_preview ? `<div class="timeline-op-input">${esc(op.input_preview)}</div>` : ''}
+                        ${op.result_preview ? `<div class="timeline-op-result">${esc(op.result_preview)}</div>` : ''}
                     </div>`;
                 }
                 html += '</div></div>';

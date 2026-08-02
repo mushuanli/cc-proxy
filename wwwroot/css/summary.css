@@ -405,29 +405,40 @@
 
 .timeline-ops { grid-column: 1 / -1; margin: 2px 0 2px 18px; }
 .timeline-op {
-    display: flex; align-items: center; gap: 6px;
-    padding: 1px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 2px 0;
     color: var(--text);
+}
+.timeline-op-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 .timeline-op-icon { font-size: 0.75rem; flex-shrink: 0; }
 .timeline-op-name { color: var(--accent2, #4a8fd0); font-family: var(--font-mono); flex-shrink: 0; }
+.timeline-op-status { font-size: 0.62rem; text-transform: uppercase; margin-left: auto; flex-shrink: 0; }
 .timeline-op-input {
     color: var(--text-muted);
-    flex: 1;
-    min-width: 0;
-    overflow-wrap: break-word;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    padding-left: 18px;
+    white-space: pre-wrap;
     word-break: break-word;
+    overflow-wrap: break-word;
 }
-.timeline-op-status { font-size: 0.62rem; text-transform: uppercase; margin-left: auto; flex-shrink: 0; }
 .timeline-op-result {
     color: var(--text);
     background: rgba(90,140,90,0.12);
     border-radius: 4px;
-    padding: 1px 6px;
+    padding: 2px 6px;
     font-size: 0.72rem;
-    max-width: 100%;
-    overflow-wrap: break-word;
+    font-family: var(--font-mono);
+    margin-left: 18px;
+    white-space: pre-wrap;
     word-break: break-word;
+    overflow-wrap: break-word;
 }
 .timeline-op-status.succeeded { color: #3a9a5f; }
 .timeline-op-status.failed { color: #d45a5a; }
