@@ -1284,6 +1284,11 @@ fn emit_model_call_start(
         .as_ref()
         .and_then(|h| h.get("x-request-id").and_then(|v| v.as_str()))
         .map(String::from);
+    let agent_id = task
+        .request_headers
+        .as_ref()
+        .and_then(|h| h.get("x-claude-code-agent-id").and_then(|v| v.as_str()))
+        .map(String::from);
     if let Err(e) = ingest.record(proxy_session::Observation {
         event_id: format!("call-start-{call_id}"),
         session_id: session_id.clone(),
@@ -1295,6 +1300,7 @@ fn emit_model_call_start(
         payload_hash: format!("call-start-{call_id}"),
         kind: proxy_session::ObservationKind::ModelCallStart {
             call_id,
+            agent_id,
             client_request_id,
             requested_model: if model == "unknown" { None } else { Some(model.clone()) },
             resolved_model: if model == "unknown" { None } else { Some(model) },
@@ -1340,6 +1346,7 @@ async fn finalize_and_publish(
             )));
             events.publish(WsMessage::RequestUpdated(proxied));
             emit_model_call_end(ingest.as_ref(), &task);
+            emit_session_summary(ingest.as_ref(), &task);
         }
         Ok(proxy_store::TaskFinalizeResult::AlreadyFinalized { .. }) => {
             tracing::debug!(
@@ -1392,6 +1399,54 @@ fn emit_model_call_end(
     }) {
         tracing::warn!("[relay] failed to record model_call_end: {}", e);
     }
+}
+
+/// Merge a task's summary into the session summary cache.
+fn emit_session_summary(
+    ingest: Option<&Arc<dyn proxy_session::SessionIngest>>,
+    task: &proxy_store::Task,
+) {
+    let Some(ingest) = ingest else { return };
+    let Some(json) = task.summary_json.as_deref() else { return };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else { return };
+    let stats = value.get("stats").unwrap_or(&serde_json::Value::Null);
+    let mut summary = proxy_session::TimelineSummary {
+        total_messages: stats
+            .get("total_messages")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        tool_call_count: stats
+            .get("tool_call_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        tool_result_count: stats
+            .get("tool_result_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        thinking_block_count: stats
+            .get("thinking_block_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        ..Default::default()
+    };
+    if let Some(prompts) = value.get("user_prompts").and_then(|v| v.as_array()) {
+        for p in prompts {
+            if let Some(text) = p.get("text").and_then(|v| v.as_str()) {
+                summary.user_prompts.push(text.to_string());
+            }
+        }
+    }
+    if let Some(files) = value.get("touched_files").and_then(|v| v.as_array()) {
+        for f in files {
+            if let Some(path) = f.get("path").and_then(|v| v.as_str()) {
+                summary.touched_files.push(path.to_string());
+            }
+        }
+    }
+    if let Some(resp) = value.get("final_response").and_then(|v| v.as_str()) {
+        summary.final_response = resp.to_string();
+    }
+    ingest.upsert_summary(task.session_id.as_str(), &summary);
 }
 
 /// Strip request body to only model, output_config, and the last real user message.

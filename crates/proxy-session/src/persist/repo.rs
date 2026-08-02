@@ -65,12 +65,35 @@ impl SessionRepo {
     }
 
     /// Materialize observations into model_calls / tool_invocations for a session.
+    ///
+    /// Incremental: only observations received after the last processed marker
+    /// are applied, avoiding a full rescan on every timeline load.
     pub fn materialize(&self, session_id: &str) -> SessionResult<()> {
         let conn = self.inner.conn.lock().unwrap();
-        let observations = self.load_observations(&conn, session_id)?;
+        let last: i64 = conn
+            .query_row(
+                "SELECT last_processed_seq FROM materialize_marker WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let observations = self.load_observations_after(&conn, session_id, last)?;
+        if observations.is_empty() {
+            return Ok(());
+        }
+        let mut max_received = last;
         for obs in &observations {
+            max_received = max_received.max(obs.received_at);
             self.apply_observation(&conn, obs)?;
         }
+        conn.execute(
+            "INSERT INTO materialize_marker (session_id, last_processed_seq, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET
+                last_processed_seq = excluded.last_processed_seq,
+                updated_at = excluded.updated_at",
+            params![session_id, max_received, chrono::Utc::now().timestamp_millis()],
+        )?;
         Ok(())
     }
 
@@ -82,6 +105,147 @@ impl SessionRepo {
     ) -> SessionResult<T> {
         let conn = self.inner.conn.lock().unwrap();
         f(&conn)
+    }
+
+    /// Incrementally merge a task summary into the session summary cache.
+    pub fn upsert_session_summary(
+        &self,
+        session_id: &str,
+        summary: &crate::query::TimelineSummary,
+    ) -> SessionResult<()> {
+        let conn = self.inner.conn.lock().unwrap();
+        Self::merge_summary(&conn, session_id, summary)
+    }
+
+    /// Read the cached session summary, or None if never built.
+    pub fn get_session_summary(
+        &self,
+        session_id: &str,
+    ) -> SessionResult<Option<crate::query::TimelineSummary>> {
+        let conn = self.inner.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT user_prompts_json, touched_files_json, total_messages,
+                        tool_call_count, tool_result_count, thinking_block_count, final_response
+                 FROM session_summary WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(|(prompts, files, msgs, tools, results, thinking, final_resp)| {
+            crate::query::TimelineSummary {
+                user_prompts: serde_json::from_str(&prompts).unwrap_or_default(),
+                touched_files: serde_json::from_str(&files).unwrap_or_default(),
+                assistant_actions: 0,
+                final_response: final_resp.unwrap_or_default(),
+                total_messages: msgs as usize,
+                tool_call_count: tools as usize,
+                tool_result_count: results as usize,
+                thinking_block_count: thinking as usize,
+            }
+        }))
+    }
+
+    /// Merge one task summary into the cached session aggregate (read-modify-write).
+    fn merge_summary(
+        conn: &Connection,
+        session_id: &str,
+        summary: &crate::query::TimelineSummary,
+    ) -> SessionResult<()> {
+        // Read existing.
+        let (mut prompts, mut files, mut msgs, mut tools, mut results, mut thinking, mut final_resp) =
+            (
+                Vec::new(),
+                Vec::new(),
+                0i64,
+                0i64,
+                0i64,
+                0i64,
+                None::<String>,
+            );
+        if let Some((p, f, m, t, r, th, fr)) = conn
+            .query_row(
+                "SELECT user_prompts_json, touched_files_json, total_messages,
+                        tool_call_count, tool_result_count, thinking_block_count, final_response
+                 FROM session_summary WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            prompts = serde_json::from_str(&p).unwrap_or_default();
+            files = serde_json::from_str(&f).unwrap_or_default();
+            msgs = m;
+            tools = t;
+            results = r;
+            thinking = th;
+            final_resp = fr;
+        }
+        // Merge.
+        for p in &summary.user_prompts {
+            if !prompts.contains(p) {
+                prompts.push(p.clone());
+            }
+        }
+        for f in &summary.touched_files {
+            if !files.contains(f) {
+                files.push(f.clone());
+            }
+        }
+        msgs += summary.total_messages as i64;
+        tools += summary.tool_call_count as i64;
+        results += summary.tool_result_count as i64;
+        thinking += summary.thinking_block_count as i64;
+        if final_resp.is_none() && !summary.final_response.is_empty() {
+            final_resp = Some(summary.final_response.clone());
+        }
+        conn.execute(
+            "INSERT INTO session_summary (
+                session_id, user_prompts_json, touched_files_json, total_messages,
+                tool_call_count, tool_result_count, thinking_block_count, final_response, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(session_id) DO UPDATE SET
+                user_prompts_json = excluded.user_prompts_json,
+                touched_files_json = excluded.touched_files_json,
+                total_messages = excluded.total_messages,
+                tool_call_count = excluded.tool_call_count,
+                tool_result_count = excluded.tool_result_count,
+                thinking_block_count = excluded.thinking_block_count,
+                final_response = excluded.final_response,
+                updated_at = excluded.updated_at",
+            params![
+                session_id,
+                serde_json::to_string(&prompts).unwrap_or_default(),
+                serde_json::to_string(&files).unwrap_or_default(),
+                msgs,
+                tools,
+                results,
+                thinking,
+                final_resp,
+                chrono::Utc::now().timestamp_millis(),
+            ],
+        )?;
+        Ok(())
     }
 
     /// Load all observations for a session (for reconciler).
@@ -112,7 +276,7 @@ impl SessionRepo {
     ) -> SessionResult<Vec<ModelCallRow>> {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, sequence_no, previous_model_call_id,
-                    execution_run_id,
+                    execution_run_id, agent_id,
                     client_request_id, provider_request_id, started_at, status,
                     requested_model, resolved_model, provider, upstream,
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
@@ -251,15 +415,25 @@ impl SessionRepo {
     }
 
     fn load_observations(&self, conn: &Connection, session_id: &str) -> SessionResult<Vec<Observation>> {
+        self.load_observations_after(conn, session_id, i64::MIN)
+    }
+
+    /// Load observations received strictly after `after_received_at`.
+    fn load_observations_after(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        after_received_at: i64,
+    ) -> SessionResult<Vec<Observation>> {
         let mut stmt = conn.prepare(
             "SELECT event_id, session_id, source, event_type,
                     occurred_at, received_at, source_sequence, source_version,
                     payload_hash, raw_payload
              FROM observations
-             WHERE session_id = ?1
+             WHERE session_id = ?1 AND received_at > ?2
              ORDER BY received_at ASC, event_id ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
+        let rows = stmt.query_map(params![session_id, after_received_at], |row| {
             let raw: String = row.get("raw_payload")?;
             let kind = serde_json::from_str::<ObservationKind>(&raw).unwrap_or_else(|_| {
                 ObservationKind::ModelCallEnd {
@@ -295,6 +469,7 @@ impl SessionRepo {
         match &obs.kind {
             ObservationKind::ModelCallStart {
                 call_id,
+                agent_id,
                 client_request_id,
                 requested_model,
                 resolved_model,
@@ -308,13 +483,14 @@ impl SessionRepo {
                     .unwrap_or(0);
                 conn.execute(
                     "INSERT OR IGNORE INTO model_calls (
-                        id, session_id, sequence_no, client_request_id, requested_model,
+                        id, session_id, sequence_no, agent_id, client_request_id, requested_model,
                         resolved_model, started_at, status
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'in_progress')",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'in_progress')",
                     params![
                         call_id,
                         obs.session_id,
                         sequence_no,
+                        agent_id,
                         client_request_id,
                         requested_model,
                         resolved_model,
@@ -445,6 +621,12 @@ impl crate::ingest::SessionIngest for SessionRepo {
     fn record(&self, obs: crate::ingest::Observation) -> SessionResult<()> {
         self.record_observation(&obs)
     }
+
+    fn upsert_summary(&self, session_id: &str, summary: &crate::query::TimelineSummary) {
+        if let Err(e) = self.upsert_session_summary(session_id, summary) {
+            tracing::warn!("[session] failed to merge session summary: {}", e);
+        }
+    }
 }
 
 fn open_connection(config: &SessionRepoConfig) -> SessionResult<Connection> {
@@ -474,6 +656,9 @@ fn extract_field(kind: &ObservationKind, field: &str) -> Option<String> {
         ObservationKind::AgentStart { agent_id, .. }
         | ObservationKind::AgentStop { agent_id, .. } if field == "agent_id" => {
             Some(agent_id.clone())
+        }
+        ObservationKind::ModelCallStart { agent_id, .. } if field == "agent_id" => {
+            agent_id.clone()
         }
         _ => None,
     }
@@ -525,6 +710,7 @@ mod tests {
         let obs = observation(
             ObservationKind::ModelCallStart {
                 call_id: "call-1".into(),
+                agent_id: Some("main-agent".into()),
                 client_request_id: None,
                 requested_model: Some("model".into()),
                 resolved_model: Some("model".into()),
@@ -553,6 +739,7 @@ mod tests {
         repo.record_observation(&observation(
             ObservationKind::ModelCallStart {
                 call_id: "call-1".into(),
+                agent_id: Some("main-agent".into()),
                 client_request_id: Some("req-1".into()),
                 requested_model: Some("m1".into()),
                 resolved_model: Some("m1".into()),

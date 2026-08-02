@@ -291,6 +291,7 @@ mod tests {
         let sid = "sess-tl";
         let start_main = ObservationKind::ModelCallStart {
             call_id: "call-1".into(),
+            agent_id: Some("main-agent".into()),
             client_request_id: None,
             requested_model: Some("m".into()),
             resolved_model: Some("m".into()),
@@ -325,6 +326,7 @@ mod tests {
         };
         let start_sub = ObservationKind::ModelCallStart {
             call_id: "call-2".into(),
+            agent_id: Some("sub-agent-1".into()),
             client_request_id: None,
             requested_model: Some("m".into()),
             resolved_model: Some("m".into()),

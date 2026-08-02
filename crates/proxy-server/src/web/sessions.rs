@@ -256,7 +256,12 @@ pub async fn timeline(
     let reader = proxy_session::TimelineReader::new(state.session.clone());
     match reader.load(sid.as_str()) {
         Ok(mut doc) => {
-            doc.summary = aggregate_session_summary(&state, &sid).await;
+            // Prefer the incremental summary cache (O(1)); fall back to a full
+            // aggregate from task summaries when the cache is not yet built.
+            doc.summary = match state.session.get_session_summary(sid.as_str()) {
+                Ok(Some(s)) => Some(s),
+                _ => aggregate_session_summary(&state, &sid).await,
+            };
             Json(doc).into_response()
         }
         Err(e) => (
@@ -273,15 +278,14 @@ async fn aggregate_session_summary(
     sid: &proxy_common::SessionId,
 ) -> Option<proxy_session::TimelineSummary> {
     use proxy_store::summary::analyzer::TaskSummaryV1;
-    let tasks = match state.store.task_list_full(sid).await {
+    let tasks = match state.store.session_summary_list(sid).await {
         Ok(t) => t,
         Err(_) => return None,
     };
     let mut out = proxy_session::TimelineSummary::default();
     let mut any = false;
-    for task in &tasks {
-        let Some(json) = task.summary_json.as_deref() else { continue };
-        let Ok(summary) = serde_json::from_str::<TaskSummaryV1>(json) else { continue };
+    for (_task_id, json) in tasks {
+        let Ok(summary) = serde_json::from_str::<TaskSummaryV1>(&json) else { continue };
         any = true;
         for up in summary.user_prompts {
             if !out.user_prompts.contains(&up.text) {

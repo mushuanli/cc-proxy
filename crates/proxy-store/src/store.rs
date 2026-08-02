@@ -810,6 +810,20 @@ impl ProxyStore {
         .await
     }
 
+    /// List stored task summaries for a session without loading bodies.
+    pub async fn session_summary_list(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreResult<Vec<(TaskId, String)>> {
+        let this = self.clone();
+        let sid = session_id.clone();
+        Self::blocking(move || {
+            let conn = this.inner.conn.lock().unwrap();
+            db::tasks::session_summaries(&conn, &sid)
+        })
+        .await
+    }
+
     /// Query daily usage for a date range.
     pub async fn usage_query_range(
         &self,

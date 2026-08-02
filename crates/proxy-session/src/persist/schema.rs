@@ -17,6 +17,20 @@ pub fn migrate(conn: &Connection) -> SessionResult<()> {
     conn.execute_batch(CREATE_EXECUTION_RUNS)?;
     conn.execute_batch(CREATE_AGENT_IDENTITIES)?;
     conn.execute_batch(CREATE_AGENT_RUNS)?;
+    conn.execute_batch(CREATE_SESSION_SUMMARY)?;
+    conn.execute_batch(CREATE_MATERIALIZE_MARKER)?;
+    migrate_v2_agent_id(conn)?;
+    Ok(())
+}
+
+/// Add `agent_id` column to existing model_calls tables (idempotent).
+fn migrate_v2_agent_id(conn: &Connection) -> SessionResult<()> {
+    let has = conn
+        .prepare("SELECT agent_id FROM model_calls LIMIT 0")
+        .is_ok();
+    if !has {
+        conn.execute_batch("ALTER TABLE model_calls ADD COLUMN agent_id TEXT;")?;
+    }
     Ok(())
 }
 
@@ -48,6 +62,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
     sequence_no             INTEGER NOT NULL,
     previous_model_call_id  TEXT,
     execution_run_id        TEXT,
+    agent_id                TEXT,
     client_request_id       TEXT,
     provider_request_id     TEXT,
     started_at              INTEGER NOT NULL DEFAULT 0,
@@ -181,4 +196,26 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     UNIQUE(identity_id, run_no)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at);
+"#;
+
+const CREATE_SESSION_SUMMARY: &str = r#"
+CREATE TABLE IF NOT EXISTS session_summary (
+    session_id              TEXT PRIMARY KEY,
+    user_prompts_json       TEXT NOT NULL DEFAULT '[]',
+    touched_files_json      TEXT NOT NULL DEFAULT '[]',
+    total_messages          INTEGER NOT NULL DEFAULT 0,
+    tool_call_count         INTEGER NOT NULL DEFAULT 0,
+    tool_result_count       INTEGER NOT NULL DEFAULT 0,
+    thinking_block_count    INTEGER NOT NULL DEFAULT 0,
+    final_response          TEXT,
+    updated_at              INTEGER NOT NULL DEFAULT 0
+);
+"#;
+
+const CREATE_MATERIALIZE_MARKER: &str = r#"
+CREATE TABLE IF NOT EXISTS materialize_marker (
+    session_id              TEXT PRIMARY KEY,
+    last_processed_seq       INTEGER NOT NULL DEFAULT 0,
+    updated_at              INTEGER NOT NULL DEFAULT 0
+);
 "#;

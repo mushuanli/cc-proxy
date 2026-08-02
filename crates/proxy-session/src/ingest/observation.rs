@@ -17,6 +17,8 @@ pub struct TokenUsage {
 pub enum ObservationKind {
     ModelCallStart {
         call_id: String,
+        #[serde(default)]
+        agent_id: Option<String>,
         client_request_id: Option<String>,
         requested_model: Option<String>,
         #[serde(default)]

@@ -251,6 +251,29 @@ pub fn list_tasks(
     Ok(result)
 }
 
+/// List stored summary JSON for a session without loading request/response
+/// bodies. Returns (task_id, summary_json) pairs ordered by sequence.
+pub fn session_summaries(
+    conn: &Connection,
+    session_id: &SessionId,
+) -> StoreResult<Vec<(TaskId, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, s.summary_json
+         FROM tasks t
+         JOIN task_summaries s ON s.task_id = t.id
+         WHERE t.session_id = ?1
+         ORDER BY t.sequence_no ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id.as_str()], |row| {
+        Ok((
+            TaskId::new(row.get::<_, String>(0)?),
+            row.get::<_, String>(1)?,
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 /// Update the summary and its persisted list preview.
 pub fn update_summary(conn: &Connection, id: &TaskId, summary_json: &str) -> StoreResult<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();

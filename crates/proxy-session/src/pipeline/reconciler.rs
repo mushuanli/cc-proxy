@@ -86,48 +86,46 @@ impl Reconciler {
         &self,
         conn: &Connection,
         session_id: &str,
-        observations: &[Observation],
+        _observations: &[Observation],
     ) -> SessionResult<()> {
-        // Track end times by agent_id for run closure.
-        let mut ends: HashMap<&str, i64> = HashMap::new();
-        let mut starts: Vec<(&str, &str, i64)> = Vec::new(); // (agent_id, agent_type, started_at)
-        for obs in observations {
-            match &obs.kind {
-                crate::ingest::ObservationKind::AgentStart {
-                    agent_id,
-                    agent_type,
-                    started_at,
-                } => starts.push((agent_id, agent_type, *started_at)),
-                crate::ingest::ObservationKind::AgentStop { agent_id, ended_at } => {
-                    ends.insert(agent_id, *ended_at);
-                }
-                _ => {}
-            }
-        }
+        // Ensure the synthetic main identity exists.
+        self.ensure_main_identity(conn, session_id)?;
+
+        // Group by the real agent id captured from `x-claude-code-agent-id`.
+        // Each distinct id becomes one AgentIdentity + one AgentRun segment.
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT agent_id, MIN(started_at) FROM model_calls
+             WHERE session_id = ?1 AND agent_id IS NOT NULL
+             GROUP BY agent_id",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+            ))
+        })?;
+        let agents: Vec<(String, i64)> = rows.collect::<Result<_, _>>()?;
+        drop(stmt);
 
         let mut run_no_by_identity: HashMap<String, i64> = HashMap::new();
-        for (agent_id, agent_type, started_at) in starts {
-            // Ensure a synthetic main identity exists first.
-            self.ensure_main_identity(conn, session_id)?;
+        for (agent_id, started_at) in agents {
             let identity_id = format!("ident-{}-{agent_id}", session_id);
             conn.execute(
                 "INSERT OR IGNORE INTO agent_identities (
                     id, session_id, external_agent_id, agent_type, synthetic
-                 ) VALUES (?1, ?2, ?3, ?4, 0)",
-                params![identity_id, session_id, agent_id, agent_type],
+                 ) VALUES (?1, ?2, ?3, 'claude', 0)",
+                params![identity_id, session_id, agent_id],
             )?;
             let run_no = *run_no_by_identity
                 .entry(identity_id.clone())
                 .and_modify(|n| *n += 1)
                 .or_insert(1);
             let run_id = format!("arun-{identity_id}-{run_no}");
-            let status = if ends.contains_key(agent_id) { "completed" } else { "in_progress" };
-            let ended_at = ends.get(agent_id).copied();
             conn.execute(
                 "INSERT OR IGNORE INTO agent_runs (
                     id, session_id, identity_id, run_no, started_at, ended_at, status
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![run_id, session_id, identity_id, run_no, started_at, ended_at, status],
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'in_progress')",
+                params![run_id, session_id, identity_id, run_no, started_at],
             )?;
         }
         Ok(())
@@ -200,25 +198,44 @@ impl Reconciler {
             // Internal/subagent runs attach to the most recent main interaction.
             self.latest_main_interaction(conn, session_id)?
         };
-        // Reuse the existing run of the same kind under this interaction so a
-        // user prompt's tool loop groups into one main execution run instead
-        // of one run per model call.
+        // Subagent runs group by their real agent id so all calls of one
+        // subagent land in the same run; main runs reuse the existing run
+        // under the interaction (tool loop aggregation).
+        let agent_key = if run_kind == RunKind::Subagent {
+            call.agent_id.clone()
+        } else {
+            None
+        };
         let run_id = match &interaction_id {
             Some(iid) => {
                 let existing: Option<String> = conn
                     .query_row(
                         "SELECT id FROM execution_runs
                          WHERE session_id = ?1 AND interaction_id = ?2 AND run_kind = ?3
+                           AND (?4 IS NULL OR id LIKE ?4)
                          ORDER BY started_at ASC LIMIT 1",
-                        params![session_id, iid, run_kind.as_str()],
+                        params![
+                            session_id,
+                            iid,
+                            run_kind.as_str(),
+                            agent_key.as_deref().map(|a| format!("%{a}%")),
+                        ],
                         |row| row.get(0),
                     )
                     .optional()?;
                 existing.unwrap_or_else(|| {
-                    format!("run-{session_id}-{}-{}", run_kind.as_str(), call.sequence_no)
+                    format!(
+                        "run-{session_id}-{}-{}",
+                        run_kind.as_str(),
+                        agent_key.clone().unwrap_or_else(|| call.sequence_no.to_string())
+                    )
                 })
             }
-            None => format!("run-{session_id}-{}-{}", run_kind.as_str(), call.sequence_no),
+            None => format!(
+                "run-{session_id}-{}-{}",
+                run_kind.as_str(),
+                agent_key.clone().unwrap_or_else(|| call.sequence_no.to_string())
+            ),
         };
         conn.execute(
             "INSERT OR IGNORE INTO execution_runs (
@@ -389,6 +406,7 @@ mod tests {
         // Main prompt + a subagent run (transcript pattern) + tool calls.
         let start_main = ObservationKind::ModelCallStart {
             call_id: "call-1".into(),
+            agent_id: Some("main-agent".into()),
             client_request_id: None,
             requested_model: Some("deepseek-v4-flash".into()),
             resolved_model: Some("deepseek-v4-flash".into()),
@@ -397,6 +415,7 @@ mod tests {
         };
         let start_sub = ObservationKind::ModelCallStart {
             call_id: "call-2".into(),
+            agent_id: Some("sub-agent-1".into()),
             client_request_id: None,
             requested_model: Some("deepseek-v4-flash".into()),
             resolved_model: Some("deepseek-v4-flash".into()),
@@ -440,13 +459,14 @@ mod tests {
             let agent_identities: i64 = conn
                 .query_row("SELECT COUNT(*) FROM agent_identities WHERE session_id = ?1", [sid], |r| r.get(0))
                 .unwrap();
-            // synthetic main + external ag-1
-            assert_eq!(agent_identities, 2);
+            // synthetic main + main-agent + sub-agent-1
+            assert_eq!(agent_identities, 3);
 
             let runs: i64 = conn
                 .query_row("SELECT COUNT(*) FROM agent_runs WHERE session_id = ?1", [sid], |r| r.get(0))
                 .unwrap();
-            assert_eq!(runs, 1);
+            // one run per real agent id (main-agent, sub-agent-1)
+            assert_eq!(runs, 2);
 
             let sub_run_kind: String = conn
                 .query_row(

@@ -56,6 +56,10 @@ impl OtelParser {
             payload_hash: format!("otel-span-{trace_id}-{span_id}"),
             kind: ObservationKind::ModelCallStart {
                 call_id: call_id.to_string(),
+                agent_id: span
+                    .get("agent_id")
+                    .and_then(Value::as_str)
+                    .map(String::from),
                 client_request_id: Some(call_id.to_string()),
                 requested_model: span
                     .get("model")

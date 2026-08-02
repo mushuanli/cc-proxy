@@ -21,6 +21,9 @@ pub trait SessionIngest: Send + Sync {
         }
         Ok(())
     }
+
+    /// Merge a task summary into the session summary cache (best effort).
+    fn upsert_summary(&self, _session_id: &str, _summary: &crate::query::TimelineSummary) {}
 }
 
 /// Convenience blanket impl so callers can pass an `Option<Arc<dyn SessionIngest>>`
