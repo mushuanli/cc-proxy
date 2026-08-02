@@ -19,6 +19,7 @@ pub enum ObservationKind {
         call_id: String,
         client_request_id: Option<String>,
         requested_model: Option<String>,
+        prompt_text: Option<String>,
         started_at: i64,
     },
     ModelCallFirstToken {

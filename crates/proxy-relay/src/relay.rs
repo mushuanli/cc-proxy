@@ -1285,6 +1285,15 @@ fn emit_model_call_start(
             call_id,
             client_request_id,
             requested_model: if model == "unknown" { None } else { Some(model) },
+            prompt_text: task.prompt_text.clone().map(|t| {
+                let mut chars = t.chars();
+                let preview: String = chars.by_ref().take(1000).collect();
+                if chars.next().is_some() {
+                    format!("{preview}…")
+                } else {
+                    preview
+                }
+            }),
             started_at,
         },
     }) {

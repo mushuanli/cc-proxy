@@ -74,6 +74,22 @@ impl SessionRepo {
         Ok(())
     }
 
+    /// Run a closure with the internal connection (reconciler uses this for
+    /// transactional grouping).
+    pub(crate) fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> SessionResult<T>,
+    ) -> SessionResult<T> {
+        let conn = self.inner.conn.lock().unwrap();
+        f(&conn)
+    }
+
+    /// Load all observations for a session (for reconciler).
+    pub(crate) fn load_observations_for(&self, session_id: &str) -> SessionResult<Vec<Observation>> {
+        let conn = self.inner.conn.lock().unwrap();
+        self.load_observations(&conn, session_id)
+    }
+
     // ── Queries ──
 
     /// List model calls for a session, ordered by sequence (keyset pagination).
@@ -84,9 +100,19 @@ impl SessionRepo {
         limit: i64,
     ) -> SessionResult<Vec<ModelCallRow>> {
         let conn = self.inner.conn.lock().unwrap();
+        Self::query_model_calls(&conn, session_id, after_seq, limit)
+    }
+
+    /// Query model calls on an already-held connection (for transactional use).
+    pub(crate) fn query_model_calls(
+        conn: &Connection,
+        session_id: &str,
+        after_seq: Option<i64>,
+        limit: i64,
+    ) -> SessionResult<Vec<ModelCallRow>> {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, sequence_no, previous_model_call_id,
-                    client_request_id, provider_request_id, status,
+                    client_request_id, provider_request_id, started_at, status,
                     requested_model, resolved_model, provider, upstream,
                     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
                     cost_microusd, duration_ms, ttft_ms, stop_reason, http_status_code,
@@ -213,14 +239,19 @@ impl SessionRepo {
                 client_request_id,
                 requested_model,
                 started_at,
+                ..
             } => {
+                let sequence_no = obs
+                    .source_sequence
+                    .as_deref()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
                 conn.execute(
                     "INSERT OR IGNORE INTO model_calls (
-                        id, session_id, sequence_no, client_request_id, requested_model, status
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'in_progress')",
-                    params![call_id, obs.session_id, 0, client_request_id, requested_model],
+                        id, session_id, sequence_no, client_request_id, requested_model, started_at, status
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'in_progress')",
+                    params![call_id, obs.session_id, sequence_no, client_request_id, requested_model, started_at],
                 )?;
-                let _ = started_at;
             }
             ObservationKind::ModelCallFirstToken { call_id, ttft_ms } => {
                 conn.execute(
@@ -393,7 +424,7 @@ mod tests {
     use super::*;
     use crate::ingest::observation::{Observation, ObservationKind, TokenUsage};
 
-    fn repo() -> (SessionRepo, std::path::PathBuf) {
+    fn repo() -> (SessionRepo, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-test.db");
         let repo = SessionRepo::open(SessionRepoConfig {
@@ -401,7 +432,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        (repo, dir.into_path())
+        (repo, dir)
     }
 
     fn observation(kind: ObservationKind, session_id: &str, seq: usize) -> Observation {
@@ -426,6 +457,7 @@ mod tests {
                 call_id: "call-1".into(),
                 client_request_id: None,
                 requested_model: Some("model".into()),
+                prompt_text: None,
                 started_at: 1_700_000_000_000,
             },
             "sess-1",
@@ -441,7 +473,7 @@ mod tests {
         assert_eq!(count, 1);
         drop(conn);
         drop(repo);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = dir;
     }
 
     #[test]
@@ -452,6 +484,7 @@ mod tests {
                 call_id: "call-1".into(),
                 client_request_id: Some("req-1".into()),
                 requested_model: Some("m1".into()),
+                prompt_text: None,
                 started_at: 1_700_000_000_000,
             },
             "sess-1",
@@ -512,6 +545,6 @@ mod tests {
         assert_eq!(tools[0].status.as_str(), "input_complete");
         assert_eq!(repo.model_call_for_tool("tool-1").unwrap(), Some("call-1".into()));
         drop(repo);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = dir;
     }
 }

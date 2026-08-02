@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
     previous_model_call_id  TEXT,
     client_request_id       TEXT,
     provider_request_id     TEXT,
+    started_at              INTEGER NOT NULL DEFAULT 0,
     status                  TEXT NOT NULL DEFAULT 'in_progress',
     requested_model         TEXT,
     resolved_model          TEXT NOT NULL DEFAULT 'unknown',
