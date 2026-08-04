@@ -299,3 +299,65 @@ mod tests {
             if tool_use_id == "fc_1" && status == "succeeded"));
     }
 }
+
+#[cfg(test)]
+mod timeline_tests {
+    use crate::ingest::SessionIngest;
+
+    #[test]
+    fn codex_stream_produces_same_timeline_as_claude() {
+        use crate::query::TimelineReader;
+        use crate::source::CodexParser;
+        use crate::{
+            ClientParser, Observation, ObservationKind, ParseContext, SessionRepo, SessionRepoConfig,
+            TokenUsage,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex.db");
+        let repo = SessionRepo::open(SessionRepoConfig { database_path: path, ..Default::default() }).unwrap();
+        let ctx = ParseContext { call_id: "codex-call-1".into(), session_id: "codex-sess".into(), source: "proxy" };
+
+        let mut parser = CodexParser::default();
+        for ev in [
+            serde_json::json!({"type":"response.function_call","call_id":"fc_1","name":"Bash","arguments":""}),
+            serde_json::json!({"type":"response.function_call_arguments.delta","call_id":"fc_1","delta":"{\"cmd\":"}),
+            serde_json::json!({"type":"response.function_call_arguments.delta","call_id":"fc_1","delta":"\"ls\"}"}),
+            serde_json::json!({"type":"response.function_call_arguments.done","call_id":"fc_1"}),
+        ] {
+            for obs in parser.feed_sse(&ev, &ctx).observations { repo.record(obs).unwrap(); }
+        }
+        repo.record(crate::Observation {
+            event_id: "start".into(), session_id: "codex-sess".into(), source: "proxy".into(),
+            occurred_at: 1, received_at: 1, source_sequence: Some("1".into()), source_version: None,
+            payload_hash: "s".into(),
+            kind: ObservationKind::ModelCallStart { call_id: "codex-call-1".into(), agent_id: None,
+                client_request_id: None, requested_model: Some("gpt-5".into()), resolved_model: Some("gpt-5".into()),
+                prompt_text: Some("hello codex".into()), started_at: 1 },
+        }).unwrap();
+        repo.record(crate::Observation {
+            event_id: "end".into(), session_id: "codex-sess".into(), source: "proxy".into(),
+            occurred_at: 2, received_at: 2, source_sequence: Some("2".into()), source_version: None,
+            payload_hash: "e".into(),
+            kind: ObservationKind::ModelCallEnd { call_id: "codex-call-1".into(), status: "completed".into(),
+                tokens: crate::TokenUsage { input_tokens: 10, output_tokens: 5, ..Default::default() },
+                stop_reason: Some("end_turn".into()), cost_microusd: 42, duration_ms: Some(100), ended_at: 2,
+                provider_request_id: None, error: None, http_status_code: Some(200) },
+        }).unwrap();
+
+        repo.materialize("codex-sess").unwrap();
+        let reader = TimelineReader::new(std::sync::Arc::new(repo));
+        let doc = reader.load("codex-sess").unwrap();
+        assert_eq!(doc.total_model_calls, 1);
+        assert_eq!(doc.user_interactions, 1);
+        let run = &doc.interactions[0].runs[0];
+        assert_eq!(run.run_kind, "main");
+        let call = &run.model_calls[0];
+        assert_eq!(call.resolved_model, "gpt-5");
+        assert_eq!(call.operations.len(), 1);
+        let op = &call.operations[0];
+        assert_eq!(op.tool_name, "Bash");
+        assert_eq!(op.status, "input_complete");
+        assert_eq!(op.input_preview.as_deref(), Some(r#"{"cmd":"ls"}"#));
+        let _ = dir;
+    }
+}

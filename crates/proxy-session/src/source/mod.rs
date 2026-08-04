@@ -111,7 +111,11 @@ pub fn validate_observations(obs: &[Observation]) -> SessionResult<()> {
 /// Wrap a typed observation kind into a full `Observation` with context fields.
 pub fn obs_from_kind(kind: ObservationKind, ctx: &ParseContext) -> Observation {
     let now = chrono::Utc::now().timestamp_millis();
-    let event_id = format!("{}-{now}", ctx.call_id);
+    // Include a kind discriminator so multiple observations produced within
+    // the same millisecond (e.g. a codex function_call emit + args done) do
+    // not collide on the idempotency key.
+    let disc = kind_discriminator(&kind);
+    let event_id = format!("{}-{now}-{disc}", ctx.call_id);
     Observation {
         event_id: event_id.clone(),
         session_id: ctx.session_id.clone(),
@@ -122,6 +126,21 @@ pub fn obs_from_kind(kind: ObservationKind, ctx: &ParseContext) -> Observation {
         source_version: None,
         payload_hash: event_id,
         kind,
+    }
+}
+
+fn kind_discriminator(kind: &ObservationKind) -> String {
+    match kind {
+        ObservationKind::ToolEmitted { tool_use_id, .. } => format!("emit-{tool_use_id}"),
+        ObservationKind::ToolInputComplete { tool_use_id, .. } => format!("input-{tool_use_id}"),
+        ObservationKind::ToolResult { tool_use_id, .. } => format!("result-{tool_use_id}"),
+        ObservationKind::ToolInputDelta { tool_use_id, .. } => format!("td-{tool_use_id}"),
+        ObservationKind::ModelCallStart { call_id, .. } => format!("start-{call_id}"),
+        ObservationKind::ModelCallEnd { call_id, .. } => format!("end-{call_id}"),
+        ObservationKind::ModelCallFirstToken { call_id, .. } => format!("tft-{call_id}"),
+        ObservationKind::PromptSubmit { prompt_id, .. } => format!("prompt-{prompt_id}"),
+        ObservationKind::AgentStart { agent_id, .. } => format!("astart-{agent_id}"),
+        ObservationKind::AgentStop { agent_id, .. } => format!("astop-{agent_id}"),
     }
 }
 
