@@ -226,65 +226,11 @@ pub struct StreamCtx {
 }
 
 impl StreamCtx {
-    /// Record an observation, logging but not propagating failures.
-    fn record(&self, kind: proxy_session::ObservationKind) {
+    /// Record a full observation, logging but not propagating failures.
+    fn record_obs(&self, obs: proxy_session::Observation) {
         let Some(ingest) = &self.ingest else { return };
-        let now = chrono::Utc::now().timestamp_millis();
-        let kind = self.normalize_kind(kind);
-        if let Err(e) = ingest.record(proxy_session::Observation {
-            event_id: format!(
-                "stream-{}-{}",
-                self.call_id,
-                match &kind {
-                    proxy_session::ObservationKind::ToolEmitted { tool_use_id, .. } => {
-                        format!("emit-{tool_use_id}")
-                    }
-                    proxy_session::ObservationKind::ToolInputComplete { tool_use_id, .. } => {
-                        format!("input-{tool_use_id}")
-                    }
-                    _ => "evt".into(),
-                }
-            ),
-            session_id: self.session_id.clone(),
-            source: "proxy".into(),
-            occurred_at: now,
-            received_at: now,
-            source_sequence: None,
-            source_version: None,
-            payload_hash: format!(
-                "stream-{}-{}",
-                self.call_id,
-                match &kind {
-                    proxy_session::ObservationKind::ToolEmitted { tool_use_id, .. } => {
-                        format!("emit-{tool_use_id}")
-                    }
-                    proxy_session::ObservationKind::ToolInputComplete { tool_use_id, .. } => {
-                        format!("input-{tool_use_id}")
-                    }
-                    _ => "evt".into(),
-                }
-            ),
-            kind,
-        }) {
+        if let Err(e) = ingest.record(obs) {
             tracing::warn!("[proxy] failed to record observation: {}", e);
-        }
-    }
-
-    /// Fill protocol-level blanks (e.g. ToolEmitted.call_id) with context.
-    fn normalize_kind(&self, kind: proxy_session::ObservationKind) -> proxy_session::ObservationKind {
-        match kind {
-            proxy_session::ObservationKind::ToolEmitted {
-                call_id: _,
-                tool_use_id,
-                tool_name,
-                started_at,
-            } => proxy_session::ObservationKind::ToolEmitted {
-                call_id: self.call_id.clone(),
-                tool_use_id,
-                tool_name,
-                started_at,
-            },
-            other => other,
         }
     }
 }
@@ -391,6 +337,82 @@ pub struct StreamingResponse {
     pub metadata: tokio::sync::oneshot::Receiver<UpstreamResponse>,
 }
 
+/// Build the protocol parser for a request.
+fn make_parser(protocol: ApiProtocol) -> Box<dyn proxy_session::ClientParser> {
+    match protocol {
+        ApiProtocol::Anthropic => Box::new(proxy_session::AnthropicParser::default()),
+        ApiProtocol::Codex => Box::new(proxy_session::CodexParser::default()),
+    }
+}
+
+/// Apply a protocol parser's incremental update to the relay stream state.
+#[allow(clippy::too_many_arguments)]
+fn apply_stream_update(
+    content_text: &mut String,
+    normalized: &mut NormalizedResponse,
+    input_tokens: &mut u32,
+    output_tokens: &mut u32,
+    cache_creation_tokens: &mut u32,
+    cache_read_tokens: &mut u32,
+    stop_reason: &mut Option<String>,
+    message_id: &mut Option<String>,
+    model: &mut Option<String>,
+    error: &mut Option<String>,
+    capture_truncated: &mut bool,
+    update: proxy_session::StreamUpdate,
+    ctx: &StreamCtx,
+) {
+    if let Some(text) = update.text {
+        *capture_truncated |= push_text_limited(content_text, &text, MAX_CAPTURE_TEXT_BYTES);
+        let used: usize = normalized.text.iter().map(String::len).sum();
+        if used < MAX_CAPTURE_TEXT_BYTES {
+            let mut fragment = String::new();
+            *capture_truncated |= push_text_limited(
+                &mut fragment,
+                &text,
+                MAX_CAPTURE_TEXT_BYTES - used,
+            );
+            if !fragment.is_empty() {
+                normalized.text.push(fragment);
+            }
+        } else {
+            *capture_truncated = true;
+        }
+    }
+    if let Some(thinking) = update.thinking {
+        if !thinking.is_empty() {
+            normalized.thinking.push(thinking);
+        }
+    }
+    if let Some(v) = update.input_tokens {
+        *input_tokens = v;
+    }
+    if let Some(v) = update.output_tokens {
+        *output_tokens = v;
+    }
+    if let Some(v) = update.cache_creation_tokens {
+        *cache_creation_tokens = v;
+    }
+    if let Some(v) = update.cache_read_tokens {
+        *cache_read_tokens = v;
+    }
+    if let Some(v) = update.stop_reason {
+        *stop_reason = Some(v);
+    }
+    if let Some(v) = update.message_id {
+        *message_id = Some(v);
+    }
+    if let Some(v) = update.model {
+        *model = Some(v);
+    }
+    if let Some(v) = update.error {
+        *error = Some(v);
+    }
+    for obs in update.observations {
+        ctx.record_obs(obs);
+    }
+}
+
 /// Handle a streaming response by teeing chunks:
 /// - Forward each chunk to the client via mpsc → Body::from_stream()
 /// - Collect all chunks for SSE parsing and recording
@@ -430,8 +452,13 @@ pub fn stream_upstream_response(
         let mut normalized = NormalizedResponse::default();
         let mut parser = SseParser::new();
         let mut byte_stream = response.bytes_stream();
-        // Stateful tool_use stream parser (protocol logic lives in proxy-session).
-        let mut tool_stream = proxy_session::ToolStreamParser::new();
+        // Protocol parser (strategy) drives the SSE loop; relay owns no event types.
+        let mut cp = make_parser(protocol);
+        let parse_ctx = proxy_session::ParseContext {
+            call_id: ctx.call_id.clone(),
+            session_id: ctx.session_id.clone(),
+            source: "proxy",
+        };
 
         loop {
             match byte_stream.next().await {
@@ -462,89 +489,22 @@ pub fn stream_upstream_response(
                         }
                         if let Some(data_str) = &ev.data {
                             if let Some(parsed) = parser.parse_message_data(data_str) {
-                                if protocol == ApiProtocol::Codex {
-                                    parse_codex_stream_event(
-                                        &parsed,
-                                        &mut normalized,
-                                        &mut input_tokens,
-                                        &mut output_tokens,
-                                        &mut cache_read_tokens,
-                                        &mut message_id,
-                                        &mut _model,
-                                    );
-                                }
-                                match parser.event_kind(&parsed) {
-                                    Some("message_start") => {
-                                        message_id = parser.message_id(&parsed).map(String::from);
-                                        input_tokens = parser
-                                            .input_tokens_from_start(&parsed)
-                                            .unwrap_or(input_tokens);
-                                        cache_creation_tokens = parser
-                                            .cache_creation_tokens_from_start(&parsed)
-                                            .unwrap_or(cache_creation_tokens);
-                                        cache_read_tokens = parser
-                                            .cache_read_tokens_from_start(&parsed)
-                                            .unwrap_or(cache_read_tokens);
-                                    }
-                                    Some("message_delta") => {
-                                        if let Some(value) =
-                                            parser.output_tokens_from_delta(&parsed)
-                                        {
-                                            output_tokens = value;
-                                        }
-                                        if let Some(reason) = parser.stop_reason(&parsed) {
-                                            stop_reason = Some(reason.to_string());
-                                        }
-                                    }
-                                    Some("content_block_delta") => {
-                                        if let Some(text) = parser.delta_text(&parsed) {
-                                            capture_truncated |= push_text_limited(
-                                                &mut content_text,
-                                                text,
-                                                MAX_CAPTURE_TEXT_BYTES,
-                                            );
-                                            let normalized_len = normalized
-                                                .text
-                                                .iter()
-                                                .map(String::len)
-                                                .sum::<usize>();
-                                            if normalized_len < MAX_CAPTURE_TEXT_BYTES {
-                                                let mut fragment = String::new();
-                                                capture_truncated |= push_text_limited(
-                                                    &mut fragment,
-                                                    text,
-                                                    MAX_CAPTURE_TEXT_BYTES - normalized_len,
-                                                );
-                                                if !fragment.is_empty() {
-                                                    normalized.text.push(fragment);
-                                                }
-                                            } else {
-                                                capture_truncated = true;
-                                            }
-                                        }
-                                        // Feed tool_use input_json deltas to the stream parser.
-                                        let _ = tool_stream.feed(&parsed);
-                                    }
-                                    Some("error") => {
-                                        if let Some(err) = parsed.get("error") {
-                                            error = err
-                                                .get("message")
-                                                .and_then(|v| v.as_str())
-                                                .map(String::from);
-                                        }
-                                    }
-                                    Some("content_block_start") => {
-                                        for kind in tool_stream.feed(&parsed) {
-                                            ctx.record(kind);
-                                        }
-                                    }
-                                    Some("content_block_stop") => {
-                                        for kind in tool_stream.feed(&parsed) {
-                                            ctx.record(kind);
-                                        }
-                                    }
-                                    _ => {}
-                                }
+                                let update = cp.feed_sse(&parsed, &parse_ctx);
+                                apply_stream_update(
+                                    &mut content_text,
+                                    &mut normalized,
+                                    &mut input_tokens,
+                                    &mut output_tokens,
+                                    &mut cache_creation_tokens,
+                                    &mut cache_read_tokens,
+                                    &mut stop_reason,
+                                    &mut message_id,
+                                    &mut _model,
+                                    &mut error,
+                                    &mut capture_truncated,
+                                    update,
+                                    &ctx,
+                                );
                             }
                         }
                     }
@@ -557,9 +517,9 @@ pub fn stream_upstream_response(
             }
         }
         drop(chunk_tx);
-        // Mark any in-flight tool_use blocks as abandoned on stream end.
-        for kind in tool_stream.finish() {
-            ctx.record(kind);
+        // Mark any in-flight tool uses as abandoned on stream end.
+        for obs in cp.finish_stream(&parse_ctx) {
+            ctx.record_obs(obs);
         }
 
         let meta = UpstreamResponse {
@@ -821,39 +781,6 @@ fn normalize_response_body(protocol: ApiProtocol, body: &serde_json::Value) -> N
     normalized
 }
 
-fn parse_codex_stream_event(
-    event: &serde_json::Value,
-    normalized: &mut NormalizedResponse,
-    input_tokens: &mut u32,
-    output_tokens: &mut u32,
-    cache_read_tokens: &mut u32,
-    message_id: &mut Option<String>,
-    model: &mut Option<String>,
-) {
-    match event.get("type").and_then(|v| v.as_str()) {
-        Some("response.output_text.delta") => push_string(event.get("delta"), &mut normalized.text),
-        Some("response.reasoning_summary_text.delta") => {
-            push_string(event.get("delta"), &mut normalized.thinking)
-        }
-        Some("response.completed") | Some("response.created") => {
-            let response = event.get("response").unwrap_or(event);
-            let (input, output, cached) = usage_from_json(response);
-            *input_tokens = input.max(*input_tokens);
-            *output_tokens = output.max(*output_tokens);
-            *cache_read_tokens = cached.max(*cache_read_tokens);
-            *message_id = response
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            *model = response
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-        _ => {}
-    }
-}
-
 fn push_string(value: Option<&serde_json::Value>, target: &mut Vec<String>) {
     if let Some(value) = value.and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
         let used = target.iter().map(String::len).sum::<usize>();
@@ -936,22 +863,18 @@ mod tests {
 
     #[test]
     fn extracts_codex_stream_usage_and_delta() {
-        let mut normalized = NormalizedResponse::default();
-        let mut input = 0;
-        let mut output = 0;
-        let mut cached = 0;
-        let mut id = None;
-        let mut model = None;
-        parse_codex_stream_event(
+        use proxy_session::ClientParser;
+        let ctx = proxy_session::ParseContext {
+            call_id: "call-1".into(),
+            session_id: "sess-1".into(),
+            source: "proxy",
+        };
+        let mut parser = proxy_session::CodexParser::default();
+        let u1 = parser.feed_sse(
             &serde_json::json!({"type":"response.output_text.delta","delta":"hi"}),
-            &mut normalized,
-            &mut input,
-            &mut output,
-            &mut cached,
-            &mut id,
-            &mut model,
+            &ctx,
         );
-        parse_codex_stream_event(
+        let u2 = parser.feed_sse(
             &serde_json::json!({
                 "type":"response.completed",
                 "response":{"id":"resp_1","model":"gpt-5","usage":{
@@ -959,16 +882,14 @@ mod tests {
                     "input_tokens_details":{"cached_tokens":3}
                 }}
             }),
-            &mut normalized,
-            &mut input,
-            &mut output,
-            &mut cached,
-            &mut id,
-            &mut model,
+            &ctx,
         );
-        assert_eq!(normalized.text, ["hi"]);
-        assert_eq!((input, output, cached), (9, 4, 3));
-        assert_eq!(id.as_deref(), Some("resp_1"));
+        assert_eq!(u1.text.as_deref(), Some("hi"));
+        assert_eq!(u2.input_tokens, Some(9));
+        assert_eq!(u2.output_tokens, Some(4));
+        assert_eq!(u2.cache_read_tokens, Some(3));
+        assert_eq!(u2.message_id.as_deref(), Some("resp_1"));
+        assert_eq!(u2.model.as_deref(), Some("gpt-5"));
     }
 
     #[tokio::test]

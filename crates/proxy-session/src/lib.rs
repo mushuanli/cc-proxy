@@ -18,7 +18,8 @@ pub use query::{
     TimelineSummary, ToolNode,
 };
 pub use source::{
-    AnthropicParser, CodexParser, HeuristicClassifier, HookParser, OtelParser, ToolStreamParser,
+    extract_tool_results, obs_from_kind, AnthropicParser, ClientParser, CodexParser,
+    HeuristicClassifier, HookParser, OtelParser, ParseContext, StreamUpdate, ToolStreamParser,
 };
 
 mod error {

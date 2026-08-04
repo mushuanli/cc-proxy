@@ -565,7 +565,7 @@ async fn proxy_request(
     // removes them (capture off strips to the last user message).
     if let Some(full_body) = recording_task.request_body.clone() {
         let session_id_str = session_id.as_str().to_string();
-        for obs in proxy_session::AnthropicParser::extract_tool_results(&full_body, &session_id_str) {
+        for obs in proxy_session::extract_tool_results(&full_body, &session_id_str) {
             if let Some(ingest) = &relay.session_ingest {
                 if let Err(e) = ingest.record(obs) {
                     tracing::warn!("[relay] failed to record pre-trim tool_result: {}", e);

@@ -4,12 +4,17 @@ use proxy_common::ClientType;
 use proxy_common::SseEvent;
 use serde_json::Value;
 
-use super::{ClientParser, ParseContext, RequestFacts};
+use super::{
+    obs_from_kind, stream_error, tool_calls_to_observations, ClientParser, ParseContext,
+    RequestFacts, StreamUpdate,
+};
 use crate::ingest::observation::{Observation, ObservationKind};
 
 /// Parses Anthropic `messages` format requests and SSE streams.
 #[derive(Debug, Default)]
-pub struct AnthropicParser;
+pub struct AnthropicParser {
+    tools: super::stream::ToolStreamParser,
+}
 
 impl ClientParser for AnthropicParser {
     fn client_type(&self) -> ClientType {
@@ -64,96 +69,69 @@ impl ClientParser for AnthropicParser {
     }
 
     fn parse_response(&self, normalized: &proxy_common::NormalizedResponse, ctx: &ParseContext) -> Vec<Observation> {
-        // Non-streaming fallback: tool_calls carried on the normalized response.
-        let now = chrono::Utc::now().timestamp_millis();
-        normalized
-            .tool_calls
-            .iter()
-            .map(|tool| Observation {
-                event_id: format!("resp-{}-{}", ctx.call_id, tool.id),
-                session_id: ctx.session_id.clone(),
-                source: ctx.source.to_string(),
-                occurred_at: now,
-                received_at: now,
-                source_sequence: None,
-                source_version: None,
-                payload_hash: format!("resp-{}-{}", ctx.call_id, tool.id),
-                kind: ObservationKind::ToolEmitted {
-                    call_id: ctx.call_id.clone(),
-                    tool_use_id: tool.id.clone(),
-                    tool_name: tool.name.clone(),
-                    started_at: now,
-                },
-            })
+        tool_calls_to_observations(normalized, ctx)
+    }
+
+    fn feed_sse(&mut self, parsed: &Value, ctx: &ParseContext) -> StreamUpdate {
+        match parsed.get("type").and_then(Value::as_str) {
+            Some("message_start") => {
+                let message = parsed.get("message").unwrap_or(parsed);
+                StreamUpdate {
+                    message_id: message.get("id").and_then(Value::as_str).map(String::from),
+                    model: message.get("model").and_then(Value::as_str).map(String::from),
+                    input_tokens: usage_u64(message, "input_tokens"),
+                    cache_creation_tokens: usage_u64(message, "cache_creation_input_tokens"),
+                    cache_read_tokens: usage_u64(message, "cache_read_input_tokens"),
+                    ..Default::default()
+                }
+            }
+            Some("message_delta") => {
+                let delta = parsed.get("delta").unwrap_or(parsed);
+                StreamUpdate {
+                    output_tokens: usage_u64(parsed, "output_tokens"),
+                    stop_reason: delta.get("stop_reason").and_then(Value::as_str).map(String::from),
+                    ..Default::default()
+                }
+            }
+            Some("content_block_delta") => {
+                let delta = parsed.get("delta").unwrap_or(parsed);
+                let mut update = StreamUpdate {
+                    text: delta.get("text").and_then(Value::as_str).map(String::from),
+                    thinking: delta.get("thinking").and_then(Value::as_str).map(String::from),
+                    ..Default::default()
+                };
+                // Feed tool input_json deltas to the tool stream parser.
+                for kind in self.tools.feed(parsed) {
+                    update.observations.push(obs_from_kind(kind, ctx));
+                }
+                update
+            }
+            Some("content_block_start") | Some("content_block_stop") => {
+                let mut update = StreamUpdate::default();
+                for kind in self.tools.feed(parsed) {
+                    update.observations.push(obs_from_kind(kind, ctx));
+                }
+                update
+            }
+            Some("error") => stream_error(parsed),
+            _ => StreamUpdate::default(),
+        }
+    }
+
+    fn finish_stream(&mut self, ctx: &ParseContext) -> Vec<Observation> {
+        self.tools
+            .finish()
+            .into_iter()
+            .map(|kind| obs_from_kind(kind, ctx))
             .collect()
     }
 }
 
-impl AnthropicParser {
-    /// Extract tool_result blocks from a request body into ToolResult observations.
-    ///
-    /// The request body carries accumulated tool_result blocks from prior
-    /// turns; each links back to its originating tool_use via `tool_use_id`.
-    /// Protocol parsing lives here (not in relay) so other clients can plug a
-    /// different parser into the same observation pipeline.
-    pub fn extract_tool_results(request_body: &str, session_id: &str) -> Vec<Observation> {
-        let Ok(value) = serde_json::from_str::<Value>(request_body) else {
-            return Vec::new();
-        };
-        let Some(messages) = value.get("messages").and_then(Value::as_array) else {
-            return Vec::new();
-        };
-        let now = chrono::Utc::now().timestamp_millis();
-        let mut out = Vec::new();
-        for msg in messages {
-            if msg.get("role").and_then(Value::as_str) != Some("user") {
-                continue;
-            }
-            let Some(blocks) = msg.get("content").and_then(Value::as_array) else {
-                continue;
-            };
-            for block in blocks {
-                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                    continue;
-                }
-                let Some(tool_use_id) = block.get("tool_use_id").and_then(Value::as_str) else {
-                    continue;
-                };
-                let preview = match block.get("content") {
-                    Some(Value::Array(items)) => items
-                        .iter()
-                        .filter_map(|i| i.get("text").and_then(Value::as_str))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    Some(Value::String(s)) => s.clone(),
-                    _ => String::new(),
-                };
-                let status = if block.get("is_error").and_then(Value::as_bool) == Some(true) {
-                    "failed"
-                } else {
-                    "succeeded"
-                };
-                let event_id = format!("tool-result-{tool_use_id}");
-                out.push(Observation {
-                    event_id: event_id.clone(),
-                    session_id: session_id.to_string(),
-                    source: "proxy".into(),
-                    occurred_at: now,
-                    received_at: now,
-                    source_sequence: None,
-                    source_version: None,
-                    payload_hash: event_id,
-                    kind: ObservationKind::ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        raw_result_preview: Some(truncate(&preview, 500)),
-                        effective_result_preview: None,
-                        status: status.into(),
-                    },
-                });
-            }
-        }
-        out
-    }
+fn usage_u64(ev: &Value, key: &str) -> Option<u32> {
+    ev.get("usage")
+        .and_then(|u| u.get(key))
+        .and_then(Value::as_u64)
+        .map(super::u64_to_u32)
 }
 
 fn parse_tool_use_start(parsed: &Value, ctx: &ParseContext) -> Vec<Observation> {
@@ -265,7 +243,7 @@ mod tests {
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "Task #1 created successfully: 修复导出"}]}
             ]
         }"#;
-        let obs = AnthropicParser::extract_tool_results(body, "sess-1");
+        let obs = crate::extract_tool_results(body, "sess-1");
         assert_eq!(obs.len(), 1);
         let ObservationKind::ToolResult { tool_use_id, raw_result_preview, status, .. } = &obs[0].kind else {
             panic!("expected ToolResult");
@@ -282,7 +260,7 @@ mod tests {
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_2", "is_error": true, "content": "boom"}]}
             ]
         }"#;
-        let obs = AnthropicParser::extract_tool_results(body, "sess-1");
+        let obs = crate::extract_tool_results(body, "sess-1");
         assert_eq!(obs.len(), 1);
         let ObservationKind::ToolResult { status, .. } = &obs[0].kind else { panic!() };
         assert_eq!(status, "failed");
