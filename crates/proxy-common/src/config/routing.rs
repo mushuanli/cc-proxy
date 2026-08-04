@@ -142,6 +142,7 @@ mod tests {
             url: "https://api.anthropic.com".into(),
             token: Some("sk-test".into()),
             proxy: None,
+            protocols: vec![],
         });
 
         config.proxy.upstreams.push(UpstreamConfig {

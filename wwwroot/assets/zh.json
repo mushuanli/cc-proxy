@@ -194,7 +194,10 @@
     "global_proxy_hint": "留空=无全局代理，Provider 级别代理会覆盖此项",
     "proxy_saved": "代理设置已保存",
     "proxy_save_failed": "保存代理设置失败",
-    "saving": "保存中…"
+    "saving": "保存中…",
+    "proto_anthropic": "Claude Code",
+    "proto_codex": "Codex CLI",
+    "proto_hint": "留空 = 支持全部协议"
   },
   "summary": {
     "title": "概要",

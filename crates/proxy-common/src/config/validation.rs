@@ -200,12 +200,14 @@ mod tests {
             url: "https://a.com".into(),
             token: None,
             proxy: None,
+            protocols: vec![],
         });
         config.proxy.providers.push(crate::provider::Provider {
             name: "test".into(),
             url: "https://b.com".into(),
             token: None,
             proxy: None,
+            protocols: vec![],
         });
         let errors = config.validate();
         assert!(!errors.is_empty());

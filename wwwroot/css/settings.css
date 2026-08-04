@@ -362,3 +362,10 @@
     flex-wrap: wrap;
 }
 .ut-edit-actions { margin-left: auto; display: flex; gap: 6px; }
+
+/* Provider protocols selector */
+.pe-protocols { display: flex; gap: 12px; flex-wrap: wrap; padding: 4px 0; }
+.pe-protocols label { display: inline-flex; align-items: center; gap: 4px; font-size: 0.85rem; color: var(--text); }
+.pe-protocols input[type="checkbox"] { accent-color: var(--accent, #4a8fd0); }
+.pe-protocols-hint { width: 100%; font-size: 0.72rem; color: var(--text-muted); }
+.mx-pop-protocols { padding: 2px 0 4px; }

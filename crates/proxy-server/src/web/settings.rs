@@ -146,6 +146,11 @@ pub async fn add_provider(
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let token = body.get("token").and_then(|v| v.as_str()).map(String::from);
     let provider_proxy = body.get("proxy").and_then(|v| v.as_str()).map(String::from);
+    let protocols = body
+        .get("protocols")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|p| p.as_str().map(String::from)).collect())
+        .unwrap_or_default();
     let log_name = name.clone();
     let result = state
         .config
@@ -155,6 +160,7 @@ pub async fn add_provider(
                 url: url.into(),
                 token,
                 proxy: provider_proxy,
+                protocols,
             });
             Ok(())
         })
@@ -196,6 +202,17 @@ pub async fn update_provider(
                             s.to_string()
                         }
                     });
+                }
+                if body.get("protocols").is_some() {
+                    p.protocols = body
+                        .get("protocols")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                 }
             }
             Ok(())

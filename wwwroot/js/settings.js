@@ -373,6 +373,11 @@ export function openAddProviderPopover() {
         <input class="mx-pop-input mx-pop-proxy" type="text" placeholder="仅 Relay 生效 / http://proxy:8080">
         <label class="mx-pop-field-label">${t('settings.token')}</label>
         <input class="mx-pop-input mx-pop-token" type="password" placeholder="sk-...">
+        <label class="mx-pop-field-label">Protocols</label>
+        <div class="pe-protocols mx-pop-protocols">
+            <label><input type="checkbox" class="mx-pop-proto-a"> ${t('settings.proto_anthropic')}</label>
+            <label><input type="checkbox" class="mx-pop-proto-c"> ${t('settings.proto_codex')}</label>
+        </div>
         <div class="mx-pop-actions" style="margin-top:4px">
             <button class="mx-pop-save btn-primary">${t('settings.save')}</button>
             <button class="mx-pop-cancel">${t('settings.cancel')}</button>
@@ -397,6 +402,10 @@ export function openAddProviderPopover() {
         if (state.providerList.some(p => p.name === name)) { alert(`Provider '${name}' already exists`); return; }
         const body = { name, url, proxy: proxy || null };
         if (token) body.token = token;
+        const protocols = [];
+        if (pop.querySelector('.mx-pop-proto-a')?.checked) protocols.push('anthropic');
+        if (pop.querySelector('.mx-pop-proto-c')?.checked) protocols.push('codex');
+        if (protocols.length > 0) body.protocols = protocols;
         const resp = await fetch('/api/providers', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
         });
@@ -493,6 +502,14 @@ export function openProviderEdit(name) {
                 <label>Outbound network proxy</label>
                 <input type="text" id="pe-proxy" value="${p.proxy ? esc(p.proxy) : ''}" placeholder="仅 Relay 生效 / http://proxy:8080">
             </div>
+            <div class="form-group">
+                <label>Protocols</label>
+                <div class="pe-protocols">
+                    <label><input type="checkbox" id="pe-proto-anthropic" ${(p.protocols || []).includes('anthropic') ? 'checked' : ''}> ${t('settings.proto_anthropic')}</label>
+                    <label><input type="checkbox" id="pe-proto-codex" ${(p.protocols || []).includes('codex') ? 'checked' : ''}> ${t('settings.proto_codex')}</label>
+                    <div class="pe-protocols-hint">${t('settings.proto_hint')}</div>
+                </div>
+            </div>
             <div class="form-actions">
                 <button id="btn-provider-save" class="btn-primary">${t('settings.save')}</button>
                 <button id="btn-provider-cancel">${t('settings.cancel')}</button>
@@ -533,6 +550,13 @@ export async function saveProvider() {
 
     const body = { name, url, proxy: proxy || null };
     if (token) body.token = token;
+
+    // Collect selected protocols (omit when none selected = serve all).
+    const protoEls = ['pe-proto-anthropic', 'pe-proto-codex'];
+    const protocols = protoEls
+        .filter(id => document.getElementById(id)?.checked)
+        .map(id => id === 'pe-proto-anthropic' ? 'anthropic' : 'codex');
+    if (protocols.length > 0) body.protocols = protocols;
 
     let resp;
     if (state.providerEditMode === 'add') {

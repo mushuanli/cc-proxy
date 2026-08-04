@@ -386,6 +386,20 @@ async fn proxy_request(
             .providers
             .iter()
             .find(|p| p.name == route.provider);
+        // Reject if the resolved provider does not serve this client protocol.
+        if let Some(p) = provider {
+            if !p.serves(protocol.request_type()) {
+                return Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::from(format!(
+                        "Provider '{}' does not serve protocol '{}' (protocols: {:?})",
+                        p.name,
+                        protocol.request_type(),
+                        p.protocols
+                    )))
+                    .unwrap();
+            }
+        }
         let provider_url = provider.map(|p| p.url.clone()).unwrap_or_default();
         let provider_token = provider.and_then(|p| p.token.clone());
         (route, provider_url, provider_token)
