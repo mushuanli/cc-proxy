@@ -916,12 +916,13 @@ export function formatSseContent(req) {
     if (body) {
         if (body.thinking && body.thinking.length > 0) {
             parts.push('=== Thinking ===');
-            body.thinking.forEach(t => parts.push(collapseText(t)));
+            // Streaming accumulates text as fragments; join before folding.
+            parts.push(collapseText(body.thinking.join('')));
             parts.push('');
         }
         if (body.text && body.text.length > 0) {
             parts.push('=== Response ===');
-            body.text.forEach(t => parts.push(collapseText(t)));
+            parts.push(collapseText(body.text.join('')));
             parts.push('');
         }
         if (body.tool_calls && body.tool_calls.length > 0) {
