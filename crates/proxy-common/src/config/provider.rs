@@ -17,6 +17,11 @@ pub struct Provider {
     /// Empty/missing = serves all protocols (backward compatible).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub protocols: Vec<String>,
+    /// Codex-specific endpoint. When set, codex requests use this URL
+    /// instead of `url` (e.g. `https://api.deepseek.com/v1`).
+    /// Empty = use `url` for codex too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_url: Option<String>,
 }
 
 impl Provider {
@@ -36,6 +41,7 @@ mod tests {
         let p = Provider {
             name: "p".into(),
             url: "https://x".into(),
+            codex_url: None,
             token: None,
             proxy: None,
             protocols: vec![],
@@ -49,6 +55,7 @@ mod tests {
         let p = Provider {
             name: "p".into(),
             url: "https://x".into(),
+            codex_url: None,
             token: None,
             proxy: None,
             protocols: vec!["anthropic".into()],
@@ -62,6 +69,7 @@ mod tests {
         let p = Provider {
             name: "p".into(),
             url: "https://x".into(),
+            codex_url: None,
             token: None,
             proxy: None,
             protocols: vec!["anthropic".into(), "codex".into()],

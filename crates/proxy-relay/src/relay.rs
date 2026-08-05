@@ -404,7 +404,15 @@ async fn proxy_request(
                     .unwrap();
             }
         }
-        let provider_url = provider.map(|p| p.url.clone()).unwrap_or_default();
+        let provider_url = provider
+            .map(|p| {
+                if protocol == upstream::ApiProtocol::Codex {
+                    p.codex_url.clone().unwrap_or_else(|| p.url.clone())
+                } else {
+                    p.url.clone()
+                }
+            })
+            .unwrap_or_default();
         let provider_token = provider.and_then(|p| p.token.clone());
         (route, provider_url, provider_token)
     };

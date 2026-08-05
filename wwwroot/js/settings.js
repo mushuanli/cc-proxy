@@ -388,6 +388,8 @@ export function openAddProviderPopover() {
         <input class="mx-pop-input mx-pop-name" type="text" placeholder="deepseek">
         <label class="mx-pop-field-label">URL</label>
         <input class="mx-pop-input mx-pop-url" type="text" placeholder="https://api.deepseek.com">
+        <label class="mx-pop-field-label">Codex URL (optional)</label>
+        <input class="mx-pop-input mx-pop-codex-url" type="text" placeholder="https://api.deepseek.com/v1">
         <label class="mx-pop-field-label">Outbound network proxy</label>
         <input class="mx-pop-input mx-pop-proxy" type="text" placeholder="仅 Relay 生效 / http://proxy:8080">
         <label class="mx-pop-field-label">${t('settings.token')}</label>
@@ -421,6 +423,8 @@ export function openAddProviderPopover() {
         if (state.providerList.some(p => p.name === name)) { alert(`Provider '${name}' already exists`); return; }
         const body = { name, url, proxy: proxy || null };
         if (token) body.token = token;
+        const codexUrl = pop.querySelector('.mx-pop-codex-url')?.value.trim();
+        if (codexUrl) body.codex_url = codexUrl;
         const protocols = [];
         if (pop.querySelector('.mx-pop-proto-a')?.checked) protocols.push('anthropic');
         if (pop.querySelector('.mx-pop-proto-c')?.checked) protocols.push('codex');
@@ -481,8 +485,8 @@ export function renderProviderList() {
         <div class="item-row-wrap" id="provider-wrap-${esc(p.name)}">
             <div class="item-row">
                 <div class="item-row-info">
-                    <div class="item-row-name">${esc(p.name)}</div>
-                    <div class="item-row-meta">${esc(p.url)}${p.proxy ? ` · proxy ${esc(p.proxy)}` : ''}${p.has_token ? ' · 🔑' : ''} · ${modelCounts[p.name] || 0} models</div>
+                    <div class="item-row-name" style="cursor:pointer" onclick="openProviderEdit('${esc(p.name)}')">${esc(p.name)}</div>
+                    <div class="item-row-meta">${esc(p.url)}${p.codex_url ? ` · codex: ${esc(p.codex_url)}` : ''}${p.proxy ? ` · proxy ${esc(p.proxy)}` : ''}${p.has_token ? ' · 🔑' : ''} · ${modelCounts[p.name] || 0} models</div>
                 </div>
                 <div class="item-row-actions">
                     <button class="btn-sm" onclick="openProviderEdit('${esc(p.name)}')">Edit</button>
@@ -512,6 +516,10 @@ export function openProviderEdit(name) {
             <div class="form-group">
                 <label>URL</label>
                 <input type="text" id="pe-url" value="${esc(p.url)}" placeholder="https://api.example.com">
+            </div>
+            <div class="form-group">
+                <label>Codex URL (optional)</label>
+                <input type="text" id="pe-codex-url" value="${esc(p.codex_url || '')}" placeholder="https://api.example.com/v1">
             </div>
             <div class="form-group">
                 <label>Token</label>
@@ -569,6 +577,8 @@ export async function saveProvider() {
 
     const body = { name, url, proxy: proxy || null };
     if (token) body.token = token;
+    const codexUrl = document.getElementById('pe-codex-url')?.value.trim();
+    if (codexUrl) body.codex_url = codexUrl;
 
     // Collect selected protocols (omit when none selected = serve all).
     const protoEls = ['pe-proto-anthropic', 'pe-proto-codex'];

@@ -140,6 +140,7 @@ mod tests {
         config.proxy.providers.push(crate::provider::Provider {
             name: "anthropic".into(),
             url: "https://api.anthropic.com".into(),
+            codex_url: None,
             token: Some("sk-test".into()),
             proxy: None,
             protocols: vec![],

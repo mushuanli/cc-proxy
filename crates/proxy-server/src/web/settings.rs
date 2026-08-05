@@ -144,6 +144,7 @@ pub async fn add_provider(
         .unwrap_or("")
         .to_string();
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let codex_url = body.get("codex_url").and_then(|v| v.as_str()).map(String::from);
     let token = body.get("token").and_then(|v| v.as_str()).map(String::from);
     let provider_proxy = body.get("proxy").and_then(|v| v.as_str()).map(String::from);
     let protocols = body
@@ -158,6 +159,7 @@ pub async fn add_provider(
             c.proxy.providers.push(proxy_common::Provider {
                 name,
                 url: url.into(),
+                codex_url,
                 token,
                 proxy: provider_proxy,
                 protocols,
@@ -190,6 +192,9 @@ pub async fn update_provider(
             if let Some(p) = c.proxy.providers.iter_mut().find(|p| p.name == name) {
                 if let Some(url) = body.get("url").and_then(|v| v.as_str()) {
                     p.url = url.into();
+                }
+                if body.get("codex_url").is_some() {
+                    p.codex_url = body.get("codex_url").and_then(|v| v.as_str()).map(String::from);
                 }
                 if body.get("token").is_some() {
                     p.token = body.get("token").and_then(|v| v.as_str()).map(String::from);
