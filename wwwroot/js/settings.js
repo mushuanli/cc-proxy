@@ -324,6 +324,13 @@ function providerPopoverHtml(title, p) {
         <div class="mx-pop-title">${esc(title)}${hasToken}</div>
         <label class="mx-pop-field-label">URL</label>
         <input class="mx-pop-input mx-pop-url" type="text" value="${p ? esc(p.url) : ''}" placeholder="https://api.example.com">
+        <label class="mx-pop-field-label">Codex URL</label>
+        <input class="mx-pop-input mx-pop-codex-url" type="text" value="${p?.codex_url ? esc(p.codex_url) : ''}" placeholder="https://api.example.com/v1">
+        <label class="mx-pop-field-label">Protocols</label>
+        <div class="pe-protocols mx-pop-protocols">
+            <label><input type="checkbox" class="mx-pop-proto-a" ${(p?.protocols || []).includes('anthropic') ? 'checked' : ''}> ${t('settings.proto_anthropic')}</label>
+            <label><input type="checkbox" class="mx-pop-proto-c" ${(p?.protocols || []).includes('codex') ? 'checked' : ''}> ${t('settings.proto_codex')}</label>
+        </div>
         <label class="mx-pop-field-label">Outbound network proxy</label>
         <input class="mx-pop-input mx-pop-proxy" type="text" value="${p?.proxy ? esc(p.proxy) : ''}" placeholder="仅 Relay 生效 / http://proxy:8080">
         <label class="mx-pop-field-label">${t('settings.token')} <span style="font-weight:normal;color:var(--text-muted)">(${t('settings.keep_current_token')})</span></label>
@@ -357,11 +364,17 @@ export function openProviderHeaderPopover(th) {
 
     pop.querySelector('.mx-pop-save').addEventListener('click', async () => {
         const url = pop.querySelector('.mx-pop-url').value.trim();
+        const codexUrl = pop.querySelector('.mx-pop-codex-url')?.value.trim() || null;
         const token = pop.querySelector('.mx-pop-token').value.trim();
         const proxy = pop.querySelector('.mx-pop-proxy').value.trim();
         if (!url) { alert(t('settings.name_url_required')); return; }
         const body = { name: provName, url, proxy: proxy || null };
         if (token) body.token = token;
+        if (codexUrl) body.codex_url = codexUrl;
+        const protocols = [];
+        if (pop.querySelector('.mx-pop-proto-a')?.checked) protocols.push('anthropic');
+        if (pop.querySelector('.mx-pop-proto-c')?.checked) protocols.push('codex');
+        body.protocols = protocols;
         const resp = await fetch(`/api/providers/${encodeURIComponent(provName)}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
         });
@@ -517,8 +530,8 @@ export function openProviderEdit(name) {
                 <label>URL</label>
                 <input type="text" id="pe-url" value="${esc(p.url)}" placeholder="https://api.example.com">
             </div>
-            <div class="form-group">
-                <label>Codex URL (optional)</label>
+            <div class="form-group" id="pe-codex-url-group" style="display:${(p.protocols || []).includes('codex') || (p.protocols || []).length === 0 ? '' : 'none'}">
+                <label>Codex URL</label>
                 <input type="text" id="pe-codex-url" value="${esc(p.codex_url || '')}" placeholder="https://api.example.com/v1">
             </div>
             <div class="form-group">
@@ -544,6 +557,19 @@ export function openProviderEdit(name) {
         wrap.appendChild(accordion);
         accordion.querySelector('#btn-provider-save').addEventListener('click', saveProvider);
         accordion.querySelector('#btn-provider-cancel').addEventListener('click', closeProviderEdit);
+        // Toggle codex URL visibility based on protocol checkboxes.
+        const cbCodex = accordion.querySelector('#pe-proto-codex');
+        const cbAnthropic = accordion.querySelector('#pe-proto-anthropic');
+        const codexUrlGroup = accordion.querySelector('#pe-codex-url-group');
+        const syncCodexUrlVisibility = () => {
+            if (codexUrlGroup && cbCodex) {
+                // Show codex URL when codex is checked OR neither is checked (all protocols)
+                const allOther = cbAnthropic && !cbAnthropic.checked;
+                codexUrlGroup.style.display = (cbCodex.checked || allOther) ? '' : 'none';
+            }
+        };
+        if (cbCodex) cbCodex.addEventListener('change', syncCodexUrlVisibility);
+        if (cbAnthropic) cbAnthropic.addEventListener('change', syncCodexUrlVisibility);
         accordion.querySelector('#pe-url').focus();
     } else {
         closeProviderEditAccordion();
