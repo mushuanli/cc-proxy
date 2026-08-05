@@ -352,6 +352,7 @@ impl From<&crate::config::upstream::TierRule> for TierRuleInfo {
 pub struct UpstreamInfo {
     pub name: String,
     pub active: bool,
+    pub codex_active: bool,
     pub proxy_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub high: Option<TierRuleInfo>,
@@ -375,6 +376,7 @@ pub enum WsMessage {
     Cleared,
     UpstreamChanged {
         active_upstream: String,
+        active_codex_upstream: String,
         active_proxy_upstream: String,
         upstreams: Vec<UpstreamInfo>,
         providers: Vec<ProviderInfo>,

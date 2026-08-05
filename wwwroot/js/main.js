@@ -156,6 +156,7 @@ function handleMessage(msg) {
         case 'UpstreamChanged':
             applyUpstreamState(
                 msg.payload.active_upstream,
+                msg.payload.active_codex_upstream,
                 msg.payload.active_proxy_upstream,
                 msg.payload.upstreams,
                 msg.payload.providers,
@@ -421,7 +422,7 @@ Object.assign(window, {
 
     fetch('/api/upstreams')
         .then(r => r.json())
-        .then(data => applyUpstreamState(data.active_upstream, data.active_proxy_upstream, data.upstreams, data.providers, data.active_effort, data.model_pricing, data.http_proxy));
+        .then(data => applyUpstreamState(data.active_upstream, data.active_codex_upstream, data.active_proxy_upstream, data.upstreams, data.providers, data.active_effort, data.model_pricing, data.http_proxy));
 
     // Sessions and requests are loaded by resyncState() in WS onopen
 

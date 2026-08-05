@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -269,6 +269,7 @@ pub async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResp
     let active = &config.proxy.active_upstream;
     Json(json!({
         "active_upstream": config.proxy.active_upstream,
+        "active_codex_upstream": config.proxy.active_codex_upstream,
         "active_proxy_upstream": config.proxy.active_proxy_upstream,
         "active_effort": config.proxy.active_effort,
         "http_proxy": config.proxy.http_proxy,
@@ -276,6 +277,7 @@ pub async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResp
             json!({
                 "name": u.name,
                 "active": u.name == *active,
+                "codex_active": u.name == config.proxy.active_codex_upstream,
                 "proxy_active": u.name == config.proxy.active_proxy_upstream,
                 "high": u.high,
                 "mid": u.mid,
@@ -400,12 +402,19 @@ pub async fn delete_upstream(
 pub async fn activate_upstream(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let log_name = name.clone();
+    let target = q.get("target").map(|s| s.as_str()).unwrap_or("anthropic");
+    let is_codex = target == "codex";
     let result = state
         .config
         .update(move |c| {
-            c.proxy.active_upstream = name;
+            if is_codex {
+                c.proxy.active_codex_upstream = name;
+            } else {
+                c.proxy.active_upstream = name;
+            }
             Ok(())
         })
         .await;
@@ -809,6 +818,7 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
     let active = &c.proxy.active_upstream;
     WsMessage::UpstreamChanged {
         active_upstream: active.clone(),
+        active_codex_upstream: c.proxy.active_codex_upstream.clone(),
         active_proxy_upstream: c.proxy.active_proxy_upstream.clone(),
         upstreams: c
             .proxy
@@ -817,6 +827,7 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
             .map(|u| UpstreamInfo {
                 name: u.name.clone(),
                 active: u.name == *active,
+                codex_active: u.name == c.proxy.active_codex_upstream,
                 proxy_active: u.name == c.proxy.active_proxy_upstream,
                 high: u.high.as_ref().map(|t| t.into()),
                 mid: u.mid.as_ref().map(|t| t.into()),

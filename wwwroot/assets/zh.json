@@ -64,7 +64,8 @@
     "streaming": "（流式输出中…）",
     "delete": "删除",
     "select_all_title": "全选",
-    "copy": "复制当前页"
+    "copy": "复制当前页",
+    "codex_upstream": "Codex:"
   },
   "pagination": {
     "per_page_20": "20 条/页",

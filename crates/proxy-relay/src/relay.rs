@@ -308,6 +308,10 @@ async fn proxy_request(
     let upstream_name = if is_transparent && !config_snapshot.proxy.active_proxy_upstream.is_empty()
     {
         &config_snapshot.proxy.active_proxy_upstream
+    } else if protocol == upstream::ApiProtocol::Codex
+        && !config_snapshot.proxy.active_codex_upstream.is_empty()
+    {
+        &config_snapshot.proxy.active_codex_upstream
     } else {
         &config_snapshot.proxy.active_upstream
     };
