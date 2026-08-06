@@ -138,7 +138,7 @@ export function renderModelMatrix() {
             <td class="mx-td mx-cell-price" data-mid="${esc(mp.id)}" data-idx="2"><span>${pCw !== '' ? pCw : '<em class="mx-auto">auto</em>'}</span></td>
             <td class="mx-td mx-cell-price" data-mid="${esc(mp.id)}" data-idx="3"><span>${pCr !== '' ? pCr : '<em class="mx-auto">auto</em>'}</span></td>
             ${providerCells}
-            <td class="mx-td mx-col-del"><button class="mx-del-btn" data-mid="${esc(mp.id)}" title="Delete">×</button></td>
+            <td class="mx-td mx-col-del"><button class="mx-del-btn" data-mid="${esc(mp.id)}" title="${t('settings.delete_pricing')}">×</button></td>
         </tr>`;
     }).join('');
 
@@ -233,11 +233,11 @@ export function startPriceEdit(td) {
     });
 }
 
-export async function saveMpField(id, fields) {
+export async function saveMpField(id, fields, query = '') {
     const mp = state.modelPricingList.find(m => m.id === id);
     if (!mp) return;
     const body = { id, price: mp.price || [], providers: mp.providers || {}, ...fields };
-    const resp = await fetch(`/api/model-pricing/${encodeURIComponent(id)}`, {
+    const resp = await fetch(`/api/model-pricing/${encodeURIComponent(id)}${query}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -300,8 +300,23 @@ export function openProviderPopover(td) {
             const mp2 = state.modelPricingList.find(m => m.id === mid);
             if (!mp2) return;
             const providers = { ...(mp2.providers || {}) };
+            let query = '';
+            try {
+                const r = await fetch(`/api/model-pricing/${encodeURIComponent(mid)}/refs`);
+                if (r.ok) {
+                    const refs = await r.json();
+                    const relevant = (refs.upstreams || []).filter(x => x.provider === provName);
+                    if (relevant.length > 0) {
+                        const choice = await showMappingRefsDialog(mid, provName, relevant, mp2);
+                        if (!choice) return;
+                        query = choice.action === 'remove'
+                            ? '?action=remove'
+                            : `?action=reassign&target=${encodeURIComponent(choice.target)}`;
+                    }
+                }
+            } catch (e) { /* fall back to plain removal on network error */ }
             delete providers[provName];
-            await saveMpField(mid, { providers });
+            await saveMpField(mid, { providers }, query);
             closeMatrixPopover();
         });
     }
@@ -348,7 +363,7 @@ export function openProviderHeaderPopover(th) {
     pop.innerHTML = `
         ${providerPopoverHtml(provName, p)}
         <div class="mx-pop-actions" style="margin-top:4px">
-            <button class="mx-pop-delete btn-danger">${t('settings.confirm_delete_provider').replace(' «{name}»?','')}</button>
+            <button class="mx-pop-delete btn-danger">${t('settings.delete_provider')}</button>
             <button class="mx-pop-save btn-primary">${t('settings.save')}</button>
             <button class="mx-pop-cancel">${t('settings.cancel')}</button>
         </div>`;
@@ -382,9 +397,7 @@ export function openProviderHeaderPopover(th) {
         else alert(t('settings.failed_save_provider'));
     });
     pop.querySelector('.mx-pop-delete').addEventListener('click', async () => {
-        if (!confirm(t('settings.confirm_delete_provider', { name: provName }))) return;
-        await fetch(`/api/providers/${encodeURIComponent(provName)}`, { method: 'DELETE' });
-        closeMatrixPopover();
+        if (await confirmDeleteProvider(provName)) closeMatrixPopover();
     });
     pop.querySelector('.mx-pop-cancel').addEventListener('click', closeMatrixPopover);
 }
@@ -477,8 +490,26 @@ export function openAddModelDialog() {
 }
 
 export async function deleteModelPricing(id) {
-    if (!confirm(`Delete model pricing '${id}'?`)) return;
-    await fetch(`/api/model-pricing/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    let refs = null;
+    try {
+        const r = await fetch(`/api/model-pricing/${encodeURIComponent(id)}/refs`);
+        if (r.ok) refs = await r.json();
+    } catch (e) { /* fall back to plain confirm on network error */ }
+
+    if (refs && refs.upstreams.length > 0) {
+        const choice = await showPricingRefsDialog(id, refs);
+        if (!choice) return;
+        const query = choice.action === 'remove'
+            ? '?action=remove'
+            : `?action=reassign&target=${encodeURIComponent(choice.target)}`;
+        const resp = await fetch(`/api/model-pricing/${encodeURIComponent(id)}${query}`, { method: 'DELETE' });
+        if (!resp.ok) alert(t('settings.failed_delete_model_pricing'));
+        return;
+    }
+
+    if (!confirm(t('settings.confirm_delete_model_pricing', { id }))) return;
+    const resp = await fetch(`/api/model-pricing/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!resp.ok) alert(t('settings.failed_delete_model_pricing'));
 }
 
 // ── Settings: Providers ──
@@ -634,8 +665,149 @@ export function closeProviderEdit() {
 }
 
 export async function deleteProvider(name) {
-    if (!confirm(t('settings.confirm_delete_provider', { name }))) return;
-    await fetch(`/api/providers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (await confirmDeleteProvider(name)) closeProviderEditAccordion();
+}
+
+// Shared delete flow for both the popover and the provider-list delete button.
+// Probes references first; if the provider is referenced, offers to reassign
+// those references to another provider or to drop them together with the provider.
+async function confirmDeleteProvider(name) {
+    let refs = null;
+    try {
+        const r = await fetch(`/api/providers/${encodeURIComponent(name)}/refs`);
+        if (r.ok) refs = await r.json();
+    } catch (e) { /* fall back to plain confirm on network error */ }
+
+    if (refs && (refs.upstreams.length > 0 || refs.model_pricing.length > 0)) {
+        const choice = await showProviderRefsDialog(name, refs);
+        if (!choice) return false;
+        const query = choice.action === 'remove'
+            ? '?action=remove'
+            : `?action=reassign&target=${encodeURIComponent(choice.target)}`;
+        const resp = await fetch(`/api/providers/${encodeURIComponent(name)}${query}`, { method: 'DELETE' });
+        if (!resp.ok) alert(t('settings.failed_delete_provider'));
+        return resp.ok;
+    }
+
+    if (!confirm(t('settings.confirm_delete_provider', { name }))) return false;
+    const resp = await fetch(`/api/providers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (!resp.ok) alert(t('settings.failed_delete_provider'));
+    return resp.ok;
+}
+
+// Shared modal for handling references before deleting a provider or model pricing.
+// Lets the user reassign all references to another entity, or drop them together
+// with the deleted one. Resolves with {action:'reassign', target} | {action:'remove'} | null.
+function showRefsDialog(cfg) {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.className = 'mx-overlay';
+        const tierLabel = tierKey => ({ high: t('settings.tier_high'), mid: t('settings.tier_mid'), low: t('settings.tier_low'), default: t('settings.tier_default') })[tierKey] || tierKey;
+        const refLines = [
+            ...cfg.refs.upstreams.map(r => `<li>${t(cfg.keys.upstreamLine, { upstream: r.upstream, tier: tierLabel(r.tier) })}</li>`),
+            ...(cfg.refLines || []),
+        ].join('');
+        const canReassign = cfg.options.length > 0;
+
+        overlay.innerHTML = `
+            <div class="mx-modal">
+                <div class="mx-pop-title">${t(cfg.keys.title, cfg.titleParams)}</div>
+                <div class="mx-pop-hint">${t(cfg.keys.intro)}</div>
+                <ul class="mx-refs-list">${refLines}</ul>
+                <label class="mx-refs-option"><input type="radio" name="mx-ref-action" value="reassign" ${canReassign ? 'checked' : 'disabled'}> ${t(cfg.keys.reassign)}</label>
+                <div class="mx-refs-target">
+                    <label class="mx-pop-field-label">${t(cfg.keys.target)}</label>
+                    <select class="mx-pop-input mx-refs-select" ${canReassign ? '' : 'disabled'}>
+                        ${cfg.options.map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('')}
+                    </select>
+                    ${canReassign ? '' : `<div class="mx-pop-hint">${t(cfg.keys.noOther)}</div>`}
+                </div>
+                <label class="mx-refs-option"><input type="radio" name="mx-ref-action" value="remove" ${canReassign ? '' : 'checked'}> ${t(cfg.keys.remove)}</label>
+                <div class="mx-pop-actions" style="margin-top:10px">
+                    <button class="mx-refs-confirm btn-danger">${t(cfg.keys.confirm)}</button>
+                    <button class="mx-refs-cancel">${t('settings.cancel')}</button>
+                </div>
+            </div>`;
+
+        document.body.appendChild(overlay);
+        const pick = overlay.querySelector('.mx-refs-select');
+        const toggleTarget = () => {
+            const v = overlay.querySelector('input[name="mx-ref-action"]:checked')?.value;
+            overlay.querySelector('.mx-refs-target').style.display = v === 'reassign' ? '' : 'none';
+        };
+        overlay.querySelectorAll('input[name="mx-ref-action"]').forEach(r => r.addEventListener('change', toggleTarget));
+        toggleTarget();
+
+        const cleanup = () => overlay.remove();
+        overlay.querySelector('.mx-refs-cancel').addEventListener('click', () => { cleanup(); resolve(null); });
+        overlay.querySelector('.mx-refs-confirm').addEventListener('click', () => {
+            if (overlay.querySelector('input[name="mx-ref-action"]:checked')?.value === 'remove') {
+                cleanup(); resolve({ action: 'remove' }); return;
+            }
+            const target = pick.value;
+            if (!target) return;
+            cleanup(); resolve({ action: 'reassign', target });
+        });
+        overlay.addEventListener('click', e => { if (e.target === overlay) { cleanup(); resolve(null); } });
+    });
+}
+
+const REFS_KEYS = {
+    title: 'settings.delete_provider_refs_title',
+    intro: 'settings.delete_provider_refs_intro',
+    upstreamLine: 'settings.delete_provider_refs_upstream',
+    reassign: 'settings.delete_provider_refs_reassign',
+    target: 'settings.delete_provider_refs_reassign_target',
+    remove: 'settings.delete_provider_refs_remove',
+    noOther: 'settings.delete_provider_refs_no_other',
+    confirm: 'settings.delete_provider_refs_confirm',
+};
+
+function showProviderRefsDialog(name, refs) {
+    const refLines = refs.model_pricing.map(id => `<li>${t('settings.delete_provider_refs_pricing', { id })}</li>`);
+    const options = state.providerList.filter(p => p.name !== name).map(p => ({ value: p.name, label: p.name }));
+    return showRefsDialog({ titleParams: { name }, refs, refLines, options, keys: REFS_KEYS });
+}
+
+const PRICING_REFS_KEYS = {
+    title: 'settings.delete_pricing_refs_title',
+    intro: 'settings.delete_pricing_refs_intro',
+    upstreamLine: 'settings.delete_pricing_refs_upstream',
+    reassign: 'settings.delete_pricing_refs_reassign',
+    target: 'settings.delete_pricing_refs_reassign_target',
+    remove: 'settings.delete_pricing_refs_remove',
+    noOther: 'settings.delete_pricing_refs_no_other',
+    confirm: 'settings.delete_pricing_refs_confirm',
+};
+
+function showPricingRefsDialog(id, refs) {
+    const options = state.modelPricingList.filter(mp => mp.id !== id).map(mp => ({ value: mp.id, label: mp.id }));
+    return showRefsDialog({ titleParams: { id }, refs, options, keys: PRICING_REFS_KEYS });
+}
+
+const MAPPING_REFS_KEYS = {
+    title: 'settings.delete_mapping_refs_title',
+    intro: 'settings.delete_mapping_refs_intro',
+    upstreamLine: 'settings.delete_mapping_refs_upstream',
+    reassign: 'settings.delete_mapping_refs_reassign',
+    target: 'settings.delete_mapping_refs_reassign_target',
+    remove: 'settings.delete_mapping_refs_remove',
+    noOther: 'settings.delete_mapping_refs_no_other',
+    confirm: 'settings.delete_mapping_refs_confirm',
+};
+
+// Reassign/drop upstream rules that reference a specific (pricing, provider)
+// mapping before that mapping is removed.
+function showMappingRefsDialog(mid, provName, refs, mp) {
+    const options = Object.keys(mp.providers || {})
+        .filter(k => k !== provName)
+        .map(k => ({ value: k, label: k }));
+    return showRefsDialog({
+        titleParams: { prov: provName, id: mid },
+        refs: { upstreams: refs },
+        options,
+        keys: MAPPING_REFS_KEYS,
+    });
 }
 
 // ── Settings: Upstreams (table mode) ──

@@ -276,6 +276,26 @@
 .mx-pop-input:focus { outline: none; border-color: var(--accent2); }
 .mx-pop-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
+/* Provider delete — reference handling modal */
+.mx-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center;
+}
+.mx-modal {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    padding: 16px;
+    min-width: 340px; max-width: 480px;
+}
+.mx-refs-list { margin: 6px 0 10px; padding-left: 18px; font-size: 0.78rem; }
+.mx-refs-list li { margin-bottom: 3px; }
+.mx-refs-option { display: block; font-size: 0.78rem; margin: 4px 0; }
+.mx-refs-target { margin: 2px 0 8px; }
+.mx-refs-select { margin-bottom: 0; }
+
 /* Provider header — clickable to edit URL/Token */
 .mx-th-provider { cursor: pointer; user-select: none; }
 .mx-th-provider:hover { background: rgba(74,144,164,0.12); color: var(--text); }

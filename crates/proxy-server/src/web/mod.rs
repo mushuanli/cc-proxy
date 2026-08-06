@@ -137,12 +137,20 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             put(settings::update_pricing).delete(settings::delete_pricing),
         )
         .route(
+            "/api/model-pricing/:id/refs",
+            get(settings::pricing_refs),
+        )
+        .route(
             "/api/providers",
             get(settings::list_providers).post(settings::add_provider),
         )
         .route(
             "/api/providers/:name",
             put(settings::update_provider).delete(settings::delete_provider),
+        )
+        .route(
+            "/api/providers/:name/refs",
+            get(settings::provider_refs),
         )
         .route(
             "/api/upstreams",

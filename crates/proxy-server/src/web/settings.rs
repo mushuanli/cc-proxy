@@ -66,14 +66,55 @@ pub async fn add_pricing(
 pub async fn update_pricing(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let log_id = id.clone();
+    // When a provider mapping is removed, upstream tier rules that reference it
+    // would become dangling. The caller must resolve those references first:
+    // action=remove → drop them; action=reassign → rewrite them to the target provider.
+    let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
+    let target = q.get("target").map(|s| s.as_str()).unwrap_or("").to_string();
     let result = state
         .config
         .update(move |c| {
             let mp: proxy_common::ModelPricing = serde_json::from_value(body)
                 .map_err(|e| proxy_common::ConfigError::Validation(e.to_string()))?;
+            let removed: Vec<String> = c
+                .model_pricing
+                .iter()
+                .find(|p| p.id == id)
+                .map(|old| {
+                    old.providers
+                        .keys()
+                        .filter(|k| !mp.providers.contains_key(*k))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for prov in &removed {
+                if !mapping_refs_exist(&c.proxy.upstreams, &id, prov) {
+                    continue;
+                }
+                if action == "remove" {
+                    clear_mapping_refs(&mut c.proxy.upstreams, &id, prov);
+                } else if action == "reassign" {
+                    if !mp.providers.contains_key(&target)
+                        || !c.proxy.providers.iter().any(|p| p.name == target)
+                    {
+                        return Err(proxy_common::ConfigError::Validation(format!(
+                            "target provider '{}' has no mapping for model '{}'",
+                            target, id
+                        )));
+                    }
+                    rewrite_mapping_refs(&mut c.proxy.upstreams, &id, prov, &target);
+                } else {
+                    return Err(proxy_common::ConfigError::Validation(format!(
+                        "mapping '{}/{}' is referenced by upstreams; remove references first",
+                        id, prov
+                    )));
+                }
+            }
             c.model_pricing.retain(|p| p.id != id);
             c.model_pricing.push(mp);
             Ok(())
@@ -92,14 +133,87 @@ pub async fn update_pricing(
     }
 }
 
+/// True if any upstream tier rule references the (model id, provider) mapping.
+fn mapping_refs_exist(
+    upstreams: &[proxy_common::UpstreamConfig],
+    id: &str,
+    prov: &str,
+) -> bool {
+    upstreams.iter().any(|u| {
+        [&u.high, &u.mid, &u.low, &u.default]
+            .iter()
+            .any(|r| r.as_ref().map_or(false, |r| r.model == id && r.provider == prov))
+    })
+}
+
+/// Rewrite every upstream rule referencing (id, prov) to use `to` as provider.
+fn rewrite_mapping_refs(
+    upstreams: &mut [proxy_common::UpstreamConfig],
+    id: &str,
+    prov: &str,
+    to: &str,
+) {
+    for u in upstreams {
+        for rule in [&mut u.high, &mut u.mid, &mut u.low, &mut u.default] {
+            if let Some(r) = rule {
+                if r.model == id && r.provider == prov {
+                    r.provider = to.to_string();
+                }
+            }
+        }
+    }
+}
+
+/// Drop the provider reference in every rule matching (id, prov).
+fn clear_mapping_refs(
+    upstreams: &mut [proxy_common::UpstreamConfig],
+    id: &str,
+    prov: &str,
+) {
+    for u in upstreams {
+        for rule in [&mut u.high, &mut u.mid, &mut u.low, &mut u.default] {
+            if let Some(r) = rule {
+                if r.model == id && r.provider == prov {
+                    r.provider.clear();
+                }
+            }
+        }
+    }
+}
+
 pub async fn delete_pricing(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let log_id = id.clone();
+    // action=reassign → rewrite every upstream rule referencing this pricing id
+    // to the target pricing id; action=remove → drop those rules and delete.
+    let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
+    let target = q.get("target").map(|s| s.as_str()).unwrap_or("").to_string();
     let result = state
         .config
         .update(move |c| {
+            if action == "remove" {
+                for u in &mut c.proxy.upstreams {
+                    clear_pricing_rules(u, &id);
+                }
+            } else if action == "reassign" {
+                if target.is_empty() {
+                    return Err(proxy_common::ConfigError::Validation(
+                        "reassign requires a target model pricing".into(),
+                    ));
+                }
+                if !c.model_pricing.iter().any(|mp| mp.id == target) {
+                    return Err(proxy_common::ConfigError::Validation(format!(
+                        "target model pricing '{}' not found",
+                        target
+                    )));
+                }
+                for u in &mut c.proxy.upstreams {
+                    rewrite_pricing_rules(u, &id, &target);
+                }
+            }
             c.model_pricing.retain(|p| p.id != id);
             Ok(())
         })
@@ -113,6 +227,52 @@ pub async fn delete_pricing(
         Err(e) => {
             tracing::warn!("[api] delete_pricing failed: {}", e);
             err_response(&e.to_string())
+        }
+    }
+}
+
+/// List the upstream tier rules that reference a model pricing id.
+pub async fn pricing_refs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let config = state.config.get().await;
+    let mut upstreams: Vec<serde_json::Value> = Vec::new();
+    for u in &config.proxy.upstreams {
+        for (tier, rule) in [
+            ("high", u.high.as_ref()),
+            ("mid", u.mid.as_ref()),
+            ("low", u.low.as_ref()),
+            ("default", u.default.as_ref()),
+        ] {
+            if let Some(r) = rule {
+                if r.model == id {
+                    upstreams.push(json!({"upstream": u.name, "tier": tier, "provider": r.provider}));
+                }
+            }
+        }
+    }
+    Json(json!({"model_pricing": id, "upstreams": upstreams})).into_response()
+}
+
+/// Rewrite every upstream rule whose model references `from` to `to`.
+fn rewrite_pricing_rules(u: &mut proxy_common::UpstreamConfig, from: &str, to: &str) {
+    for rule in [&mut u.high, &mut u.mid, &mut u.low, &mut u.default] {
+        if let Some(r) = rule {
+            if r.model == from {
+                r.model = to.to_string();
+            }
+        }
+    }
+}
+
+/// Drop every upstream rule referencing the pricing id (blank the model).
+fn clear_pricing_rules(u: &mut proxy_common::UpstreamConfig, id: &str) {
+    for rule in [&mut u.high, &mut u.mid, &mut u.low, &mut u.default] {
+        if let Some(r) = rule {
+            if r.model == id {
+                r.model.clear();
+            }
         }
     }
 }
@@ -239,11 +399,38 @@ pub async fn update_provider(
 pub async fn delete_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let log_name = name.clone();
+    // action=reassign → rewrite all references to the target provider;
+    // action=remove → drop all references (upstream tier rules + pricing keys) and delete the provider.
+    let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
+    let target = q.get("target").map(|s| s.as_str()).unwrap_or("").to_string();
     let result = state
         .config
         .update(move |c| {
+            if action == "remove" {
+                purge_provider(&mut c.model_pricing, &name);
+                for u in &mut c.proxy.upstreams {
+                    clear_provider_rules(u, &name);
+                }
+            } else if action == "reassign" {
+                if target.is_empty() {
+                    return Err(proxy_common::ConfigError::Validation(
+                        "reassign requires a target provider".into(),
+                    ));
+                }
+                if !c.proxy.providers.iter().any(|p| p.name == target) {
+                    return Err(proxy_common::ConfigError::Validation(format!(
+                        "target provider '{}' not found",
+                        target
+                    )));
+                }
+                rewrite_provider_rules(&mut c.model_pricing, &name, &target);
+                for u in &mut c.proxy.upstreams {
+                    rewrite_upstream_rules(u, &name, &target);
+                }
+            }
             c.proxy.providers.retain(|p| p.name != name);
             Ok(())
         })
@@ -258,6 +445,78 @@ pub async fn delete_provider(
             tracing::warn!("[api] delete_provider failed: {}", e);
             err_response(&e.to_string())
         }
+    }
+}
+
+/// Remove references to `provider` from the config (upstream tier rules + pricing).
+pub async fn provider_refs(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let config = state.config.get().await;
+    let mut upstreams: Vec<serde_json::Value> = Vec::new();
+    for u in &config.proxy.upstreams {
+        for (tier, rule) in [
+            ("high", u.high.as_ref()),
+            ("mid", u.mid.as_ref()),
+            ("low", u.low.as_ref()),
+            ("default", u.default.as_ref()),
+        ] {
+            if let Some(r) = rule {
+                if r.provider == name {
+                    upstreams.push(json!({"upstream": u.name, "tier": tier}));
+                }
+            }
+        }
+    }
+    let pricing: Vec<String> = config
+        .model_pricing
+        .iter()
+        .filter(|mp| mp.providers.contains_key(&name))
+        .map(|mp| mp.id.clone())
+        .collect();
+    Json(json!({"provider": name, "upstreams": upstreams, "model_pricing": pricing})).into_response()
+}
+
+/// Rewrite every reference to `from` in upstream tier rules to `to`.
+fn rewrite_upstream_rules(u: &mut proxy_common::UpstreamConfig, from: &str, to: &str) {
+    for rule in [&mut u.high, &mut u.mid, &mut u.low, &mut u.default] {
+        if let Some(r) = rule {
+            if r.provider == from {
+                r.provider = to.to_string();
+            }
+        }
+    }
+}
+
+/// Clear every tier rule referencing `provider` (leave model untouched so routing still works).
+fn clear_provider_rules(u: &mut proxy_common::UpstreamConfig, provider: &str) {
+    for rule in [&mut u.high, &mut u.mid, &mut u.low, &mut u.default] {
+        if let Some(r) = rule {
+            if r.provider == provider {
+                r.provider.clear();
+            }
+        }
+    }
+}
+
+/// Rewrite the pricing provider key `from` → `to`.
+fn rewrite_provider_rules(
+    pricing: &mut [proxy_common::ModelPricing],
+    from: &str,
+    to: &str,
+) {
+    for mp in pricing {
+        if let Some(names) = mp.providers.remove(from) {
+            mp.providers.entry(to.to_string()).or_default().extend(names);
+        }
+    }
+}
+
+/// Drop the pricing provider key `provider`.
+fn purge_provider(pricing: &mut [proxy_common::ModelPricing], provider: &str) {
+    for mp in pricing {
+        mp.providers.remove(provider);
     }
 }
 
@@ -855,5 +1114,156 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
         active_effort: c.proxy.active_effort.clone(),
         model_pricing: c.model_pricing.clone(),
         http_proxy: c.proxy.http_proxy.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proxy_common::{ModelPricing, TierRule, UpstreamConfig};
+    use std::collections::HashMap;
+
+    fn rule(provider: &str) -> TierRule {
+        TierRule {
+            provider: provider.into(),
+            model: "claude-opus".into(),
+        }
+    }
+
+    fn upstream(name: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            name: name.into(),
+            high: Some(rule("cloudapi")),
+            mid: None,
+            low: None,
+            default: Some(rule("cloudapi")),
+            effort: None,
+        }
+    }
+
+    fn pricing(id: &str, providers: &[(&str, Vec<&str>)]) -> ModelPricing {
+        let mut m = HashMap::new();
+        for (k, names) in providers {
+            m.insert(k.to_string(), names.iter().map(|s| s.to_string()).collect());
+        }
+        ModelPricing {
+            id: id.into(),
+            price: vec![],
+            providers: m,
+        }
+    }
+
+    #[test]
+    fn rewrite_upstream_rules_changes_matching_provider() {
+        let mut u = upstream("cloud-fable");
+        rewrite_upstream_rules(&mut u, "cloudapi", "anthropic");
+        assert_eq!(u.high.unwrap().provider, "anthropic");
+        assert_eq!(u.default.unwrap().provider, "anthropic");
+    }
+
+    #[test]
+    fn rewrite_upstream_rules_ignores_other_providers() {
+        let mut u = upstream("cloud-fable");
+        rewrite_upstream_rules(&mut u, "deepseek", "anthropic");
+        assert_eq!(u.high.unwrap().provider, "cloudapi");
+    }
+
+    #[test]
+    fn clear_upstream_rules_blanks_matching_provider() {
+        let mut u = upstream("cloud-fable");
+        clear_provider_rules(&mut u, "cloudapi");
+        assert!(u.high.unwrap().provider.is_empty());
+        assert!(u.default.unwrap().provider.is_empty());
+    }
+
+    #[test]
+    fn rewrite_pricing_migrates_provider_key() {
+        let mut mp = vec![pricing("claude-opus", &[("cloudapi", vec!["claude-opus"])])];
+        rewrite_provider_rules(&mut mp, "cloudapi", "anthropic");
+        assert!(mp[0].providers.contains_key("anthropic"));
+        assert!(!mp[0].providers.contains_key("cloudapi"));
+        assert_eq!(mp[0].providers["anthropic"], vec!["claude-opus"]);
+    }
+
+    #[test]
+    fn purge_pricing_removes_provider_key() {
+        let mut mp = vec![pricing("claude-opus", &[("cloudapi", vec![])])];
+        purge_provider(&mut mp, "cloudapi");
+        assert!(mp[0].providers.is_empty());
+    }
+
+    fn upstream_with_model(name: &str, model: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            name: name.into(),
+            high: None,
+            mid: None,
+            low: None,
+            default: Some(TierRule {
+                provider: "rdsec".into(),
+                model: model.into(),
+            }),
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn rewrite_pricing_rules_changes_model_reference() {
+        let mut u = upstream_with_model("rdsec-kimi", "kimi");
+        rewrite_pricing_rules(&mut u, "kimi", "claude-sonnet");
+        assert_eq!(u.default.unwrap().model, "claude-sonnet");
+    }
+
+    #[test]
+    fn rewrite_pricing_rules_ignores_other_models() {
+        let mut u = upstream_with_model("rdsec-kimi", "kimi");
+        rewrite_pricing_rules(&mut u, "claude-opus", "claude-sonnet");
+        assert_eq!(u.default.unwrap().model, "kimi");
+    }
+
+    #[test]
+    fn clear_pricing_rules_blanks_model_reference() {
+        let mut u = upstream_with_model("rdsec-kimi", "kimi");
+        clear_pricing_rules(&mut u, "kimi");
+        assert!(u.default.unwrap().model.is_empty());
+    }
+
+    fn upstream_with_mapping(name: &str, prov: &str, model: &str) -> UpstreamConfig {
+        UpstreamConfig {
+            name: name.into(),
+            high: None,
+            mid: None,
+            low: None,
+            default: Some(TierRule {
+                provider: prov.into(),
+                model: model.into(),
+            }),
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn mapping_refs_exist_detects_reference() {
+        let us = [upstream_with_mapping("rdsec-kimi", "rdsec", "kimi")];
+        assert!(mapping_refs_exist(&us, "kimi", "rdsec"));
+        assert!(!mapping_refs_exist(&us, "kimi", "anthropic"));
+        assert!(!mapping_refs_exist(&us, "claude-opus", "rdsec"));
+    }
+
+    #[test]
+    fn rewrite_mapping_refs_changes_provider() {
+        let mut us = [upstream_with_mapping("rdsec-kimi", "rdsec", "kimi")];
+        rewrite_mapping_refs(&mut us, "kimi", "rdsec", "rdsec2");
+        let d = us[0].default.as_ref().unwrap();
+        assert_eq!(d.provider, "rdsec2");
+        assert_eq!(d.model, "kimi");
+    }
+
+    #[test]
+    fn clear_mapping_refs_blankes_provider() {
+        let mut us = [upstream_with_mapping("rdsec-kimi", "rdsec", "kimi")];
+        clear_mapping_refs(&mut us, "kimi", "rdsec");
+        let d = us[0].default.as_ref().unwrap();
+        assert!(d.provider.is_empty());
+        assert_eq!(d.model, "kimi");
     }
 }
