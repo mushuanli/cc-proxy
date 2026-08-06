@@ -303,6 +303,11 @@ export function toggleSession(sessionId) {
 }
 
 export function selectSession(sid) {
+    // Selecting a session is a view-level navigation: dismiss any open task
+    // detail so the session summary becomes the sole focus. Otherwise the task
+    // stays highlighted with its detail panel open and the session appears
+    // impossible to select.
+    closeRequestDetail();
     state.currentSelectedSession = sid;
     state.expandedSessions.add(sid);
     void loadSessionTasks(sid);
@@ -1097,12 +1102,15 @@ document.querySelectorAll('.detail-tabs .tab').forEach(btn => {
     });
 });
 
-document.getElementById('btn-close-detail').addEventListener('click', () => {
-    document.getElementById('request-detail').classList.add('hidden');
-    document.getElementById('view-inspector').classList.remove('detail-open');
+export function closeRequestDetail() {
     state.selectedRequestId = null;
+    const detail = document.getElementById('request-detail');
+    if (detail) detail.classList.add('hidden');
+    document.getElementById('view-inspector').classList.remove('detail-open');
     document.querySelectorAll('#requests-tbody tr').forEach(r => r.classList.remove('selected'));
-});
+}
+
+document.getElementById('btn-close-detail').addEventListener('click', closeRequestDetail);
 
 // Fullscreen
 document.getElementById('btn-fullscreen-close').addEventListener('click', () => {

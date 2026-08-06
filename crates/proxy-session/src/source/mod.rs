@@ -109,6 +109,11 @@ pub fn validate_observations(obs: &[Observation]) -> SessionResult<()> {
 // ── Shared helpers for client parsers ──
 
 /// Wrap a typed observation kind into a full `Observation` with context fields.
+///
+/// Also backfills the call_id inside `ToolEmitted` from the context. The
+/// stateful `ToolStreamParser` emits these with an empty call_id (it does not
+/// own the current model call); without this fix the tool invocation rows are
+/// written with `model_call_id=""` and never attach to their model call.
 pub fn obs_from_kind(kind: ObservationKind, ctx: &ParseContext) -> Observation {
     let now = chrono::Utc::now().timestamp_millis();
     // Include a kind discriminator so multiple observations produced within
@@ -116,6 +121,20 @@ pub fn obs_from_kind(kind: ObservationKind, ctx: &ParseContext) -> Observation {
     // not collide on the idempotency key.
     let disc = kind_discriminator(&kind);
     let event_id = format!("{}-{now}-{disc}", ctx.call_id);
+    let kind = match kind {
+        ObservationKind::ToolEmitted {
+            tool_use_id,
+            tool_name,
+            started_at,
+            ..
+        } => ObservationKind::ToolEmitted {
+            call_id: ctx.call_id.clone(),
+            tool_use_id,
+            tool_name,
+            started_at,
+        },
+        other => other,
+    };
     Observation {
         event_id: event_id.clone(),
         session_id: ctx.session_id.clone(),

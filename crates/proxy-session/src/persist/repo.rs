@@ -510,6 +510,12 @@ impl SessionRepo {
                 tool_name,
                 started_at,
             } => {
+                // Backfill call_id when the producer left it empty (legacy
+                // observations from before obs_from_kind populated it): attach
+                // the tool to the enclosing model call, resolved in receive
+                // order. Observations are applied in received_at order, so the
+                // latest started call is the one currently streaming.
+                let call_id = resolve_tool_call_id(conn, obs, call_id)?;
                 let operation_seq: i64 = conn.query_row(
                     "SELECT COALESCE(MAX(operation_seq), -1) + 1 FROM tool_invocations
                      WHERE model_call_id = ?1",
@@ -627,6 +633,34 @@ impl crate::ingest::SessionIngest for SessionRepo {
             tracing::warn!("[session] failed to merge session summary: {}", e);
         }
     }
+}
+
+/// Resolve the model call a tool observation belongs to, backfilling an empty
+/// call_id with the enclosing call. The enclosing call is the most recent
+/// `model_call_start` received before this tool; `started_at` alone can collide
+/// (the title-generation and real calls often share the same millisecond), so
+/// the observation clock is authoritative.
+fn resolve_tool_call_id(
+    conn: &Connection,
+    obs: &Observation,
+    call_id: &str,
+) -> SessionResult<String> {
+    if !call_id.is_empty() {
+        return Ok(call_id.to_string());
+    }
+    let enclosing: Option<String> = conn
+        .query_row(
+            "SELECT model_call_id FROM observations
+             WHERE event_type = 'model_call_start'
+               AND session_id = ?1
+               AND received_at <= ?2
+             ORDER BY received_at DESC, rowid DESC
+             LIMIT 1",
+            params![obs.session_id, obs.received_at],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(enclosing.unwrap_or_default())
 }
 
 fn open_connection(config: &SessionRepoConfig) -> SessionResult<Connection> {
@@ -804,6 +838,59 @@ mod tests {
         assert_eq!(tools[0].tool_name, "Bash");
         assert_eq!(tools[0].status.as_str(), "input_complete");
         assert_eq!(repo.model_call_for_tool("tool-1").unwrap(), Some("call-1".into()));
+        drop(repo);
+        let _ = dir;
+    }
+
+    #[test]
+    fn materialize_backfills_empty_tool_call_id() {
+        let (repo, dir) = repo();
+        // Tool emitted with an empty call_id (legacy observations) must be
+        // attached to the enclosing model call, not orphaned.
+        repo.record_observation(&observation(
+            ObservationKind::ModelCallStart {
+                call_id: "call-1".into(),
+                agent_id: Some("main-agent".into()),
+                client_request_id: None,
+                requested_model: Some("m1".into()),
+                resolved_model: Some("m1".into()),
+                prompt_text: None,
+                started_at: 1_700_000_000_000,
+            },
+            "sess-1",
+            1,
+        ))
+        .unwrap();
+        repo.record_observation(&observation(
+            ObservationKind::ToolEmitted {
+                call_id: String::new(),
+                tool_use_id: "tool-orphan".into(),
+                tool_name: "Bash".into(),
+                started_at: 1_700_000_000_100,
+            },
+            "sess-1",
+            2,
+        ))
+        .unwrap();
+        repo.record_observation(&observation(
+            ObservationKind::ToolInputComplete {
+                tool_use_id: "tool-orphan".into(),
+                input_json: r#"{"command":"ls"}"#.into(),
+            },
+            "sess-1",
+            3,
+        ))
+        .unwrap();
+
+        repo.materialize("sess-1").unwrap();
+
+        assert_eq!(
+            repo.model_call_for_tool("tool-orphan").unwrap(),
+            Some("call-1".into())
+        );
+        let tools = repo.list_tool_invocations("call-1").unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name, "Bash");
         drop(repo);
         let _ = dir;
     }

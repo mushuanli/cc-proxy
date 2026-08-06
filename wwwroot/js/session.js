@@ -374,6 +374,54 @@ function fmtTime(ts) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// ── Friendly operation preview (mirrors backend describe_tool) ──
+
+function parseOpInput(input_preview) {
+    if (!input_preview) return {};
+    try { return JSON.parse(input_preview) || {}; } catch (e) { return {}; }
+}
+
+function friendlyOpLabel(op) {
+    const input = parseOpInput(op.input_preview);
+    const trunc = s => (s.length > 140 ? s.slice(0, 140) + '…' : s);
+    switch (op.tool_name) {
+        case 'Bash': {
+            const cmd = input.command || input.cmd || '';
+            return trunc(cmd ? 'Run: ' + cmd : 'Bash');
+        }
+        case 'Read': return trunc('Read ' + (input.file_path || ''));
+        case 'Write': return trunc('Write ' + (input.file_path || ''));
+        case 'Edit': {
+            const path = input.file_path || '';
+            const old = (input.old_string || '').split('\n')[0].slice(0, 40);
+            return trunc('Edit ' + path + (old ? ' — "' + old + '"' : ''));
+        }
+        case 'NotebookEdit': return trunc('Edit notebook ' + (input.notebook_path || ''));
+        case 'Grep': return trunc(`Search "${input.pattern || ''}" in ${input.path || '.'}`);
+        case 'Glob': return trunc(`Find "${input.pattern || ''}" in ${input.path || '.'}`);
+        case 'Agent': return trunc('Spawn ' + (input.subagent_type || 'agent') + ': ' + (input.description || ''));
+        case 'WebFetch': return trunc('Fetch: ' + (input.url || ''));
+        case 'WebSearch': return trunc('Search web: "' + (input.query || '') + '"');
+        case 'Skill': return trunc('Skill /' + (input.skill || '') + (input.args ? ' ' + input.args : ''));
+        case 'TaskCreate': return trunc('Create task: ' + (input.subject || ''));
+        case 'TaskUpdate': return trunc('Update task ' + (input.taskId || '') + (input.status ? ' → ' + input.status : ''));
+        case 'TaskGet': return trunc('Get task ' + (input.taskId || ''));
+        case 'TaskStop': return trunc('Stop task ' + (input.task_id || ''));
+        case 'AskUserQuestion': {
+            const q = (input.questions && input.questions[0] && input.questions[0].question) || '';
+            return trunc('Ask: ' + q);
+        }
+        case 'EnterPlanMode': return 'Enter plan mode';
+        case 'ExitPlanMode': return 'Submit plan';
+        default: return op.tool_name;
+    }
+}
+
+function callOpLabel(call) {
+    const ops = call.operations || [];
+    return ops.length > 0 ? friendlyOpLabel(ops[0]) : '';
+}
+
 // Render the aggregated conversation/stats summary above the timeline tree.
 function renderTimelineSummary(s) {
     if (!s) return '';
@@ -520,10 +568,14 @@ export function renderSessionTimeline(d) {
                 </div>
                 <div class="timeline-calls">`;
             for (const call of (run.model_calls || [])) {
+                const opLabel = callOpLabel(call);
                 html += `<div class="timeline-call" data-call-id="${esc(call.id)}">
                     <span class="timeline-call-time">${fmtTime(call.started_at)}</span>
                     <span class="timeline-call-model">${esc(call.resolved_model)}</span>
-                    <span class="timeline-call-status ${esc(call.status)}">${esc(call.status)}</span>
+                    ${opLabel
+                        ? `<span class="timeline-call-op" title="${esc(opLabel)}">${esc(opLabel)}</span>`
+                        : `<span class="timeline-call-status ${esc(call.status)}">${esc(call.status)}</span>`}
+                    ${opLabel && call.status !== 'completed' ? `<span class="timeline-call-status ${esc(call.status)}">${esc(call.status)}</span>` : ''}
                     <span class="timeline-call-tokens">${fmt(call.input_tokens)}/${fmt(call.output_tokens)}</span>
                     <span class="timeline-call-dur">${fmtDur(call.duration_ms)}</span>
                     <span class="timeline-call-cost">$${(call.cost_microusd / 1e6).toFixed(4)}</span>
@@ -536,7 +588,7 @@ export function renderSessionTimeline(d) {
                             <span class="timeline-op-name">${esc(op.tool_name)}</span>
                             <span class="timeline-op-status ${esc(op.status)}">${esc(op.status)}</span>
                         </div>
-                        ${op.input_preview ? `<div class="timeline-op-input">${esc(op.input_preview)}</div>` : ''}
+                        ${op.input_preview ? `<div class="timeline-op-input">${esc(friendlyOpLabel(op))}</div>` : ''}
                         ${op.result_preview ? `<div class="timeline-op-result">${esc(op.result_preview)}</div>` : ''}
                     </div>`;
                 }

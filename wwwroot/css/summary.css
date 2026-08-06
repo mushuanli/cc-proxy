@@ -385,7 +385,7 @@
 .timeline-calls { margin-left: 14px; }
 .timeline-call {
     display: grid;
-    grid-template-columns: auto minmax(80px, 1fr) 80px auto 60px 70px auto;
+    grid-template-columns: auto minmax(60px, 110px) minmax(120px, 1fr) auto 60px 70px auto;
     gap: 8px;
     align-items: center;
     padding: 3px 4px;
@@ -394,6 +394,15 @@
 }
 .timeline-call-time { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.7rem; white-space: nowrap; }
 .timeline-call-model { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.timeline-call-op {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
 .timeline-call-status { font-size: 0.65rem; text-transform: uppercase; white-space: nowrap; }
 .timeline-call-status.completed { color: #3a9a5f; }
 .timeline-call-status.failed, .timeline-call-status.interrupted { color: #d45a5a; }
