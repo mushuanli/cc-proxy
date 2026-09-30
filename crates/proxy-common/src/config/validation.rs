@@ -5,7 +5,20 @@ use crate::config::{
 use crate::protocol::WireProtocol;
 
 /// Effort values accepted by `active_effort` (`auto` is always accepted).
-const VALID_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultracode"];
+/// Reasoning levels accepted by `active_effort` / `UpstreamConfig.effort`.
+///
+/// `low`…`ultra` are the values the upstream manifest actually advertises
+/// (`supported_reasoning_levels[].effort`); `ultracode` is cc-proxy's own
+/// composite level (xhigh + workflow orchestration) and is kept alongside them.
+const VALID_EFFORTS: &[&str] = &[
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+    "ultracode",
+];
 
 impl AppConfig {
     /// Validate the configuration, returning a list of human-readable errors.
@@ -208,6 +221,25 @@ impl AppConfig {
                 errors.push(format!(
                     "account '{label}': unknown impersonate profile '{raw}' (expected one of {})",
                     Impersonation::accepted_names()
+                ));
+            }
+        }
+        // A version is sent verbatim as `Version`, in the User-Agent and as the
+        // manifest's `client_version`, so anything implausible there is a
+        // configuration error rather than something to discover at runtime.
+        if let Some(raw) = account
+            .cli_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            let plausible = raw.len() <= 32
+                && raw
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+            if !plausible {
+                errors.push(format!(
+                    "account '{label}': cli_version '{raw}' must look like a version, e.g. 0.159.2"
                 ));
             }
         }
@@ -658,6 +690,36 @@ mod tests {
             errors.iter().any(|e| e.contains("unknown impersonate")),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn a_malformed_cli_version_is_rejected_but_a_real_one_is_not() {
+        fn errors_for(version: &str) -> Vec<String> {
+            let mut config = AppConfig::default();
+            config.proxy.accounts.push(AccountConfig {
+                name: "work".into(),
+                family: AccountFamily::Gpt,
+                mode: AccountMode::Plan,
+                refresh_token: Some("rt".into()),
+                cli_version: Some(version.into()),
+                ..Default::default()
+            });
+            config.validate()
+        }
+
+        let errors = errors_for("not a version");
+        assert!(
+            errors.iter().any(|e| e.contains("cli_version")),
+            "{errors:?}"
+        );
+
+        for ok in ["0.159.2", "1.0.0-rc1", "0.160"] {
+            let errors = errors_for(ok);
+            assert!(
+                !errors.iter().any(|e| e.contains("cli_version")),
+                "{ok}: {errors:?}"
+            );
+        }
     }
 
     #[test]

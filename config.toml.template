@@ -221,6 +221,9 @@ default = { provider = "deepseek", model = "deepseek-v4-pro" }
 # auth_json = "~/.codex/auth.json"
 # persist   = true                # 刷新后原子回写（0600，保留未知字段）
 # identity  = "codex_tui"         # codex_tui（默认）| codex_cli_rs | passthrough
+# cli_version = "0.159.2"         # 伪装的 CLI 版本；缺省 = 内置默认。
+#                                 上游模型清单按此版本门控：0.153.3 只给 7 个模型，
+#                                 0.159.2 给 10 个。缺省落后于本机 codex --version 时会在面板提示
 #
 # [[proxy.accounts]]
 # name    = "gpt-key"             # GPT × api_key

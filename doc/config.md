@@ -79,6 +79,7 @@ AccountConfig {
 
     identity: Option<String>,      // codex_tui | codex_cli_rs | claude_code | passthrough
     impersonate: Option<String>,   // off（默认）| chrome | chrome142 | edge | firefox | safari
+    cli_version: Option<String>,   // 伪装的 CLI 版本，缺省 = 内置默认
 }
 ```
 
@@ -151,6 +152,24 @@ account   = "claude-sub"
   刷新并重放一次**（只重试一次）。`api_key` 模式无刷新，401 直接透传。
 - 账号配置在**启动时**加载一次；面板改动需重启生效（P1 计划接配置变更事件）。
 - `impersonate` 需要 `cargo build -p proxy-server --features impersonate`
+- `cli_version` 只能填版本形态的字符串（字母数字与 `.` `-` `_`，≤32 字符）
+
+### 关于 `cli_version` 与身份画像
+
+`cli_version`（缺省 `0.159.2`）会同时出现在 `User-Agent`（两处）、`version` 头和模型清单的
+`client_version` 查询参数上，四处同源。
+
+它值得单独设一个开关，是因为**上游的模型清单按版本门控**：同一个账号，
+`client_version=0.153.3` 只返回 7 个模型，`0.159.2` 返回 10 个（多出 `gpt-6-sol`、
+`gpt-6.1-sol`、`gpt-6-luna`）。写死在二进制里就意味着每次跟进都要重新编译。
+
+账号加载时会读 `<auth_json 同目录>/version.json` 的 `latest_version`，如果比我们伪装的新，
+就在日志里告警、并在账号面板上提示（`cli_version_stale`），照着改一下即可。
+
+UA 里的平台串不是硬编码：发行版取自 `/etc/os-release`，架构取自 `std::env::consts::ARCH`，
+终端取自 `TERM`（缺省/`dumb` 时回退 `xterm-256color`）。实测真实 TUI 发的是
+`codex-tui/0.159.2 (Debian n/a; x86_64) xterm-256color (codex-tui; 0.159.2)`，
+而它在 `TERM=dumb` 下**会拒绝启动**，所以伪装成 TUI 时不能报 `dumb`。
   （BoringSSL，需 cmake + C++ 工具链）；未编译时该字段被忽略。
 
 **Claude plan 模式的两个必要细节**（来自对官方客户端的实测）：
@@ -199,7 +218,7 @@ UpstreamConfig {
 ProxyConfig {
     active_upstream: String,
     active_proxy_upstream: String,      // 透明 proxy 入口独立使用的 upstream
-    active_effort: String,            // 默认 "auto"，可选 low/medium/high/xhigh/max/ultracode
+    active_effort: String,            // 默认 "auto"，可选 low/medium/high/xhigh/max/ultra/ultracode
     http_proxy: Option<String>,         // 全局出站 HTTP/SOCKS5 代理
     providers: Vec<Provider>,
     upstreams: Vec<UpstreamConfig>,
@@ -291,7 +310,10 @@ Retention {
 1. 将 `output_config.effort` 合并到请求 body JSON
 2. 追加 beta header `effort-2025-11-24` 到 `anthropic-beta`
 
-有效值：`auto`（透传）、`low`、`medium`、`high`、`xhigh`、`max`、`ultracode`
+有效值：`auto`（透传）、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`、`ultracode`
+
+其中 `low`…`ultra` 就是上游模型清单里 `supported_reasoning_levels[].effort` 的原值；
+`ultracode` 是 cc-proxy 自己的复合档（xhigh + 工作流编排），与上游取值并存。
 
 ## 持久化（`persist_config()`）
 

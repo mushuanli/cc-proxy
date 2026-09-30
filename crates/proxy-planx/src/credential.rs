@@ -534,6 +534,22 @@ pub async fn persist_credentials(path: &Path, creds: &Credentials) -> Result<()>
     Ok(())
 }
 
+/// Version the local Codex CLI last reported, read from `<codex_home>/version.json`.
+///
+/// The CLI keeps this next to `auth.json` (`{"latest_version":"0.159.2", …}`), so
+/// an account that points at a Codex installation can tell us when the version we
+/// advertise has fallen behind. Best-effort: any problem yields `None`.
+pub fn local_cli_latest_version(auth_json: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(auth_json.parent()?.join("version.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("latest_version")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
 /// Expand a leading `~/` using `$HOME`.
 pub fn expand_tilde(path: &str) -> PathBuf {
     let trimmed = path.trim();
@@ -625,6 +641,37 @@ mod tests {
         assert!(!creds.needs_refresh(Utc::now()));
         creds.access_token = None;
         assert!(creds.needs_refresh(Utc::now()));
+    }
+
+    #[test]
+    fn local_cli_latest_version_is_read_next_to_auth_json() {
+        // Unique per run: inside a sandbox the pid can repeat between test
+        // binaries, and a shared path would let one run see another's files.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("planx-cli-version-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let auth = dir.join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+
+        // No version.json: nothing to report.
+        assert_eq!(local_cli_latest_version(&auth), None);
+
+        std::fs::write(
+            dir.join("version.json"),
+            r#"{"latest_version":"0.159.2","last_checked_at":"2026-09-30T02:35:24Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(local_cli_latest_version(&auth).as_deref(), Some("0.159.2"));
+
+        // Malformed file: still no panic, just no answer.
+        std::fs::write(dir.join("version.json"), "not json").unwrap();
+        assert_eq!(local_cli_latest_version(&auth), None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

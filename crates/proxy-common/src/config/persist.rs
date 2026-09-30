@@ -194,6 +194,9 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         if let Some(ref impersonate) = account.impersonate {
             at.insert("impersonate", toml_edit::value(impersonate.as_str()));
         }
+        if let Some(ref version) = account.cli_version {
+            at.insert("cli_version", toml_edit::value(version.as_str()));
+        }
         accounts_arr.push(at);
     }
     if !accounts_arr.is_empty() {
@@ -397,6 +400,7 @@ mod tests {
             auth_json: Some("~/.codex/auth.json".into()),
             persist: true,
             identity: Some("codex_tui".into()),
+            cli_version: Some("0.159.2".into()),
             ..Default::default()
         });
         config.proxy.accounts.push(AccountConfig {

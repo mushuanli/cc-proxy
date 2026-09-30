@@ -99,12 +99,18 @@ function accountRow(a) {
     const inactiveImpersonation = wantsImpersonation && a.impersonate_supported === false
         ? `<div class="acct-err">${esc(t('accounts.impersonate_not_compiled', { profile: a.impersonate }))}</div>`
         : '';
+    // The upstream gates its model manifest on the advertised client version, so
+    // being behind the local CLI costs models silently. Say which version to set.
+    const staleCliVersion = a.cli_version_stale
+        ? `<div class="acct-warn">${esc(t('accounts.cli_version_stale', { version: a.cli_version_stale }))}</div>`
+        : '';
     return `
         <tr>
             <td>
                 <div class="acct-name">${esc(a.name)}</div>
                 <div class="acct-meta">${esc(meta)}${impersonate}</div>
                 ${inactiveImpersonation}
+                ${staleCliVersion}
             </td>
             <td><span class="acct-tag">${esc(a.family)}</span></td>
             <td><span class="acct-tag">${esc(a.mode)}</span></td>
@@ -254,6 +260,7 @@ function syncCredentialFields() {
     showAccountField('acct-account-id', isPlan && isGpt);
     showAccountField('acct-identity', isPlan);
     showAccountField('acct-impersonate', isPlan);
+    showAccountField('acct-cli-version', isPlan);
     showAccountField('acct-persist', isPlan && isGpt);
     syncIdentityOptions();
     const advanced = document.getElementById('acct-advanced');
@@ -296,6 +303,7 @@ export function openAccountDialog(name) {
                         ${field('accounts.account_id', 'acct-account-id', { placeholder: '(optional)', hint: t('accounts.account_id_hint') })}
                         ${optionsField('accounts.identity', 'acct-identity', identityOptions(existing?.family || 'gpt'), existing?.identity || '', t('accounts.identity_hint'))}
                         ${optionsField('accounts.impersonate', 'acct-impersonate', impersonationOptions(), existing?.impersonate || '', t('accounts.impersonate_hint'))}
+                        ${field('accounts.cli_version', 'acct-cli-version', { placeholder: '0.159.2', hint: t('accounts.cli_version_hint') })}
                         <div class="acct-field acct-inline">
                             <label><input type="checkbox" id="acct-persist"> ${esc(t('accounts.persist'))}</label>
                             <span class="hint">${esc(t('accounts.persist_hint'))}</span>
@@ -321,6 +329,7 @@ export function openAccountDialog(name) {
     // Selects: keep whatever the account already stored; '' means "family default".
     overlay.querySelector('#acct-identity').value = existing?.identity || '';
     overlay.querySelector('#acct-impersonate').value = existing?.impersonate || '';
+    overlay.querySelector('#acct-cli-version').value = existing?.cli_version || '';
     // Recommended defaults for a new account: the Codex CLI file everyone
     // already has, and write-back so the rotated refresh token survives.
     const usesCodexFile = mode === 'plan' && family === 'gpt';
@@ -369,6 +378,7 @@ async function saveAccount() {
         account_id: fieldValue('acct-account-id') || null,
         identity: fieldValue('acct-identity') || null,
         impersonate: fieldValue('acct-impersonate') || null,
+        cli_version: fieldValue('acct-cli-version') || null,
         persist: fieldVisible('acct-persist')
             && (document.getElementById('acct-persist')?.checked || false),
     };

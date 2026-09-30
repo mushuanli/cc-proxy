@@ -22,10 +22,10 @@ pub use protocol::{
 pub use core::event::EventBus;
 
 // Re-export shared domain types
+pub use messages::{extract_user_text, is_real_user_prompt, is_tool_result};
 pub use models::{
     BillingSnapshot, ClientType, CostData, DailyCost, ModelCost, NormalizedResponse, PriceRates,
     ProviderCost, ProviderInfo, ProxiedRequest, SessionCost, SessionId, SseEvent, TaskId,
     TaskStatus, TaskUsage, TierRuleInfo, ToolCallRecord, UpstreamInfo, WsMessage,
 };
-pub use messages::{extract_user_text, is_real_user_prompt, is_tool_result};
 pub use response::{normalize_response, sanitize_text};

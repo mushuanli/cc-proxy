@@ -868,3 +868,37 @@ cargo run -p proxy-planx --features impersonate --example fingerprint -- chrome
 
 > 注意 `cargo test --all-features` 会拉起 BoringSSL；只想验证指纹时用
 > `--features impersonate` 即可（`--all` 会连带 `zstd`）。
+
+### 11.5 客户端画像实测（用真实 CLI 对齐）
+
+不靠猜：`scripts/capture-cli-headers.sh` 用**隔离的 `CODEX_HOME`** 把真实 CLI 指向本地
+记录器（记录器直接回 400），因此**不碰你的 `~/.codex`、不消耗额度**，就能拿到它实际发出的头。
+`cargo run -p proxy-planx --example identity_headers -- gpt` 打印 cc-proxy 会发的头，两边直接 diff。
+
+实测（真实 CLI 0.159.2）：
+
+| 入口 | originator | user-agent |
+|---|---|---|
+| 交互式 TUI（`cli` / `vscode` thread） | `codex-tui` | `codex-tui/0.159.2 (Debian n/a; x86_64) xterm-256color (codex-tui; 0.159.2)` |
+| `codex exec` | `codex_exec` | `codex_exec/0.159.2 (Debian n/a; x86_64) dumb (codex_exec; 0.159.2)` |
+| TUI 启动时的首次 `GET /models` | `codex_cli_rs` | `codex_cli_rs/0.159.2 (Debian n/a; x86_64) xterm-256color`（**短形态**，无结尾括号段） |
+
+结论与取舍：
+
+1. **cc-proxy 伪装 TUI**（默认 `codex_tui`）。它服务的是长时间存活的交互式会话，对应 TUI 形态；
+   `codex_exec` 是一次性入口，画像不匹配。真实历史也可佐证：本机 23 个 `cli`/`vscode` thread
+   都是 `codex-tui`，只有 1 个 `exec` thread 是 `codex_exec`。
+2. `originator` 与 UA 前缀同源，**改 originator 会自动带走 UA 前缀**，不会出现两处不一致。
+3. 平台串取自真实环境（`/etc/os-release`、`ARCH`、`TERM`）。实测真实值是 `Debian n/a; x86_64`
+   + `xterm-256color`；注意 `n/a` 就是客户端对「版本未知」的表示，而它在 `TERM=dumb` 下会
+   **拒绝启动 TUI**，所以伪装 TUI 时 `TERM` 回退值必须是终端形态。
+4. **版本门控是真实存在的**：同一账号 `client_version=0.153.3` → 7 个模型，
+   `0.159.2` → 10 个。这直接催生了 `cli_version` 开关与
+   `version.json` 漂移告警（见 `doc/config.md`）。
+5. 仍未对齐（有意）：TUI 首次 models 请求用 `codex_cli_rs` + 短 UA；`/responses` 上还有
+   `x-codex-window-id`、`x-codex-routing-hint`、`x-codex-turn-metadata`、
+   `x-openai-internal-codex-responses-lite` 等头 cc-proxy 不发。这些属于「更像真实客户端」
+   的可选增强，不影响当前能否工作。
+
+> 抓 TUI 需要伪终端：裸管道给 stdin 会被忽略（TUI 要终端），
+> `TUI=1 scripts/capture-cli-headers.sh` 会用 `pty` 自动代打提示词并退出。

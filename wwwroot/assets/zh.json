@@ -394,6 +394,9 @@
     "impersonate_not_compiled": "impersonate={profile} 未生效：当前构建没有 impersonate feature",
     "identity_default": "默认",
     "refresh_token_required": "必填：Claude 订阅的可刷新凭据（sk-ant-ort01-…）",
-    "refresh_token_adv_hint": "只在本机没有 Codex CLI、拿不到 auth.json 时才需要（它会覆盖文件里的值）"
+    "refresh_token_adv_hint": "只在本机没有 Codex CLI、拿不到 auth.json 时才需要（它会覆盖文件里的值）",
+    "cli_version": "伪装的 CLI 版本",
+    "cli_version_hint": "留空 = 用内置默认。上游的模型清单按这个版本门控：实测同一账号 0.153.3 只给 7 个模型，0.159.2 给 10 个（多出 gpt-6-sol / gpt-6.1-sol / gpt-6-luna）。跟着本机 codex --version 填即可",
+    "cli_version_stale": "本机 Codex CLI 已是 {version}，建议把上面的 cli_version 改成它（否则模型清单会偏旧）"
   }
 }

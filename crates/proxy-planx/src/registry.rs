@@ -55,6 +55,9 @@ pub struct PlanAccount {
     current: RwLock<Option<UpstreamAuth>>,
     /// Last quota probe result, if any.
     quota: RwLock<Option<AccountQuota>>,
+    /// Set when the local Codex CLI reports a version newer than the one we
+    /// advertise — a stale version silently shrinks the upstream model manifest.
+    stale_cli_version: Option<String>,
 }
 
 impl std::fmt::Debug for PlanAccount {
@@ -84,13 +87,30 @@ impl PlanAccount {
         }
         let http = crate::transport::maintenance_client(proxy)?;
         let store = Self::build_store(config, http.clone()).await?;
+        let identity = Identity::from_profile_name(config.identity.as_deref(), config.family)
+            .with_cli_version(config.cli_version.as_deref());
+        // Best-effort drift check against the local Codex installation.
+        let stale_cli_version = config
+            .auth_json_path()
+            .map(expand_tilde)
+            .and_then(|path| crate::credential::local_cli_latest_version(&path))
+            .filter(|latest| crate::identity::version_is_newer(latest, &identity.client_version));
+        if let Some(latest) = stale_cli_version.as_deref() {
+            tracing::warn!(
+                "[planx] account '{}' advertises cli_version={} but the local Codex CLI reports {}; \
+                 the upstream model manifest is version-gated, so set cli_version to follow it",
+                config.name,
+                identity.client_version,
+                latest
+            );
+        }
 
         let account = Self {
             config: config.clone(),
             name: config.name.trim().to_string(),
             family: config.family,
             mode: config.mode,
-            identity: Identity::from_profile_name(config.identity.as_deref(), config.family),
+            identity,
             account_seed: config.name.trim().to_string(),
             http,
             store,
@@ -102,6 +122,7 @@ impl PlanAccount {
                 .unwrap_or_default(),
             current: RwLock::new(None),
             quota: RwLock::new(None),
+            stale_cli_version: None,
         };
         if !account.impersonate.is_off() && !crate::transport::IMPERSONATION_COMPILED {
             // Otherwise the operator sets a profile and silently gets the default
@@ -198,6 +219,11 @@ impl PlanAccount {
 
     pub fn impersonation(&self) -> Impersonation {
         self.impersonate
+    }
+
+    /// A newer version the local Codex CLI reported, when we are behind it.
+    pub fn stale_cli_version(&self) -> Option<&str> {
+        self.stale_cli_version.as_deref()
     }
 
     pub fn store(&self) -> Option<&TokenStore> {
@@ -701,6 +727,7 @@ mod tests {
             impersonate: Impersonation::Off,
             current: RwLock::new(None),
             quota: RwLock::new(None),
+            stale_cli_version: None,
         }
     }
 
@@ -724,6 +751,7 @@ mod tests {
             impersonate: Impersonation::Off,
             current: RwLock::new(None),
             quota: RwLock::new(None),
+            stale_cli_version: None,
         };
         account.republish();
         account
@@ -968,6 +996,7 @@ mod tests {
             impersonate: Impersonation::Off,
             current: RwLock::new(None),
             quota: RwLock::new(None),
+            stale_cli_version: None,
         };
         // `refresh_now` is the path the relay's 401 retry takes.
         let error = account.refresh_now().await.unwrap_err().to_string();

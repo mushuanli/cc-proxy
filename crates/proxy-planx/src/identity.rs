@@ -18,7 +18,15 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Default Codex CLI version advertised to the upstream.
-pub const DEFAULT_CLI_VERSION: &str = "0.153.3";
+///
+/// This is a single source of truth: the `User-Agent` (twice), the `version`
+/// header and — for the model manifest — the `client_version` query parameter all
+/// derive from it, so they can never disagree.
+///
+/// Keeping it current matters observably: the model manifest is version-gated.
+/// With `0.153.3` the endpoint returned 7 models, with `0.159.2` it returned 10
+/// (adding `gpt-6-sol` / `gpt-6.1-sol` / `gpt-6-luna`).
+pub const DEFAULT_CLI_VERSION: &str = "0.159.2";
 /// Default Claude Code CLI version (mirrors the Go implementation's built-in).
 pub const DEFAULT_CLAUDE_CLI_VERSION: &str = "2.1.258";
 /// Session-level beta features the real Codex client negotiates by default.
@@ -60,16 +68,147 @@ pub struct Identity {
     pub beta_features: String,
 }
 
+/// The platform fields the client advertises inside its `User-Agent`.
+///
+/// The real client reports **the machine it runs on**. Observed on this host:
+///
+/// ```text
+/// codex-tui/0.159.2 (Debian n/a; x86_64) xterm-256color (codex-tui; 0.159.2)
+/// ```
+///
+/// (Captured from the same client: `codex exec` prints the identical platform
+/// fields as `codex_exec/… (Debian n/a; x86_64) dumb (codex_exec; …)` — only the
+/// originator and `TERM` differ, and the TUI shape is the one we impersonate.)
+///
+/// Sending a fabricated `Mac OS 15.5.0; arm64` from a Linux container is a
+/// needless inconsistency, so the distribution, its version, the architecture
+/// and `TERM` are read from the environment.
+///
+/// `TERM` falls back to `xterm-256color`, not to `dumb`: cc-proxy impersonates
+/// an *interactive* client (long-lived session, like the TUI), and the real TUI
+/// **refuses to start** when `TERM=dumb` ("Refusing to start the interactive TUI
+/// because TERM is set to "dumb""), so a TUI-shaped client advertising `dumb`
+/// would contradict itself. `dumb` is what the non-interactive `codex exec`
+/// path reports when it is not attached to a terminal.
+#[derive(Debug, Clone)]
+pub struct Platform {
+    pub os_name: String,
+    pub os_version: String,
+    pub arch: String,
+    pub terminal: String,
+}
+
+impl Platform {
+    pub fn detect() -> Self {
+        Self {
+            os_name: os_name(),
+            os_version: os_version(),
+            arch: arch_name(),
+            terminal: usable_terminal(),
+        }
+    }
+}
+
+/// `TERM` if it names a real terminal, else `xterm-256color`.
+///
+/// `dumb` is rejected on purpose: the real TUI refuses to start under it
+/// ("Refusing to start the interactive TUI because TERM is set to \"dumb\""),
+/// so a TUI-shaped client that advertised `dumb` would contradict itself. A
+/// supervised daemon frequently inherits exactly that value.
+fn usable_terminal() -> String {
+    std::env::var("TERM")
+        .ok()
+        .map(|term| term.trim().to_string())
+        .filter(|term| !term.is_empty() && term != "dumb")
+        .unwrap_or_else(|| "xterm-256color".to_string())
+}
+
+/// Distribution name, capitalised (`debian` → `Debian`), else the OS family.
+fn os_name() -> String {
+    if let Some(id) = os_release_field("ID") {
+        let mut chars = id.chars();
+        if let Some(first) = chars.next() {
+            return format!("{}{}", first.to_ascii_uppercase(), chars.as_str());
+        }
+    }
+    match std::env::consts::OS {
+        "macos" => "Mac OS".to_string(),
+        "windows" => "Windows".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => "unknown".to_string(),
+            }
+        }
+    }
+}
+
+/// The client does not report a distribution version: two independent captures
+/// of 0.159.2 on this host — the interactive TUI and `codex exec` — both sent
+/// `(Debian n/a; x86_64)`, even though `/etc/os-release` carries a `VERSION_ID`.
+/// Mirroring the client beats inventing a more specific value, so this stays
+/// `n/a` until a real capture shows otherwise.
+fn os_version() -> String {
+    "n/a".to_string()
+}
+
+/// `x86_64` / `aarch64`, matching what the real client prints.
+fn arch_name() -> String {
+    match std::env::consts::ARCH {
+        "x86" => "x86".to_string(),
+        "arm" => "arm".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Read one `KEY=value` from `/etc/os-release` (Linux only).
+fn os_release_field(key: &str) -> Option<String> {
+    let raw = std::fs::read_to_string("/etc/os-release").ok()?;
+    for line in raw.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim() == key {
+            let value = value.trim().trim_matches('"').trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `true` when `candidate` is a strictly newer dotted version than `current`.
+///
+/// Used to notice that the local Codex CLI moved on while we kept advertising an
+/// older version — which is exactly how a stale `client_version` silently costs
+/// models from the upstream manifest.
+pub fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let parse = |raw: &str| -> Vec<u64> {
+        raw.trim()
+            .split(['.', '-', '+'])
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (mut a, mut b) = (parse(candidate), parse(current));
+    let len = a.len().max(b.len());
+    a.resize(len, 0);
+    b.resize(len, 0);
+    a > b
+}
+
 impl Default for Identity {
     fn default() -> Self {
+        let platform = Platform::detect();
         Self {
             profile: IdentityProfile::default(),
             client_version: DEFAULT_CLI_VERSION.to_string(),
             claude_version: DEFAULT_CLAUDE_CLI_VERSION.to_string(),
-            os_name: "Mac OS".to_string(),
-            os_version: "15.5.0".to_string(),
-            arch: "arm64".to_string(),
-            terminal: "xterm-256color".to_string(),
+            os_name: platform.os_name,
+            os_version: platform.os_version,
+            arch: platform.arch,
+            terminal: platform.terminal,
             beta_features: DEFAULT_BETA_FEATURES.to_string(),
         }
     }
@@ -92,6 +231,18 @@ impl Identity {
             profile,
             ..Default::default()
         }
+    }
+
+    /// Advertise a specific CLI version instead of the built-in default.
+    ///
+    /// The version is what the upstream gates its model manifest on, so being
+    /// able to move it without recompiling is the difference between "bump a
+    /// setting" and "rebuild the binary".
+    pub fn with_cli_version(mut self, version: Option<&str>) -> Self {
+        if let Some(version) = version.map(str::trim).filter(|v| !v.is_empty()) {
+            self.client_version = version.to_string();
+        }
+        self
     }
 
     /// The natural identity profile for a family.
@@ -299,6 +450,27 @@ mod tests {
     }
 
     #[test]
+    fn the_advertised_version_agrees_in_every_place_it_is_sent() {
+        // A mismatch between the UA and the `version` header is a one-glance tell,
+        // so pin all four placements (three in the UA, one header) to one value.
+        let identity = gpt_identity();
+        let ua = identity.codex_user_agent();
+        assert_eq!(ua.matches(DEFAULT_CLI_VERSION).count(), 2, "{ua}");
+        assert!(
+            ua.contains(&format!("codex-tui/{DEFAULT_CLI_VERSION}")),
+            "{ua}"
+        );
+        assert!(
+            ua.ends_with(&format!("(codex-tui; {DEFAULT_CLI_VERSION})")),
+            "{ua}"
+        );
+
+        let headers = identity.headers(AccountFamily::Gpt, "acct-1", Some("ws-1"));
+        assert_eq!(get(&headers, "version"), Some(DEFAULT_CLI_VERSION));
+        assert_eq!(get(&headers, "user-agent"), Some(ua.as_str()));
+    }
+
+    #[test]
     fn claude_user_agent_shape() {
         assert_eq!(
             claude_identity().claude_user_agent(),
@@ -393,6 +565,94 @@ mod tests {
                 other => panic!("unexpected os {other}"),
             }
         }
+    }
+
+    #[test]
+    fn the_default_profile_is_the_interactive_tui_shape() {
+        // cc-proxy serves long-lived interactive sessions, so it impersonates the
+        // TUI: originator `codex-tui`, which is what the real client sends for
+        // `cli` and `vscode` threads (23 of them in the local history) versus a
+        // single `codex_exec` from the one-shot `codex exec` entrypoint.
+        let identity = Identity::default();
+        assert_eq!(identity.profile, IdentityProfile::CodexTui);
+        assert!(identity.codex_user_agent().starts_with("codex-tui/"));
+        assert!(identity
+            .codex_user_agent()
+            .ends_with("(codex-tui; 0.159.2)"));
+
+        let headers = identity.headers(AccountFamily::Gpt, "acct", None);
+        assert_eq!(get(&headers, "originator"), Some("codex-tui"));
+    }
+
+    #[test]
+    fn a_dumb_terminal_is_never_advertised() {
+        // The real TUI refuses to run under TERM=dumb, so we must not claim it.
+        let saved = std::env::var("TERM").ok();
+        std::env::set_var("TERM", "dumb");
+        assert_eq!(usable_terminal(), "xterm-256color");
+        std::env::set_var("TERM", "screen-256color");
+        assert_eq!(usable_terminal(), "screen-256color");
+        match saved {
+            Some(value) => std::env::set_var("TERM", value),
+            None => std::env::remove_var("TERM"),
+        }
+    }
+
+    #[test]
+    fn the_platform_string_is_taken_from_the_environment() {
+        // No fabricated "Mac OS 15.5.0; arm64": the UA must describe this host,
+        // like the real client's does.
+        let platform = Platform::detect();
+        assert!(!platform.os_name.is_empty());
+        assert!(!platform.arch.is_empty());
+        assert!(!platform.terminal.is_empty());
+
+        let ua = gpt_identity().codex_user_agent();
+        assert!(
+            ua.contains(&format!(
+                "({} {}; {})",
+                platform.os_name, platform.os_version, platform.arch
+            )),
+            "{ua}"
+        );
+    }
+
+    #[test]
+    fn cli_version_can_be_overridden_without_recompiling() {
+        let identity = Identity::default().with_cli_version(Some("9.9.9"));
+        assert_eq!(identity.client_version, "9.9.9");
+        assert!(identity.codex_user_agent().contains("codex-tui/9.9.9"));
+        // Blank means "keep the built-in default".
+        assert_eq!(
+            Identity::default()
+                .with_cli_version(Some("  "))
+                .client_version,
+            DEFAULT_CLI_VERSION
+        );
+        assert_eq!(
+            Identity::default().with_cli_version(None).client_version,
+            DEFAULT_CLI_VERSION
+        );
+    }
+
+    #[test]
+    fn version_comparison_is_numeric_not_lexicographic() {
+        assert!(version_is_newer("0.159.2", "0.153.3"));
+        assert!(version_is_newer("0.160.0", "0.159.2"));
+        assert!(version_is_newer("1.0", "0.9.9"));
+        assert!(
+            version_is_newer("0.159.10", "0.159.9"),
+            "10 > 9 numerically"
+        );
+        assert!(!version_is_newer("0.153.3", "0.159.2"));
+        assert!(
+            !version_is_newer("0.159.2", "0.159.2"),
+            "equal is not newer"
+        );
+        assert!(
+            version_is_newer("0.159.2", "0.159"),
+            "shorter pads with zeros"
+        );
     }
 
     #[test]

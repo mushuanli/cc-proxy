@@ -11,6 +11,7 @@ Claude Code 的 `/effort` 命令控制模型的推理深度：
 | `high` | 大多数编码任务的平衡默认值（Opus 4.6/Sonnet 4.6 默认） | 是 |
 | `xhigh` | 更深推理，更高 token 消耗 | 是 |
 | `max` | 最深推理，无 token 上限（仅 Opus 4.6，易过度思考） | 否（session-only） |
+| `ultra` | 上游清单提供的最高推理档 | 是 |
 | `ultracode` | xhigh + 自动 Dynamic Workflow 编排 | 否（session-only） |
 
 ## 实现机制（API 层面）
@@ -97,7 +98,9 @@ if let Some(existing) = headers.get("anthropic-beta")... {
 | GET | `/api/effort` | 返回 `{"effort": "xhigh"}` |
 | PUT | `/api/effort` | 设置 effort，广播 UpstreamChanged |
 
-有效值：`["auto", "low", "medium", "high", "xhigh", "max", "ultracode"]`
+有效值：`["auto", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode"]`
+
+（`ultra` 是上游清单里的原值，见 `supported_reasoning_levels[].effort`。）
 
 无效值返回 400：`{"error": "Invalid effort 'xxx'. Valid: auto, low, ..."}`
 

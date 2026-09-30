@@ -1236,6 +1236,13 @@ pub async fn list_accounts(
                 "persist": a.persist,
                 "identity": a.identity,
                 "impersonate": a.impersonate,
+                "cli_version": a.cli_version,
+                // Drift against the local Codex CLI: a stale advertised version
+                // silently shrinks the upstream model manifest.
+                "cli_version_stale": state
+                    .planx
+                    .account(&a.name)
+                    .and_then(|acc| acc.stale_cli_version().map(str::to_string)),
                 // Whether this *build* can honour `impersonate` at all. Setting a
                 // profile on a build without the feature is otherwise a silent
                 // no-op, which looks exactly like "impersonation didn't help".
@@ -1294,6 +1301,7 @@ fn apply_account_patch(
         ("account_id", &mut account.account_id),
         ("identity", &mut account.identity),
         ("impersonate", &mut account.impersonate),
+        ("cli_version", &mut account.cli_version),
     ] {
         if body.get(key).is_some() {
             *slot = text_field(body, key);

@@ -130,6 +130,11 @@ pub struct AccountConfig {
     /// TLS/HTTP2 impersonation profile (`off` / `chrome` / …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impersonate: Option<String>,
+
+    /// Version advertised as the Codex CLI version. `None`/empty = the built-in
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
 }
 
 impl AccountConfig {

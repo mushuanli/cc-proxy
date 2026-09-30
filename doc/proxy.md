@@ -47,7 +47,7 @@ Provider 的 `proxy` 优先于全局 `http_proxy`；`proxy = ""` 表示显式直
 1. 将 `output_config.effort` 合并到请求 body JSON 中
 2. 追加 beta header `effort-2025-11-24` 到 `anthropic-beta`
 
-有效值：`auto`（透传）、`low`、`medium`、`high`、`xhigh`、`max`、`ultracode`
+有效值：`auto`（透传）、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`、`ultracode`
 
 ## SSE 解析
 
