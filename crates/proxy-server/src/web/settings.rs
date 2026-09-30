@@ -74,7 +74,11 @@ pub async fn update_pricing(
     // would become dangling. The caller must resolve those references first:
     // action=remove → drop them; action=reassign → rewrite them to the target provider.
     let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
-    let target = q.get("target").map(|s| s.as_str()).unwrap_or("").to_string();
+    let target = q
+        .get("target")
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let result = state
         .config
         .update(move |c| {
@@ -134,15 +138,12 @@ pub async fn update_pricing(
 }
 
 /// True if any upstream tier rule references the (model id, provider) mapping.
-fn mapping_refs_exist(
-    upstreams: &[proxy_common::UpstreamConfig],
-    id: &str,
-    prov: &str,
-) -> bool {
+fn mapping_refs_exist(upstreams: &[proxy_common::UpstreamConfig], id: &str, prov: &str) -> bool {
     upstreams.iter().any(|u| {
-        [&u.high, &u.mid, &u.low, &u.default]
-            .iter()
-            .any(|r| r.as_ref().map_or(false, |r| r.model == id && r.provider == prov))
+        [&u.high, &u.mid, &u.low, &u.default].iter().any(|r| {
+            r.as_ref()
+                .map_or(false, |r| r.model == id && r.provider == prov)
+        })
     })
 }
 
@@ -165,11 +166,7 @@ fn rewrite_mapping_refs(
 }
 
 /// Drop the provider reference in every rule matching (id, prov).
-fn clear_mapping_refs(
-    upstreams: &mut [proxy_common::UpstreamConfig],
-    id: &str,
-    prov: &str,
-) {
+fn clear_mapping_refs(upstreams: &mut [proxy_common::UpstreamConfig], id: &str, prov: &str) {
     for u in upstreams {
         for rule in [&mut u.high, &mut u.mid, &mut u.low, &mut u.default] {
             if let Some(r) = rule {
@@ -190,7 +187,11 @@ pub async fn delete_pricing(
     // action=reassign → rewrite every upstream rule referencing this pricing id
     // to the target pricing id; action=remove → drop those rules and delete.
     let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
-    let target = q.get("target").map(|s| s.as_str()).unwrap_or("").to_string();
+    let target = q
+        .get("target")
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let result = state
         .config
         .update(move |c| {
@@ -247,7 +248,8 @@ pub async fn pricing_refs(
         ] {
             if let Some(r) = rule {
                 if r.model == id {
-                    upstreams.push(json!({"upstream": u.name, "tier": tier, "provider": r.provider}));
+                    upstreams
+                        .push(json!({"upstream": u.name, "tier": tier, "provider": r.provider}));
                 }
             }
         }
@@ -288,7 +290,15 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         .providers
         .iter()
         .map(|p| {
-            json!({"name": p.name, "url": p.url, "has_token": p.token.is_some(), "proxy": p.proxy})
+            json!({
+                "name": p.name,
+                "url": p.url,
+                "has_token": p.token.is_some(),
+                "proxy": p.proxy,
+                "protocols": p.protocols,
+                "codex_url": p.codex_url,
+                "account": p.account,
+            })
         })
         .collect();
     Json(json!(infos)).into_response()
@@ -301,17 +311,36 @@ pub async fn add_provider(
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
+        .map(str::trim)
         .unwrap_or("")
         .to_string();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "name is required"})),
+        )
+            .into_response();
+    }
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let codex_url = body.get("codex_url").and_then(|v| v.as_str()).map(String::from);
+    let codex_url = body
+        .get("codex_url")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let token = body.get("token").and_then(|v| v.as_str()).map(String::from);
     let provider_proxy = body.get("proxy").and_then(|v| v.as_str()).map(String::from);
     let protocols = body
         .get("protocols")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|p| p.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
+    let account = body
+        .get("account")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let log_name = name.clone();
     let result = state
         .config
@@ -323,6 +352,7 @@ pub async fn add_provider(
                 token,
                 proxy: provider_proxy,
                 protocols,
+                account,
             });
             Ok(())
         })
@@ -354,7 +384,10 @@ pub async fn update_provider(
                     p.url = url.into();
                 }
                 if body.get("codex_url").is_some() {
-                    p.codex_url = body.get("codex_url").and_then(|v| v.as_str()).map(String::from);
+                    p.codex_url = body
+                        .get("codex_url")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                 }
                 if body.get("token").is_some() {
                     p.token = body.get("token").and_then(|v| v.as_str()).map(String::from);
@@ -378,6 +411,12 @@ pub async fn update_provider(
                                 .collect()
                         })
                         .unwrap_or_default();
+                }
+                if body.get("account").is_some() {
+                    p.account = body
+                        .get("account")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                 }
             }
             Ok(())
@@ -405,7 +444,11 @@ pub async fn delete_provider(
     // action=reassign → rewrite all references to the target provider;
     // action=remove → drop all references (upstream tier rules + pricing keys) and delete the provider.
     let action = q.get("action").map(|s| s.as_str()).unwrap_or("");
-    let target = q.get("target").map(|s| s.as_str()).unwrap_or("").to_string();
+    let target = q
+        .get("target")
+        .map(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let result = state
         .config
         .update(move |c| {
@@ -475,7 +518,8 @@ pub async fn provider_refs(
         .filter(|mp| mp.providers.contains_key(&name))
         .map(|mp| mp.id.clone())
         .collect();
-    Json(json!({"provider": name, "upstreams": upstreams, "model_pricing": pricing})).into_response()
+    Json(json!({"provider": name, "upstreams": upstreams, "model_pricing": pricing}))
+        .into_response()
 }
 
 /// Rewrite every reference to `from` in upstream tier rules to `to`.
@@ -501,14 +545,13 @@ fn clear_provider_rules(u: &mut proxy_common::UpstreamConfig, provider: &str) {
 }
 
 /// Rewrite the pricing provider key `from` → `to`.
-fn rewrite_provider_rules(
-    pricing: &mut [proxy_common::ModelPricing],
-    from: &str,
-    to: &str,
-) {
+fn rewrite_provider_rules(pricing: &mut [proxy_common::ModelPricing], from: &str, to: &str) {
     for mp in pricing {
         if let Some(names) = mp.providers.remove(from) {
-            mp.providers.entry(to.to_string()).or_default().extend(names);
+            mp.providers
+                .entry(to.to_string())
+                .or_default()
+                .extend(names);
         }
     }
 }
@@ -630,7 +673,18 @@ pub async fn delete_upstream(
             }
             let was_active = c.proxy.active_upstream == name;
             let was_proxy_active = c.proxy.active_proxy_upstream == name;
+            // Leaving these dangling would be rejected by validation, so deleting
+            // the codex-active upstream must not be a dead end.
+            let was_codex_active = c.proxy.active_codex_upstream == name;
             c.proxy.upstreams.retain(|u| u.name != name);
+            if was_codex_active {
+                c.proxy.active_codex_upstream = c
+                    .proxy
+                    .upstreams
+                    .first()
+                    .map(|u| u.name.clone())
+                    .unwrap_or_default();
+            }
             if was_active {
                 c.proxy.active_upstream = c
                     .proxy
@@ -1109,12 +1163,282 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
                 url: p.url.clone(),
                 has_token: p.token.is_some(),
                 proxy: p.proxy.clone(),
+                protocols: p.protocols.clone(),
+                codex_url: p.codex_url.clone(),
+                account: p.account.clone(),
             })
             .collect(),
         active_effort: c.proxy.active_effort.clone(),
         model_pricing: c.model_pricing.clone(),
         http_proxy: c.proxy.http_proxy.clone(),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// planx accounts
+//
+// Secrets are never returned: `list_accounts` reports `has_api_key` /
+// `has_refresh_token` / `has_access_token` booleans instead. Quota is opt-in via
+// `?probe=1` because it performs one upstream call per account.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Publish the existing upstream-changed event so the planx registry reloads.
+///
+/// Accounts are part of the upstream configuration, so this reuses the event the
+/// provider/upstream editors already emit — no new WS message type, no risk to
+/// the frontend's message handling.
+async fn accounts_changed(state: &Arc<AppState>) {
+    state.events.publish(upstream_changed(&state.config).await);
+}
+
+pub async fn list_accounts(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let config = state.config.get().await;
+    let probe = q.get("probe").is_some_and(|v| v == "1" || v == "true");
+
+    let quotas: std::collections::HashMap<String, serde_json::Value> = if probe {
+        state
+            .planx
+            .probe_all()
+            .await
+            .into_iter()
+            .map(|(name, quota)| (name, json!(quota)))
+            .collect()
+    } else {
+        state
+            .planx
+            .accounts()
+            .into_iter()
+            .filter_map(|account| {
+                account
+                    .cached_quota()
+                    .map(|quota| (account.name().to_string(), json!(quota)))
+            })
+            .collect()
+    };
+
+    let infos: Vec<serde_json::Value> = config
+        .proxy
+        .accounts
+        .iter()
+        .map(|a| {
+            json!({
+                "name": a.name,
+                "family": a.family.as_str(),
+                "mode": a.mode.as_str(),
+                "has_api_key": a.api_key.is_some(),
+                "has_refresh_token": a.refresh_token.is_some(),
+                "has_access_token": a.access_token.is_some(),
+                "auth_json": a.auth_json,
+                "account_id": a.account_id,
+                "persist": a.persist,
+                "identity": a.identity,
+                "impersonate": a.impersonate,
+                // Whether this *build* can honour `impersonate` at all. Setting a
+                // profile on a build without the feature is otherwise a silent
+                // no-op, which looks exactly like "impersonation didn't help".
+                "impersonate_supported": proxy_planx::IMPERSONATION_COMPILED,
+                "problem": a.credential_problem(),
+                "live": state.planx.account(&a.name).is_some(),
+                "quota": quotas.get(&a.name),
+            })
+        })
+        .collect();
+    tracing::info!(
+        "[api] list_accounts: {} entries (probe={})",
+        infos.len(),
+        probe
+    );
+    Json(json!(infos)).into_response()
+}
+
+/// Build an [`proxy_common::AccountConfig`] from a JSON request body.
+///
+/// `name` is the only required field; everything else falls back to the
+/// family/mode defaults and is then patched in.
+fn account_from_body(body: &serde_json::Value) -> Result<proxy_common::AccountConfig, String> {
+    let name = text_field(body, "name").ok_or_else(|| "name is required".to_string())?;
+    let mut account = proxy_common::AccountConfig {
+        name,
+        ..Default::default()
+    };
+    apply_account_patch(&mut account, body)?;
+    Ok(account)
+}
+
+/// Patch semantics — the contract the dashboard relies on.
+///
+/// `GET /api/accounts` never returns secrets, so a client physically cannot echo
+/// them back. Every field is therefore optional: an **absent** key keeps the
+/// stored value, a **present** key overwrites it (present-but-blank clears it).
+/// Without this, editing one non-secret field would wipe the credential.
+fn apply_account_patch(
+    account: &mut proxy_common::AccountConfig,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(raw) = body.get("family").and_then(|v| v.as_str()) {
+        account.family = proxy_common::AccountFamily::parse(raw)
+            .ok_or_else(|| format!("unknown family '{raw}' (expected gpt or claude)"))?;
+    }
+    if let Some(raw) = body.get("mode").and_then(|v| v.as_str()) {
+        account.mode = proxy_common::AccountMode::parse(raw)
+            .ok_or_else(|| format!("unknown mode '{raw}' (expected api_key or plan)"))?;
+    }
+    for (key, slot) in [
+        ("api_key", &mut account.api_key),
+        ("auth_json", &mut account.auth_json),
+        ("refresh_token", &mut account.refresh_token),
+        ("access_token", &mut account.access_token),
+        ("account_id", &mut account.account_id),
+        ("identity", &mut account.identity),
+        ("impersonate", &mut account.impersonate),
+    ] {
+        if body.get(key).is_some() {
+            *slot = text_field(body, key);
+        }
+    }
+    if let Some(persist) = body.get("persist").and_then(|v| v.as_bool()) {
+        account.persist = persist;
+    }
+    Ok(())
+}
+
+/// A trimmed, non-empty string field, or `None` for absent/null/blank.
+fn text_field(body: &serde_json::Value, key: &str) -> Option<String> {
+    body.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from)
+}
+
+pub async fn add_account(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let account = match account_from_body(&body) {
+        Ok(account) => account,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": error})),
+            )
+                .into_response()
+        }
+    };
+    let log_name = account.name.clone();
+    let result = state
+        .config
+        .update(move |c| {
+            if c.proxy.accounts.iter().any(|a| a.name == account.name) {
+                return Err(proxy_common::ConfigError::Duplicate(format!(
+                    "account '{}'",
+                    account.name
+                )));
+            }
+            c.proxy.accounts.push(account);
+            Ok(())
+        })
+        .await;
+    match result {
+        Ok(_) => {
+            accounts_changed(&state).await;
+            tracing::info!("[api] add_account: name={}", log_name);
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(error) => err_response(&error.to_string()),
+    }
+}
+
+pub async fn update_account(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let log_name = name.clone();
+    let result = state
+        .config
+        .update(move |c| {
+            // Editing an account is a merge, never a replace; see apply_account_patch.
+            let Some(slot) = c.proxy.accounts.iter_mut().find(|a| a.name == name) else {
+                return Err(proxy_common::ConfigError::NotFound(format!(
+                    "account '{name}'"
+                )));
+            };
+            apply_account_patch(slot, &body).map_err(proxy_common::ConfigError::Validation)
+        })
+        .await;
+    match result {
+        Ok(_) => {
+            accounts_changed(&state).await;
+            tracing::info!("[api] update_account: name={}", log_name);
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(error) => err_response(&error.to_string()),
+    }
+}
+
+pub async fn delete_account(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let log_name = name.clone();
+    let result = state
+        .config
+        .update(move |c| {
+            // Refuse while referenced: silently dropping the credential would
+            // turn the provider into an unauthenticated passthrough.
+            let referenced: Vec<String> = c
+                .proxy
+                .providers
+                .iter()
+                .filter(|p| p.account.as_deref() == Some(name.as_str()))
+                .map(|p| p.name.clone())
+                .collect();
+            if !referenced.is_empty() {
+                return Err(proxy_common::ConfigError::Validation(format!(
+                    "account '{name}' is still referenced by provider(s): {}",
+                    referenced.join(", ")
+                )));
+            }
+            let before = c.proxy.accounts.len();
+            c.proxy.accounts.retain(|a| a.name != name);
+            if c.proxy.accounts.len() == before {
+                return Err(proxy_common::ConfigError::NotFound(format!(
+                    "account '{name}'"
+                )));
+            }
+            Ok(())
+        })
+        .await;
+    match result {
+        Ok(_) => {
+            accounts_changed(&state).await;
+            tracing::info!("[api] delete_account: name={}", log_name);
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(error) => err_response(&error.to_string()),
+    }
+}
+
+/// Force an immediate quota probe for one account.
+///
+/// Goes through the registry, so it uses the same endpoints, credentials and
+/// identity as the scheduled probe.
+pub async fn probe_account(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let Some(quota) = state.planx.probe_one(&name).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "error": format!("account '{name}' is not active")})),
+        )
+            .into_response();
+    };
+    Json(json!({"ok": quota.error.is_none(), "quota": quota})).into_response()
 }
 
 #[cfg(test)]

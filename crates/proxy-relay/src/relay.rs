@@ -12,6 +12,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
+use proxy_common::{PlanAuthHandle, PlanAuthHandleExt, ProtocolAdapterHandle, UpstreamAuth};
 
 /// Truncate a &str to at most `max_bytes` bytes, preserving UTF-8 boundaries.
 fn safe_truncate_bytes(s: &str, max_bytes: usize) -> &str {
@@ -30,7 +31,7 @@ fn request_prompt(body: &serde_json::Value) -> Option<String> {
 }
 use proxy_common::{ClientType, SessionId, TaskId, TaskStatus, TaskUsage, WsMessage};
 use proxy_common::{ConfigStore, EventBus};
-use proxy_common::{ResolvedRoute, AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
+use proxy_common::{AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM};
 use proxy_store::{summarize_task, summary_current_operation};
 use proxy_store::{NewSessionDefaults, NewTask, ProxyStore, StoreResult};
 use std::collections::HashMap;
@@ -66,6 +67,12 @@ pub struct RelayHandler {
     request_timeout_secs: u64,
     capture: CaptureControl,
     session_ingest: Option<Arc<dyn proxy_session::SessionIngest>>,
+    /// Account credential mechanism (see `proxy-planx`). `None` = the proxy
+    /// behaves exactly as it did before planx existed.
+    account_auth: PlanAuthHandle,
+    /// Cross-protocol translation mechanism (see `proxy-bridge`). `None` = a
+    /// request must reach an upstream speaking the same protocol, as before.
+    protocol_adapter: ProtocolAdapterHandle,
 }
 
 impl RelayHandler {
@@ -87,7 +94,21 @@ impl RelayHandler {
             request_timeout_secs: 120,
             capture,
             session_ingest: None,
+            account_auth: None,
+            protocol_adapter: None,
         }
+    }
+
+    /// Inject cross-protocol translation (proxy-bridge).
+    pub fn with_protocol_adapter(mut self, protocol_adapter: ProtocolAdapterHandle) -> Self {
+        self.protocol_adapter = protocol_adapter;
+        self
+    }
+
+    /// Inject account authentication (planx).
+    pub fn with_account_auth(mut self, account_auth: PlanAuthHandle) -> Self {
+        self.account_auth = account_auth;
+        self
     }
 
     /// Attach a session ingest collector (observations feed).
@@ -264,6 +285,149 @@ async fn handle_reverse_proxy(
     proxy_request(relay, method, &path, headers, body, false).await
 }
 
+// ── Upstream route resolution ──
+
+/// Everything the relay needs in order to send one request upstream.
+///
+/// Replaces a six-element tuple that was easy to mis-order at the call site and
+/// impossible to name in a signature.
+struct UpstreamPlan {
+    route: proxy_common::ResolvedRoute,
+    /// Upstream base URL — the codex endpoint when the request is bridged.
+    base_url: String,
+    /// Static provider token, absent in auto-detect mode.
+    token: Option<String>,
+    /// `[[proxy.accounts]]` name, when the provider names one.
+    account: Option<String>,
+    /// Protocol the upstream will actually receive.
+    protocol: upstream::ApiProtocol,
+    /// Cross-protocol translation, when the provider speaks the other protocol.
+    bridge: Option<upstream::BridgePlan>,
+}
+
+/// The inputs of a route decision.
+struct RouteRequest<'a> {
+    providers: &'a [proxy_common::Provider],
+    /// Transparent forward mode: the request URL itself picks the provider.
+    auto_detect: bool,
+    path_or_url: &'a str,
+    upstream_name: &'a str,
+    request_model: &'a str,
+    /// Protocol the client spoke.
+    protocol: upstream::ApiProtocol,
+}
+
+/// Resolve where a request goes: auto-detect by URL, or tier routing.
+///
+/// `Err` carries the response to return verbatim, so every rejection has one
+/// shape and the caller stays a straight line.
+async fn resolve_upstream_plan(
+    relay: &RelayHandler,
+    request: RouteRequest<'_>,
+) -> Result<UpstreamPlan, Box<Response<Body>>> {
+    if request.auto_detect {
+        return auto_detect_plan(&request).ok_or_else(|| {
+            tracing::error!(
+                "auto-detect failed: no provider matches request URL: {}",
+                request.path_or_url
+            );
+            Box::new(bad_gateway(format!(
+                "Auto-detect failed: no configured provider matches request URL\n\nURL: {}",
+                request.path_or_url
+            )))
+        });
+    }
+
+    let route = match relay
+        .config
+        .resolve_route_for(request.upstream_name, request.request_model)
+        .await
+    {
+        Ok(route) => route,
+        Err(error) => {
+            tracing::warn!("[relay] route resolution failed: {}", error);
+            return Err(Box::new(bad_gateway(format!(
+                "Route resolution failed: {error}"
+            ))));
+        }
+    };
+    let provider = request.providers.iter().find(|p| p.name == route.provider);
+    // A provider may serve the client protocol directly, or be reachable through
+    // a registered cross-protocol bridge. Anything else is a misconfiguration and
+    // is reported rather than forwarded.
+    let bridge = provider
+        .and_then(|p| upstream::plan_bridge(request.protocol, p, relay.protocol_adapter.as_ref()));
+    if let Some(p) = provider {
+        if !p.serves(request.protocol.request_type()) && bridge.is_none() {
+            return Err(Box::new(bad_gateway(format!(
+                "Provider '{}' does not serve protocol '{}' (protocols: {:?})",
+                p.name,
+                request.protocol.request_type(),
+                p.protocols
+            ))));
+        }
+    }
+    // Follow the protocol the upstream will really receive, so the Codex endpoint
+    // is chosen when we bridge into it.
+    let protocol = bridge
+        .as_ref()
+        .map(|plan| plan.target)
+        .unwrap_or(request.protocol);
+    Ok(UpstreamPlan {
+        route,
+        base_url: provider
+            .map(|p| upstream_base_url(p, protocol))
+            .unwrap_or_default(),
+        token: provider.and_then(|p| p.token.clone()),
+        account: provider.and_then(|p| p.account.clone()),
+        protocol,
+        bridge,
+    })
+}
+
+/// Transparent mode: the provider whose base URL prefixes the request URL.
+fn auto_detect_plan(request: &RouteRequest<'_>) -> Option<UpstreamPlan> {
+    let provider = request.providers.iter().find(|p| {
+        let base = p.url.trim_end_matches('/');
+        request.path_or_url.starts_with(base)
+    })?;
+    Some(UpstreamPlan {
+        route: proxy_common::ResolvedRoute {
+            upstream: proxy_common::AUTO_PROXY_UPSTREAM.into(),
+            provider: provider.name.clone(),
+            configured_model: request.request_model.to_string(),
+            resolved_model: request.request_model.to_string(),
+            effort: None,
+        },
+        base_url: provider.url.clone(),
+        // Auto mode overrides neither credential: the client's own is forwarded.
+        token: None,
+        account: None,
+        // Auto mode never bridges: the URL decides.
+        protocol: request.protocol,
+        bridge: None,
+    })
+}
+
+/// The endpoint a provider exposes for a protocol.
+fn upstream_base_url(provider: &proxy_common::Provider, protocol: upstream::ApiProtocol) -> String {
+    if protocol == upstream::ApiProtocol::Codex {
+        provider
+            .codex_url
+            .clone()
+            .unwrap_or_else(|| provider.url.clone())
+    } else {
+        provider.url.clone()
+    }
+}
+
+fn bad_gateway(message: String) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .body(Body::from(message))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
 // ── Core proxy logic ──
 
 async fn proxy_request(
@@ -336,86 +500,30 @@ async fn proxy_request(
     let session_meta = upstream::extract_session_metadata(&headers, &body_json);
 
     // ── Resolve route (auto-detect or tier routing) ──
-    let use_auto_route = upstream_name == AUTO_PROXY_UPSTREAM && is_transparent;
-    let (route, provider_url, provider_token) = if use_auto_route {
-        // Auto-detect: find provider whose base URL matches the request URL
-        let matched = config_snapshot.proxy.providers.iter().find(|p| {
-            let base = p.url.trim_end_matches('/');
-            path_or_url.starts_with(base)
-        });
-        match matched {
-            Some(p) => (
-                ResolvedRoute {
-                    upstream: AUTO_PROXY_UPSTREAM.into(),
-                    provider: p.name.clone(),
-                    configured_model: request_model.clone(),
-                    resolved_model: request_model.clone(),
-                    effort: None,
-                },
-                p.url.clone(),
-                None, // auto mode: do not override API key
-            ),
-            None => {
-                tracing::error!(
-                    "auto-detect failed: no provider matches request URL: {}",
-                    path_or_url
-                );
-                return Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(format!(
-                        "Auto-detect failed: no configured provider matches request URL\n\nURL: {}",
-                        path_or_url
-                    )))
-                    .unwrap();
-            }
-        }
-    } else {
-        // Normal tier-based route resolution
-        let route = match relay
-            .config
-            .resolve_route_for(upstream_name, &request_model)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("[relay] route resolution failed: {}", e);
-                return Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(format!("Route resolution failed: {}", e)))
-                    .unwrap();
-            }
-        };
-        let provider = config_snapshot
-            .proxy
-            .providers
-            .iter()
-            .find(|p| p.name == route.provider);
-        // Reject if the resolved provider does not serve this client protocol.
-        if let Some(p) = provider {
-            if !p.serves(protocol.request_type()) {
-                return Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(format!(
-                        "Provider '{}' does not serve protocol '{}' (protocols: {:?})",
-                        p.name,
-                        protocol.request_type(),
-                        p.protocols
-                    )))
-                    .unwrap();
-            }
-        }
-        let provider_url = provider
-            .map(|p| {
-                if protocol == upstream::ApiProtocol::Codex {
-                    p.codex_url.clone().unwrap_or_else(|| p.url.clone())
-                } else {
-                    p.url.clone()
-                }
-            })
-            .unwrap_or_default();
-        let provider_token = provider.and_then(|p| p.token.clone());
-        (route, provider_url, provider_token)
+    let plan = match resolve_upstream_plan(
+        &relay,
+        RouteRequest {
+            providers: &config_snapshot.proxy.providers,
+            auto_detect: upstream_name == AUTO_PROXY_UPSTREAM && is_transparent,
+            path_or_url,
+            upstream_name,
+            request_model: &request_model,
+            protocol,
+        },
+    )
+    .await
+    {
+        Ok(plan) => plan,
+        Err(response) => return *response,
     };
+    let UpstreamPlan {
+        route,
+        base_url: provider_url,
+        token: provider_token,
+        account,
+        protocol: upstream_protocol,
+        bridge,
+    } = plan;
 
     // session_id is validated (ASCII-only), safe for byte slicing
     let sid_s = session_id.as_str();
@@ -485,7 +593,8 @@ async fn proxy_request(
     // so the upstream receives the correct model identifier.
     // When resolved_model is empty, pass the original model through unchanged
     // (transparent mode: default has only provider, no model override).
-    if !is_transparent && !route.resolved_model.is_empty() && route.resolved_model != request_model {
+    if !is_transparent && !route.resolved_model.is_empty() && route.resolved_model != request_model
+    {
         body_json["model"] = serde_json::json!(route.resolved_model);
         tracing::debug!(
             "[{}] model translation: {} -> {}",
@@ -495,6 +604,54 @@ async fn proxy_request(
         );
     }
 
+    // ── Cross-protocol request translation ──
+    // Rewrite the body for the upstream protocol before anything downstream looks
+    // at it, and remember the translator needed to convert the answer back.
+    let mut response_translator: Option<Box<dyn proxy_common::protocol::ResponseTranslator>> = None;
+    // The body as the *client* protocol sees it. Recorded instead of the
+    // translated body so the inspector and the summary analyzer keep reading one
+    // protocol; the translated body is only what goes on the wire.
+    let mut client_body: Option<String> = None;
+    if let Some(plan) = bridge.as_ref() {
+        client_body = Some(serde_json::to_string(&body_json).unwrap_or_default());
+        let source = protocol.to_wire();
+        match plan.adapter.translate_request(
+            source,
+            plan.target.to_wire(),
+            &serde_json::to_vec(&body_json).unwrap_or_default(),
+        ) {
+            Ok(translated) => match serde_json::from_slice::<serde_json::Value>(&translated.body) {
+                Ok(rewritten) => {
+                    body_json = rewritten;
+                    response_translator = plan
+                        .adapter
+                        .response_translator(source, plan.target.to_wire());
+                    tracing::info!(
+                        "[{}] bridging {} -> {} for provider '{}'",
+                        sid_short,
+                        source.as_str(),
+                        plan.target.request_type(),
+                        route.provider
+                    );
+                }
+                Err(e) => {
+                    return Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from(format!(
+                            "Protocol translation produced invalid JSON: {e}"
+                        )))
+                        .unwrap();
+                }
+            },
+            Err(e) => {
+                return Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(Body::from(format!("Protocol translation failed: {e}")))
+                    .unwrap();
+            }
+        }
+    }
+
     // ── Build upstream URL ──
     let upstream_url = if path_or_url.starts_with("http") {
         // Forward proxy: use full URL
@@ -502,15 +659,42 @@ async fn proxy_request(
     } else {
         // Reverse proxy: append path to provider base URL
         let base = provider_url.trim_end_matches('/');
-        let path = path_or_url.trim_start_matches('/');
+        // A bridge replaces the client's path with the upstream protocol's own.
+        let path = bridge
+            .as_ref()
+            .map(|plan| plan.path)
+            .unwrap_or(path_or_url)
+            .trim_start_matches('/');
         format!("{}/{}", base, path)
     };
 
     // ── Build upstream headers ──
-    let override_token = (!is_transparent)
-        .then_some(provider_token.as_deref())
-        .flatten();
-    let mut upstream_headers = upstream::build_upstream_headers(&headers, override_token);
+    // Authentication policy: a provider either names a subscription account
+    // (planx) or carries a static token. Transparent/forward mode overrides
+    // neither, exactly as before.
+    let upstream_auth: Option<UpstreamAuth> = if is_transparent {
+        None
+    } else if let Some(name) = account.as_deref() {
+        match relay.account_auth.resolve_account(name) {
+            Some(auth) => Some(auth),
+            // Fail closed. Falling through would forward the *client's* own
+            // credential to a third-party upstream, which is worse than an error.
+            None => {
+                tracing::warn!(
+                    "[{}] account '{}' has no usable credential",
+                    sid_short,
+                    name
+                );
+                return bad_gateway(format!(
+                    "Account '{name}' has no usable credential yet; check its configuration"
+                ));
+            }
+        }
+    } else {
+        provider_token.clone().map(UpstreamAuth::Static)
+    };
+    let mut upstream_headers =
+        upstream::build_upstream_headers_with_auth(&headers, upstream_auth.as_ref());
     // Effort beta header
     if !is_transparent {
         if let Some(effort_val) = route.effort.as_ref() {
@@ -545,11 +729,17 @@ async fn proxy_request(
 
     // ── Build Recording task for persistence ──
     let request_headers = upstream::redact_headers(&headers);
-    let request_body = stored_request_body(is_transparent, &body, &body_json);
+    let request_body = match client_body {
+        Some(body) => body,
+        None => stored_request_body(is_transparent, &body, &body_json),
+    };
     let recording_metadata = serde_json::json!({
         "protocol": protocol.request_type(),
         "upstream_mode": if is_transparent { "proxy" } else { "relay" },
         "priced": priced,
+        // Set when the request was translated on the way out, so the inspector
+        // can explain why the wire body differs from the recorded one.
+        "bridged_to": bridge.as_ref().map(|plan| plan.target.request_type()),
     });
 
     let recording_task = NewTask {
@@ -658,12 +848,12 @@ async fn proxy_request(
 
     // ── Dispatch upstream ──
     let http_client = relay.client_for_proxy(proxy_url.as_deref());
-    let response = match upstream::dispatch_upstream(
+    let mut response = match upstream::dispatch_upstream(
         &http_client,
         method.clone(),
         &upstream_url,
-        upstream_headers,
-        body_bytes,
+        upstream_headers.clone(),
+        body_bytes.clone(),
         relay.request_timeout_secs,
         relay.retry_count,
     )
@@ -738,19 +928,71 @@ async fn proxy_request(
         }
     };
 
+    // ── planx: retry once in-request after a 401 ──
+    // A subscription account's access token can be revoked or rotated between
+    // the background refresher's ticks. Refresh on demand and replay the request
+    // so the client never sees a token-lifetime 401. Bounded to a single retry.
+    if response.status() == StatusCode::UNAUTHORIZED {
+        if let Some(name) = account.as_deref() {
+            if let Some(refreshed) = relay.account_auth.refresh_account(name).await {
+                tracing::info!(
+                    "[{}] upstream 401 — retrying once with refreshed credentials (account='{}')",
+                    sid_short,
+                    name
+                );
+                let retry_headers = upstream::apply_auth_to(upstream_headers.clone(), &refreshed);
+                match upstream::dispatch_upstream(
+                    &http_client,
+                    method.clone(),
+                    &upstream_url,
+                    retry_headers,
+                    body_bytes.clone(),
+                    relay.request_timeout_secs,
+                    relay.retry_count,
+                )
+                .await
+                {
+                    Ok(retried) => response = retried,
+                    Err(e) => tracing::warn!(
+                        "[{}] planx retry dispatch failed, returning original 401: {}",
+                        sid_short,
+                        e
+                    ),
+                }
+            } else {
+                tracing::warn!(
+                    "[{}] upstream 401 and account '{}' could not be refreshed",
+                    sid_short,
+                    name
+                );
+            }
+        }
+    }
+
     // ── Parse response ──
     let upstream_response: upstream::UpstreamResponse;
 
     if !is_streaming {
-        upstream_response =
-            upstream::handle_non_streaming_response(response, start, protocol).await;
+        upstream_response = upstream::handle_non_streaming_response(
+            response,
+            start,
+            upstream_protocol,
+            response_translator.take(),
+        )
+        .await;
     } else {
         let stream_ctx = upstream::StreamCtx {
             call_id: task_id.as_str().to_string(),
             session_id: session_id.as_str().to_string(),
             ingest: relay.session_ingest.clone(),
         };
-        let stream = upstream::stream_upstream_response(response, start, protocol, stream_ctx);
+        let stream = upstream::stream_upstream_response(
+            response,
+            start,
+            upstream_protocol,
+            stream_ctx,
+            response_translator.take(),
+        );
         let client_resp = Response::builder()
             .status(stream.status_code)
             .body(stream.body)
@@ -1328,8 +1570,16 @@ fn emit_model_call_start(
             call_id,
             agent_id,
             client_request_id,
-            requested_model: if model == "unknown" { None } else { Some(model.clone()) },
-            resolved_model: if model == "unknown" { None } else { Some(model) },
+            requested_model: if model == "unknown" {
+                None
+            } else {
+                Some(model.clone())
+            },
+            resolved_model: if model == "unknown" {
+                None
+            } else {
+                Some(model)
+            },
             prompt_text: task.prompt_text.clone().map(|t| {
                 let mut chars = t.chars();
                 let preview: String = chars.by_ref().take(1000).collect();
@@ -1416,10 +1666,7 @@ fn emit_model_call_end(
             duration_ms: task.duration_ms,
             ended_at: task.ended_at.unwrap_or(now),
             provider_request_id: task.upstream_message_id.clone(),
-            error: task
-                .error_message
-                .clone()
-                .filter(|e| !e.is_empty()),
+            error: task.error_message.clone().filter(|e| !e.is_empty()),
             http_status_code: task.http_status_code,
         },
     }) {
@@ -1433,8 +1680,12 @@ fn emit_session_summary(
     task: &proxy_store::Task,
 ) {
     let Some(ingest) = ingest else { return };
-    let Some(json) = task.summary_json.as_deref() else { return };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else { return };
+    let Some(json) = task.summary_json.as_deref() else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return;
+    };
     let stats = value.get("stats").unwrap_or(&serde_json::Value::Null);
     let mut summary = proxy_session::TimelineSummary {
         total_messages: stats

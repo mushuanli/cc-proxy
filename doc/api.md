@@ -43,6 +43,47 @@
 | PUT | `/api/providers/:name` | 更新 → persist_config |
 | DELETE | `/api/providers/:name` | 删除 → persist_config |
 
+### 配置 — Accounts（planx 上游账号）
+
+两个家族（`gpt` / `claude`）× 两种模式（`api_key` / `plan`）。密钥字段**从不回传**，
+只报告 `has_api_key` / `has_refresh_token` / `has_access_token` 布尔值。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/accounts` | 列表；含 `problem`（凭据与 mode 不匹配的原因）、`live`（是否已加载）、已缓存的 `quota` |
+| GET | `/api/accounts?probe=1` | 同上，但**顺带实时探测**每个账号的额度（每账号一次上游调用，零额度消耗） |
+| POST | `/api/accounts` | 新增 → persist_config → broadcast UpstreamChanged（触发热重载） |
+| PUT | `/api/accounts/:name` | **部分更新（patch）**：请求体里**出现的**字段才覆盖，缺省字段保持原值 → persist_config → broadcast。GET 从不回传密钥，所以客户端不可能回显；缺失字段保持原值是该端点唯一的正确语义 |
+| DELETE | `/api/accounts/:name` | 删除；**仍被 provider 引用时拒绝**（否则该 provider 会退化成无认证直通） |
+| POST | `/api/accounts/:name/probe` | 强制探测单个账号额度，返回归一化 `AccountQuota`（走 registry，与列表 `?probe=1` 同一路径） |
+
+账号端点的错误码由消息映射：`not found` → 404，`duplicate` → 409，
+`validation` → 400。
+
+`AccountQuota` 结构（两家族统一）：
+
+```json
+{
+  "family": "claude",
+  "plan": null,
+  "windows": [
+    {"name": "5h", "label": "5h", "utilization": 12.0, "resets_at": 1893456000, "model_scoped": false},
+    {"name": "7d_fable", "label": "Fable 5.x", "utilization": 30.0, "resets_at": null, "model_scoped": true}
+  ],
+  "credits_unlimited": false,
+  "credits_balance": null,
+  "reset_credits": null,
+  "limit_reached": false,
+  "probed_at": 1800000000,
+  "error": null
+}
+```
+
+探测失败时 `error` 为字符串、`windows` 为空，HTTP 仍是 200 —— 单个账号探测失败
+不影响整体列表。
+
+> **前端尚未提供账号管理界面**：以上端点已可用，但 `wwwroot` 中暂无 UI。
+
 ### 配置 — Upstreams
 
 | 方法 | 路径 | 说明 |
@@ -53,6 +94,10 @@
 | PUT | `/api/upstreams/:name` | 更新 → persist_config |
 | DELETE | `/api/upstreams/:name` | 删除（最后一条不可删） → persist_config |
 | POST | `/api/upstreams/:name/activate` | 切换 active upstream + 应用 upstream 级 effort → broadcast UpstreamChanged |
+
+> `UpstreamChanged` 事件除了驱动前端刷新，也会触发 **planx 账号热重载**。
+> 另外 server 每 2s 轮询 `config.toml` 的 mtime，手改配置文件同样会热重载（无需重启）；
+> 非法配置会被拒绝并保留上一份配置。
 
 ### Effort
 

@@ -1,6 +1,84 @@
 import { state } from './state.js';
-import { t } from './i18n.js';
+import { t, tOr } from './i18n.js';
 import { esc } from './utils.js';
+import { accountList } from './accounts.js';
+
+/// `[[proxy.accounts]]` selector for a provider form.
+///
+/// `account` and `token` are mutually exclusive (the server rejects both), and a
+/// provider's `protocols` must agree with the referenced account's family. Both
+/// rules are enforced here so the operator gets a clear message instead of a 400.
+function accountSelectHtml(selected) {
+    const accounts = accountList();
+    const none = `<option value="">${esc(tOr('settings.account_none', 'Use a token instead'))}</option>`;
+    const options = accounts
+        .map(a => {
+            const value = esc(a.name);
+            const chosen = a.name === selected ? ' selected' : '';
+            return `<option value="${value}"${chosen}>${esc(a.name)} · ${esc(a.family)}</option>`;
+        })
+        .join('');
+    return `
+        <label class="mx-pop-field-label">${tOr('settings.account', 'Upstream account')}</label>
+        <select class="mx-pop-input mx-pop-account"${accounts.length ? '' : ' disabled'}>
+            ${none}${options}
+        </select>
+        <div class="pe-hint mx-pop-account-hint">${esc(
+            accounts.length
+                ? tOr('settings.account_hint', 'Credentials come from this account; the token field below is ignored.')
+                : tOr('settings.account_empty', 'No accounts yet — create one in the “Upstream accounts” panel below.')
+        )}</div>`;
+}
+
+
+/// Apply the mutual-exclusion rule to the form the user is looking at.
+function bindAccountSelect(pop) {
+    const select = pop.querySelector('.mx-pop-account');
+    const token = pop.querySelector('.mx-pop-token');
+    if (!select || !token) return;
+    const sync = () => {
+        const using = select.value !== '';
+        token.disabled = using;
+        if (using) token.value = '';
+        token.placeholder = using
+            ? tOr('settings.account_token_disabled', 'provided by the account')
+            : 'sk-...';
+    };
+    // Picking an account also ticks the protocol its family speaks, which is the
+    // single most common validation failure when binding one by hand.
+    const pickProtocol = () => {
+        const account = accountList().find(a => a.name === select.value);
+        if (!account) return;
+        const box = pop.querySelector(account.family === 'claude' ? '.mx-pop-proto-a' : '.mx-pop-proto-c');
+        if (box) box.checked = true;
+    };
+    select.addEventListener('change', () => {
+        sync();
+        pickProtocol();
+    });
+    sync();
+    pickProtocol();
+}
+
+/// Family ↔ protocol check; returns an error string, or null when compatible.
+function accountProtocolProblem(pop) {
+    const select = pop.querySelector('.mx-pop-account');
+    if (!select || !select.value) return null;
+    const account = accountList().find(a => a.name === select.value);
+    if (!account) return null;
+    const protocols = [];
+    if (pop.querySelector('.mx-pop-proto-a')?.checked) protocols.push('anthropic');
+    if (pop.querySelector('.mx-pop-proto-c')?.checked) protocols.push('codex');
+    // Empty protocols = serves everything, so anything is compatible.
+    if (protocols.length === 0) return null;
+    const wanted = account.family === 'claude' ? 'anthropic' : 'codex';
+    if (protocols.includes(wanted)) return null;
+    return tOr(
+        'settings.account_family_mismatch',
+        `Account '${account.name}' is a ${account.family} account, but this provider only serves [${protocols.join(', ')}]. Enable the matching protocol or pick another account.`,
+        { name: account.name, family: account.family, protocols: protocols.join(', ') },
+    );
+}
 
 // ── Shared state update from server ──
 
@@ -339,15 +417,20 @@ function providerPopoverHtml(title, p) {
         <div class="mx-pop-title">${esc(title)}${hasToken}</div>
         <label class="mx-pop-field-label">URL</label>
         <input class="mx-pop-input mx-pop-url" type="text" value="${p ? esc(p.url) : ''}" placeholder="https://api.example.com">
-        <label class="mx-pop-field-label">Codex URL</label>
-        <input class="mx-pop-input mx-pop-codex-url" type="text" value="${p?.codex_url ? esc(p.codex_url) : ''}" placeholder="https://api.example.com/v1">
-        <label class="mx-pop-field-label">Protocols</label>
-        <div class="pe-protocols mx-pop-protocols">
-            <label><input type="checkbox" class="mx-pop-proto-a" ${(p?.protocols || []).includes('anthropic') ? 'checked' : ''}> ${t('settings.proto_anthropic')}</label>
-            <label><input type="checkbox" class="mx-pop-proto-c" ${(p?.protocols || []).includes('codex') ? 'checked' : ''}> ${t('settings.proto_codex')}</label>
-        </div>
-        <label class="mx-pop-field-label">Outbound network proxy</label>
-        <input class="mx-pop-input mx-pop-proxy" type="text" value="${p?.proxy ? esc(p.proxy) : ''}" placeholder="仅 Relay 生效 / http://proxy:8080">
+        ${accountSelectHtml(p?.account)}
+        <details class="mx-adv">
+            <summary>${esc(tOr('settings.advanced', 'Advanced'))}</summary>
+            <label class="mx-pop-field-label">${tOr('settings.protocols', 'Protocols')}</label>
+            <div class="pe-protocols mx-pop-protocols">
+                <label><input type="checkbox" class="mx-pop-proto-a" ${(p?.protocols || []).includes('anthropic') ? 'checked' : ''}> ${t('settings.proto_anthropic')}</label>
+                <label><input type="checkbox" class="mx-pop-proto-c" ${(p?.protocols || []).includes('codex') ? 'checked' : ''}> ${t('settings.proto_codex')}</label>
+            </div>
+            <div class="pe-hint">${esc(tOr('settings.protocols_hint', 'Leave empty to serve every protocol. Selecting an account ticks the matching one for you.'))}</div>
+            <label class="mx-pop-field-label">Codex URL</label>
+            <input class="mx-pop-input mx-pop-codex-url" type="text" value="${p?.codex_url ? esc(p.codex_url) : ''}" placeholder="https://api.example.com/v1">
+            <label class="mx-pop-field-label">${tOr('settings.outbound_proxy', 'Outbound network proxy')}</label>
+            <input class="mx-pop-input mx-pop-proxy" type="text" value="${p?.proxy ? esc(p.proxy) : ''}" placeholder="仅 Relay 生效 / http://proxy:8080">
+        </details>
         <label class="mx-pop-field-label">${t('settings.token')} <span style="font-weight:normal;color:var(--text-muted)">(${t('settings.keep_current_token')})</span></label>
         <input class="mx-pop-input mx-pop-token" type="password" placeholder="sk-...">`;
 }
@@ -375,6 +458,7 @@ export function openProviderHeaderPopover(th) {
     document.getElementById('model-matrix-table').style.position = 'relative';
     document.getElementById('model-matrix-table').appendChild(pop);
     state._matrixPopover = { el: pop };
+    bindAccountSelect(pop);
     pop.querySelector('.mx-pop-url').focus();
 
     pop.querySelector('.mx-pop-save').addEventListener('click', async () => {
@@ -383,7 +467,10 @@ export function openProviderHeaderPopover(th) {
         const token = pop.querySelector('.mx-pop-token').value.trim();
         const proxy = pop.querySelector('.mx-pop-proxy').value.trim();
         if (!url) { alert(t('settings.name_url_required')); return; }
-        const body = { name: provName, url, proxy: proxy || null };
+        const problem = accountProtocolProblem(pop);
+        if (problem) { alert(problem); return; }
+        const accountName = pop.querySelector('.mx-pop-account')?.value || '';
+        const body = { name: provName, url, proxy: proxy || null, account: accountName || null };
         if (token) body.token = token;
         if (codexUrl) body.codex_url = codexUrl;
         const protocols = [];
@@ -414,17 +501,22 @@ export function openAddProviderPopover() {
         <input class="mx-pop-input mx-pop-name" type="text" placeholder="deepseek">
         <label class="mx-pop-field-label">URL</label>
         <input class="mx-pop-input mx-pop-url" type="text" placeholder="https://api.deepseek.com">
-        <label class="mx-pop-field-label">Codex URL (optional)</label>
-        <input class="mx-pop-input mx-pop-codex-url" type="text" placeholder="https://api.deepseek.com/v1">
-        <label class="mx-pop-field-label">Outbound network proxy</label>
-        <input class="mx-pop-input mx-pop-proxy" type="text" placeholder="仅 Relay 生效 / http://proxy:8080">
+        ${accountSelectHtml(null)}
+        <details class="mx-adv">
+            <summary>${esc(tOr('settings.advanced', 'Advanced'))}</summary>
+            <label class="mx-pop-field-label">${tOr('settings.protocols', 'Protocols')}</label>
+            <div class="pe-protocols mx-pop-protocols">
+                <label><input type="checkbox" class="mx-pop-proto-a"> ${t('settings.proto_anthropic')}</label>
+                <label><input type="checkbox" class="mx-pop-proto-c"> ${t('settings.proto_codex')}</label>
+            </div>
+            <div class="pe-hint">${esc(tOr('settings.protocols_hint', 'Leave empty to serve every protocol. Selecting an account ticks the matching one for you.'))}</div>
+            <label class="mx-pop-field-label">Codex URL (optional)</label>
+            <input class="mx-pop-input mx-pop-codex-url" type="text" placeholder="https://api.deepseek.com/v1">
+            <label class="mx-pop-field-label">${tOr('settings.outbound_proxy', 'Outbound network proxy')}</label>
+            <input class="mx-pop-input mx-pop-proxy" type="text" placeholder="仅 Relay 生效 / http://proxy:8080">
+        </details>
         <label class="mx-pop-field-label">${t('settings.token')}</label>
         <input class="mx-pop-input mx-pop-token" type="password" placeholder="sk-...">
-        <label class="mx-pop-field-label">Protocols</label>
-        <div class="pe-protocols mx-pop-protocols">
-            <label><input type="checkbox" class="mx-pop-proto-a"> ${t('settings.proto_anthropic')}</label>
-            <label><input type="checkbox" class="mx-pop-proto-c"> ${t('settings.proto_codex')}</label>
-        </div>
         <div class="mx-pop-actions" style="margin-top:4px">
             <button class="mx-pop-save btn-primary">${t('settings.save')}</button>
             <button class="mx-pop-cancel">${t('settings.cancel')}</button>
@@ -438,6 +530,7 @@ export function openAddProviderPopover() {
     tableEl.style.position = 'relative';
     tableEl.appendChild(pop);
     state._matrixPopover = { el: pop };
+    bindAccountSelect(pop);
     pop.querySelector('.mx-pop-name').focus();
 
     pop.querySelector('.mx-pop-save').addEventListener('click', async () => {
@@ -447,7 +540,11 @@ export function openAddProviderPopover() {
         const proxy = pop.querySelector('.mx-pop-proxy').value.trim();
         if (!name || !url) { alert(t('settings.name_url_required')); return; }
         if (state.providerList.some(p => p.name === name)) { alert(`Provider '${name}' already exists`); return; }
+        const problem = accountProtocolProblem(pop);
+        if (problem) { alert(problem); return; }
+        const accountName = pop.querySelector('.mx-pop-account')?.value || '';
         const body = { name, url, proxy: proxy || null };
+        if (accountName) body.account = accountName;
         if (token) body.token = token;
         const codexUrl = pop.querySelector('.mx-pop-codex-url')?.value.trim();
         if (codexUrl) body.codex_url = codexUrl;

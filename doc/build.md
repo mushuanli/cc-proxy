@@ -19,10 +19,9 @@ cargo build -p proxy-hook-agent --release # 编译 Hook CLI
 
 ```toml
 [server]
-listen_address = "127.0.0.1"
+listen_address = "127.0.0.1"   # 或 0.0.0.0 / :: 监听所有网卡（需 auth_token）
 http_port = 5000
 proxy_port = 8888
-mcp_proxy_port = 9999
 ```
 
 ### 配置 Claude Code 拦截

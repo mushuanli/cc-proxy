@@ -1,0 +1,64 @@
+[package]
+name = "proxy-planx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# TLS/HTTP2 fingerprint impersonation (BoringSSL via wreq).
+# Requires cmake + a C++ toolchain; deliberately NOT a default feature so the
+# main `cargo build -p proxy-server` never pulls BoringSSL in.
+impersonate = ["dep:wreq", "dep:wreq-util"]
+
+[dependencies]
+proxy-common = { path = "../proxy-common" }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "rustls-tls-webpki-roots",
+    "socks",
+    "stream",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "rt", "sync", "macros", "time"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "v7"] }
+
+[dependencies.wreq]
+version = "0.16"
+optional = true
+default-features = false
+features = [
+    "json",
+    "stream",
+    "socks",
+    "webpki-roots",
+    "tokio-rt",
+    "gzip",
+    "brotli",
+    "zstd",
+    "charset",
+    "form",
+]
+
+[dependencies.wreq-util]
+version = "0.2"
+optional = true
+
+[[example]]
+name = "fingerprint"
+path = "examples/fingerprint.rs"
+required-features = ["impersonate"]
+
+[dev-dependencies]
+# Test-only: the token-endpoint stub needs a listener, and the fingerprint example
+# needs a runtime. Kept out of the library's own feature set so production builds
+# stay minimal.
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread"] }
+serde_json = "1"

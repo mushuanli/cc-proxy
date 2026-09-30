@@ -5,8 +5,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# TLS/HTTP2 fingerprint impersonation (BoringSSL via wreq).
+# Needs cmake + a C++ toolchain; off by default so the standard build is unaffected.
+impersonate = ["proxy-planx/impersonate"]
+
 [dependencies]
 proxy-common = { path = "../proxy-common" }
+proxy-bridge = { path = "../proxy-bridge" }
+proxy-planx = { path = "../proxy-planx" }
 proxy-relay = { path = "../proxy-relay" }
 proxy-session = { path = "../proxy-session" }
 proxy-store = { path = "../proxy-store" }

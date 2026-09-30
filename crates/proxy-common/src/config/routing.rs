@@ -144,6 +144,7 @@ mod tests {
             token: Some("sk-test".into()),
             proxy: None,
             protocols: vec![],
+            account: None,
         });
 
         config.proxy.upstreams.push(UpstreamConfig {

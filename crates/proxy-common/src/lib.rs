@@ -1,11 +1,22 @@
+pub mod auth;
 pub mod config;
 pub(crate) mod core;
 pub mod messages;
 pub mod models;
+pub mod protocol;
 pub mod response;
 
 // Re-export config (only public items from config/mod.rs)
 pub use config::*;
+
+// Re-export the upstream-auth seam
+pub use auth::{PlanAuthFuture, PlanAuthHandle, PlanAuthHandleExt, PlanAuthProvider, UpstreamAuth};
+
+// Re-export the cross-protocol translation seam
+pub use protocol::{
+    ProtocolAdapter, ProtocolAdapterHandle, ProtocolAdapterHandleExt, ResponseTranslator,
+    TranslatedRequest, WireProtocol,
+};
 
 // Re-export core
 pub use core::event::EventBus;

@@ -250,6 +250,35 @@
                         </div>
                     </div>
 
+                <!-- planx Accounts panel -->
+                <div class="settings-panel settings-panel-wide">
+                    <div class="settings-panel-header">
+                        <h2 data-i18n="accounts.title">Accounts</h2>
+                        <div class="settings-panel-header-actions">
+                            <button id="btn-account-probe-all" class="btn-sm" data-i18n="accounts.probe_all">Probe All</button>
+                            <button id="btn-account-add" class="btn-sm btn-primary" data-i18n="accounts.add">+ Add Account</button>
+                        </div>
+                    </div>
+                    <div class="settings-panel-hint" data-i18n="accounts.hint">
+                        Two families (gpt / claude) × two modes (api_key / plan). A Provider references an account by name via its account field. Quota probing is read-only and consumes no inference quota.
+                    </div>
+                    <div class="ut-scroll">
+                        <table class="acct-table">
+                            <thead>
+                                <tr>
+                                    <th data-i18n="accounts.name">Name</th>
+                                    <th data-i18n="accounts.family">Family</th>
+                                    <th data-i18n="accounts.mode">Mode</th>
+                                    <th data-i18n="accounts.status">Status</th>
+                                    <th data-i18n="accounts.quota">Quota</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="accounts-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <!-- Data Retention panel -->
                 <div class="settings-panel">
                     <div class="settings-panel-header">

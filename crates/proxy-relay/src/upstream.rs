@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::sse::SseParser;
-use axum::http::{HeaderMap, HeaderValue, Method};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use bytes::Bytes;
 use proxy_common::models::{NormalizedResponse, SseEvent, ToolCallRecord};
+use proxy_common::UpstreamAuth;
 
 // ── Header constants ──
 
@@ -72,6 +73,126 @@ pub fn build_upstream_headers(headers: &HeaderMap, override_token: Option<&str>)
     fwd
 }
 
+/// Drop headers that describe the upstream body's framing.
+///
+/// Any translation that changes the body length (or its encoding) invalidates
+/// both, so they must not be forwarded to the client.
+fn strip_body_framing_headers(headers: &mut HeaderMap) {
+    headers.remove(reqwest::header::CONTENT_LENGTH);
+    headers.remove(reqwest::header::CONTENT_ENCODING);
+}
+
+/// Apply authentication material onto a header set, replacing any client-supplied
+/// credentials.
+///
+/// Mechanism-agnostic: `proxy-relay` knows only [`UpstreamAuth`], never OAuth or
+/// plan accounts (see `proxy-planx`).
+pub fn apply_auth(headers: &mut HeaderMap, auth: &UpstreamAuth) {
+    headers.remove("authorization");
+    headers.remove("x-api-key");
+    match auth {
+        // The `sk-` → `Bearer` / otherwise `x-api-key` rule lives in
+        // `UpstreamAuth::header_pairs`, so the relay and the account mechanism
+        // cannot drift apart on where a static token belongs.
+        UpstreamAuth::Static(_) => {
+            for (name, value) in auth.header_pairs() {
+                insert_header(headers, &name, &value);
+            }
+        }
+        UpstreamAuth::Headers { set, append } => {
+            for (name, value) in set {
+                insert_header(headers, name, value);
+            }
+            for (name, value) in append {
+                append_header_value(headers, name, value);
+            }
+        }
+    }
+}
+
+/// Insert one `(name, value)` pair, warning instead of panicking on a header the
+/// mechanism produced but `http` rejects.
+fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
+    match (
+        HeaderName::from_bytes(name.as_bytes()),
+        HeaderValue::from_str(value),
+    ) {
+        (Ok(name), Ok(value)) => {
+            headers.insert(name, value);
+        }
+        _ => tracing::warn!("[proxy] dropping invalid auth header '{}'", name),
+    }
+}
+
+/// Merge `value` into a comma-separated header, preserving existing entries and
+/// skipping duplicates.
+///
+/// Used for `anthropic-beta`: Claude subscription credentials must advertise
+/// `oauth-2025-04-20` without dropping betas the client already sent.
+fn append_header_value(headers: &mut HeaderMap, name: &str, value: &str) {
+    let (Ok(name), Ok(value)) = (
+        HeaderName::from_bytes(name.as_bytes()),
+        HeaderValue::from_str(value),
+    ) else {
+        tracing::warn!("[proxy] dropping invalid append header '{}'", name);
+        return;
+    };
+
+    let existing = headers
+        .get(&name)
+        .and_then(|current| current.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if existing.is_empty() {
+        headers.insert(name, value);
+        return;
+    }
+    if existing
+        .split(',')
+        .any(|part| part.trim() == value.to_str().unwrap_or(""))
+    {
+        return; // already advertised
+    }
+    if let Ok(merged) =
+        HeaderValue::from_str(&format!("{existing},{}", value.to_str().unwrap_or("")))
+    {
+        headers.insert(name, merged);
+    }
+}
+
+/// Build upstream headers and apply authentication in one step.
+///
+/// With `None` and with `Static`, output is byte-identical to
+/// [`build_upstream_headers`] — the plan branch layers identity headers on top
+/// of the plain forwarded set.
+pub fn build_upstream_headers_with_auth(
+    headers: &HeaderMap,
+    auth: Option<&UpstreamAuth>,
+) -> HeaderMap {
+    match auth {
+        Some(UpstreamAuth::Headers { .. }) => {
+            // Start from the untouched forward set (keeps the client's other
+            // headers), then replace the credentials.
+            let mut fwd = build_upstream_headers(headers, None);
+            if let Some(auth) = auth {
+                apply_auth(&mut fwd, auth);
+            }
+            fwd
+        }
+        Some(UpstreamAuth::Static(token)) => build_upstream_headers(headers, Some(token)),
+        None => build_upstream_headers(headers, None),
+    }
+}
+
+/// Re-apply auth to already-built headers (used by the 401 retry path so that
+/// effort/beta headers added later are preserved).
+pub fn apply_auth_to(mut headers: HeaderMap, auth: &UpstreamAuth) -> HeaderMap {
+    apply_auth(&mut headers, auth);
+    headers
+}
+
 /// API payload family used for session tracking and response inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiProtocol {
@@ -86,6 +207,67 @@ impl ApiProtocol {
             Self::Codex => "codex",
         }
     }
+
+    /// Bridge between the relay's internal enum and the public seam type.
+    pub fn to_wire(self) -> proxy_common::protocol::WireProtocol {
+        match self {
+            Self::Anthropic => proxy_common::protocol::WireProtocol::Anthropic,
+            Self::Codex => proxy_common::protocol::WireProtocol::Codex,
+        }
+    }
+
+    /// The protocol a provider speaks when it is not the client's.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Anthropic => Self::Codex,
+            Self::Codex => Self::Anthropic,
+        }
+    }
+
+    /// Default upstream path for a protocol (used when bridging).
+    fn default_path(self) -> &'static str {
+        match self {
+            Self::Anthropic => "/v1/messages",
+            Self::Codex => "/responses",
+        }
+    }
+}
+
+/// A planned cross-protocol bridge: the client speaks one protocol, the
+/// upstream another, and an injected adapter can translate between them.
+pub struct BridgePlan {
+    /// Protocol the upstream will actually receive.
+    pub target: ApiProtocol,
+    /// Path to use instead of the client's.
+    pub path: &'static str,
+    pub adapter: std::sync::Arc<dyn proxy_common::protocol::ProtocolAdapter>,
+}
+
+/// Decide whether a request must be bridged to reach this provider.
+///
+/// Returns `None` when the provider already serves the client protocol (the
+/// normal case, including providers with an empty allow-list), or when no
+/// adapter covers the pair.
+pub fn plan_bridge(
+    client: ApiProtocol,
+    provider: &proxy_common::Provider,
+    adapter: Option<&std::sync::Arc<dyn proxy_common::protocol::ProtocolAdapter>>,
+) -> Option<BridgePlan> {
+    if provider.serves(client.request_type()) {
+        return None;
+    }
+    let target = client.other();
+    if !provider.serves(target.request_type()) {
+        return None;
+    }
+    let adapter = adapter?;
+    adapter
+        .supports(client.to_wire(), target.to_wire())
+        .then(|| BridgePlan {
+            target,
+            path: target.default_path(),
+            adapter: adapter.clone(),
+        })
 }
 
 pub fn detect_protocol(path: &str, body: &serde_json::Value) -> ApiProtocol {
@@ -367,11 +549,8 @@ fn apply_stream_update(
         let used: usize = normalized.text.iter().map(String::len).sum();
         if used < MAX_CAPTURE_TEXT_BYTES {
             let mut fragment = String::new();
-            *capture_truncated |= push_text_limited(
-                &mut fragment,
-                &text,
-                MAX_CAPTURE_TEXT_BYTES - used,
-            );
+            *capture_truncated |=
+                push_text_limited(&mut fragment, &text, MAX_CAPTURE_TEXT_BYTES - used);
             if !fragment.is_empty() {
                 normalized.text.push(fragment);
             }
@@ -422,12 +601,20 @@ pub fn stream_upstream_response(
     start: Instant,
     protocol: ApiProtocol,
     ctx: StreamCtx,
+    response_translator: Option<Box<dyn proxy_common::protocol::ResponseTranslator>>,
 ) -> StreamingResponse {
     use futures::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
+    let mut response_translator = response_translator;
+    // Whether any translated frame was actually produced, so a non-SSE upstream
+    // answer can be handled by the whole-body fallback instead.
+    let mut translated_any = false;
 
     let status_code = response.status().as_u16();
-    let response_headers = response.headers().clone();
+    let mut response_headers = response.headers().clone();
+    if response_translator.is_some() {
+        strip_body_framing_headers(&mut response_headers);
+    }
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Bytes>(64);
     let (meta_tx, meta_rx) = tokio::sync::oneshot::channel::<UpstreamResponse>();
     let body = axum::body::Body::from_stream(
@@ -467,12 +654,37 @@ pub fn stream_upstream_response(
                     if ttft_ms.is_none() {
                         ttft_ms = Some(start.elapsed().as_millis() as u64);
                     }
-                    // Forward to client; stop if client disconnected
-                    if chunk_tx.send(chunk.clone()).await.is_err() {
+                    let events = parser.feed(&chunk);
+                    // Forward to the client. With a cross-protocol translator the
+                    // upstream frames are re-encoded into the client protocol
+                    // instead of being relayed verbatim; the parse above still
+                    // runs against the *upstream* protocol, so capture, billing
+                    // and session observations are unaffected by translation.
+                    if let Some(translator) = response_translator.as_mut() {
+                        let mut disconnected = false;
+                        for ev in &events {
+                            let Some(data) = ev.data.as_deref() else {
+                                continue;
+                            };
+                            for frame in translator.push(data.as_bytes()) {
+                                translated_any = true;
+                                if chunk_tx.send(Bytes::from(frame)).await.is_err() {
+                                    disconnected = true;
+                                    break;
+                                }
+                            }
+                            if disconnected {
+                                break;
+                            }
+                        }
+                        if disconnected {
+                            error = Some("client disconnected".to_string());
+                            break;
+                        }
+                    } else if chunk_tx.send(chunk.clone()).await.is_err() {
                         error = Some("client disconnected".to_string());
                         break;
                     }
-                    let events = parser.feed(&chunk);
                     for ev in &events {
                         let event_bytes = ev
                             .event_type
@@ -514,6 +726,23 @@ pub fn stream_upstream_response(
                     break;
                 }
                 None => break,
+            }
+        }
+        // Finish the translated stream:
+        //  * nothing translated → the upstream ignored `stream: true` and answered
+        //    with a single body; render it as the client protocol's events rather
+        //    than leaving the client with an empty stream;
+        //  * transport error → report the failure, because a synthetic completion
+        //    makes a truncated answer indistinguishable from a finished one;
+        //  * otherwise → normal end of stream.
+        if let Some(translator) = response_translator.as_mut() {
+            let frames = match (translated_any, error.as_deref()) {
+                (false, _) => translator.stream_from_complete(&raw_body),
+                (true, Some(reason)) => translator.abort(reason),
+                (true, None) => translator.finish(),
+            };
+            for frame in frames {
+                let _ = chunk_tx.send(Bytes::from(frame)).await;
             }
         }
         drop(chunk_tx);
@@ -560,9 +789,10 @@ pub async fn handle_non_streaming_response(
     response: reqwest::Response,
     start: Instant,
     protocol: ApiProtocol,
+    mut response_translator: Option<Box<dyn proxy_common::protocol::ResponseTranslator>>,
 ) -> UpstreamResponse {
     let status_code = response.status().as_u16();
-    let response_headers = response.headers().clone();
+    let mut response_headers = response.headers().clone();
 
     let body_bytes = match response.bytes().await {
         Ok(b) => b,
@@ -586,6 +816,23 @@ pub async fn handle_non_streaming_response(
                 capture_truncated: false,
             }
         }
+    };
+
+    // Translate before parsing so every downstream consumer (usage extraction,
+    // normalization, capture, billing) sees the client protocol's shape.
+    let body_bytes = match response_translator.as_mut() {
+        Some(translator) => match translator.translate_complete(&body_bytes) {
+            Some(translated) => {
+                // The upstream's `content-length` / `content-encoding` describe the
+                // bytes it sent, not the bytes we are about to send. Forwarding
+                // them makes hyper reject the response (length mismatch) or the
+                // client mis-decode it.
+                strip_body_framing_headers(&mut response_headers);
+                Bytes::from(translated)
+            }
+            None => body_bytes,
+        },
+        None => body_bytes,
     };
 
     let body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
@@ -918,6 +1165,7 @@ mod tests {
                 session_id: "sess-1".into(),
                 ingest: None,
             },
+            None,
         );
         let mut body = streaming.body.into_data_stream();
         let first = tokio::time::timeout(std::time::Duration::from_millis(200), body.next())
@@ -927,5 +1175,355 @@ mod tests {
             .unwrap();
         assert_eq!(first, Bytes::from_static(b"first\n\n"));
         assert!(started.elapsed() < std::time::Duration::from_millis(250));
+    }
+
+    // ── Authentication seam (planx) ──
+
+    fn client_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer client-token"),
+        );
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("effort-2025-11-24"),
+        );
+        headers
+    }
+
+    /// Sorted `(name, value)` pairs, so two HeaderMaps compare exactly
+    /// (iteration order is not part of the contract).
+    fn sorted_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    v.to_str().unwrap_or("[binary]").to_string(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    #[test]
+    fn static_auth_is_byte_identical_to_the_legacy_builder() {
+        // The single most important guarantee of this seam: a provider using a
+        // static token must produce exactly the same upstream headers as before
+        // planx existed. Anything else would be an invasive change.
+        let headers = client_headers();
+        let legacy = build_upstream_headers(&headers, Some("sk-static"));
+        let seamed = build_upstream_headers_with_auth(
+            &headers,
+            Some(&UpstreamAuth::Static("sk-static".into())),
+        );
+        assert_eq!(sorted_pairs(&legacy), sorted_pairs(&seamed));
+
+        let legacy_plain = build_upstream_headers(&headers, Some("plain-token"));
+        let seamed_plain = build_upstream_headers_with_auth(
+            &headers,
+            Some(&UpstreamAuth::Static("plain-token".into())),
+        );
+        assert_eq!(sorted_pairs(&legacy_plain), sorted_pairs(&seamed_plain));
+    }
+
+    #[test]
+    fn no_auth_is_byte_identical_to_the_legacy_builder() {
+        let headers = client_headers();
+        let legacy = build_upstream_headers(&headers, None);
+        let seamed = build_upstream_headers_with_auth(&headers, None);
+        assert_eq!(sorted_pairs(&legacy), sorted_pairs(&seamed));
+    }
+
+    #[test]
+    fn static_auth_uses_bearer_for_sk_tokens() {
+        let headers = client_headers();
+        let out = build_upstream_headers_with_auth(
+            &headers,
+            Some(&UpstreamAuth::Static("sk-static".into())),
+        );
+        assert_eq!(out.get("authorization").unwrap(), "Bearer sk-static");
+        assert!(out.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn none_auth_forwards_client_credentials() {
+        let headers = client_headers();
+        let out = build_upstream_headers_with_auth(&headers, None);
+        assert_eq!(out.get("authorization").unwrap(), "Bearer client-token");
+    }
+
+    #[test]
+    fn non_sk_static_token_uses_api_key_header() {
+        let headers = client_headers();
+        let out = build_upstream_headers_with_auth(
+            &headers,
+            Some(&UpstreamAuth::Static("plain-token".into())),
+        );
+        assert_eq!(out.get("x-api-key").unwrap(), "plain-token");
+        assert!(out.get("authorization").is_none());
+    }
+
+    #[test]
+    fn account_headers_replace_client_credentials_and_add_identity() {
+        let headers = client_headers();
+        let auth = UpstreamAuth::Headers {
+            set: vec![
+                ("authorization".into(), "Bearer at-plan".into()),
+                ("originator".into(), "codex-tui".into()),
+                ("chatgpt-account-id".into(), "ws-1".into()),
+            ],
+            append: vec![],
+        };
+        let out = build_upstream_headers_with_auth(&headers, Some(&auth));
+
+        assert_eq!(out.get("authorization").unwrap(), "Bearer at-plan");
+        assert!(
+            out.get("x-api-key").is_none(),
+            "client api key must be dropped"
+        );
+        assert_eq!(out.get("originator").unwrap(), "codex-tui");
+        assert_eq!(out.get("chatgpt-account-id").unwrap(), "ws-1");
+        // Unrelated headers survive.
+        assert_eq!(out.get("content-type").unwrap(), "application/json");
+        assert_eq!(out.get("accept-encoding").unwrap(), "identity");
+    }
+
+    #[test]
+    fn account_headers_override_a_client_supplied_identity() {
+        let mut headers = client_headers();
+        headers.insert("originator", HeaderValue::from_static("someone-else"));
+        let auth = UpstreamAuth::Headers {
+            set: vec![
+                ("authorization".into(), "Bearer at".into()),
+                ("originator".into(), "codex-tui".into()),
+            ],
+            append: vec![],
+        };
+        let out = build_upstream_headers_with_auth(&headers, Some(&auth));
+        assert_eq!(out.get("originator").unwrap(), "codex-tui");
+    }
+
+    #[test]
+    fn append_headers_merge_anthropic_beta_without_losing_client_betas() {
+        // Claude subscription credentials must advertise the OAuth beta while
+        // keeping whatever Claude Code itself asked for.
+        let mut headers = client_headers();
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("claude-code-20250219"),
+        );
+        let auth = UpstreamAuth::Headers {
+            set: vec![("authorization".into(), "Bearer sk-ant-oat01-x".into())],
+            append: vec![("anthropic-beta".into(), "oauth-2025-04-20".into())],
+        };
+        let out = build_upstream_headers_with_auth(&headers, Some(&auth));
+        let beta = out.get("anthropic-beta").unwrap().to_str().unwrap();
+        assert_eq!(beta, "claude-code-20250219,oauth-2025-04-20");
+        assert_eq!(out.get("authorization").unwrap(), "Bearer sk-ant-oat01-x");
+    }
+
+    #[test]
+    fn append_headers_create_the_header_when_absent() {
+        // `client_headers()` already carries an `anthropic-beta`, so start from a
+        // map that genuinely lacks it.
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        let auth = UpstreamAuth::Headers {
+            set: vec![("authorization".into(), "Bearer at".into())],
+            append: vec![("anthropic-beta".into(), "oauth-2025-04-20".into())],
+        };
+        let out = build_upstream_headers_with_auth(&headers, Some(&auth));
+        assert_eq!(out.get("anthropic-beta").unwrap(), "oauth-2025-04-20");
+    }
+
+    #[test]
+    fn append_headers_do_not_duplicate_an_existing_value() {
+        let mut headers = client_headers();
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("oauth-2025-04-20"),
+        );
+        let auth = UpstreamAuth::Headers {
+            set: vec![],
+            append: vec![("anthropic-beta".into(), "oauth-2025-04-20".into())],
+        };
+        let out = build_upstream_headers_with_auth(&headers, Some(&auth));
+        assert_eq!(out.get("anthropic-beta").unwrap(), "oauth-2025-04-20");
+    }
+
+    #[test]
+    fn claude_api_key_goes_to_x_api_key_via_explicit_header() {
+        // Family-specific placement is the mechanism's job: the relay just
+        // applies the header set it is given.
+        let headers = client_headers();
+        let auth = UpstreamAuth::Headers {
+            set: vec![("x-api-key".into(), "sk-ant-api03-x".into())],
+            append: vec![],
+        };
+        let out = build_upstream_headers_with_auth(&headers, Some(&auth));
+        assert_eq!(out.get("x-api-key").unwrap(), "sk-ant-api03-x");
+        assert!(
+            out.get("authorization").is_none(),
+            "client bearer must be dropped"
+        );
+    }
+
+    #[test]
+    fn apply_auth_to_preserves_late_headers_for_401_retry() {
+        // The retry path re-applies auth onto already-built headers, so
+        // effort/beta headers added after the first build must survive.
+        let headers = client_headers();
+        let first = build_upstream_headers_with_auth(
+            &headers,
+            Some(&UpstreamAuth::Static("sk-old".into())),
+        );
+        assert_eq!(first.get("anthropic-beta").unwrap(), "effort-2025-11-24");
+
+        let retried = apply_auth_to(
+            first,
+            &UpstreamAuth::Headers {
+                set: vec![
+                    ("authorization".into(), "Bearer at-new".into()),
+                    ("originator".into(), "codex-tui".into()),
+                ],
+                append: vec![],
+            },
+        );
+        assert_eq!(retried.get("authorization").unwrap(), "Bearer at-new");
+        assert_eq!(retried.get("anthropic-beta").unwrap(), "effort-2025-11-24");
+        assert_eq!(retried.get("originator").unwrap(), "codex-tui");
+    }
+
+    #[test]
+    fn invalid_identity_header_is_skipped_not_panicked() {
+        let headers = client_headers();
+        let auth = UpstreamAuth::Headers {
+            // HeaderValue::from_str rejects control characters.
+            set: vec![
+                ("authorization".into(), "Bearer at".into()),
+                ("x-bad".into(), "line\nbreak".into()),
+            ],
+            append: vec![],
+        };
+        let out = build_upstream_headers_with_auth(&headers, Some(&auth));
+        assert!(out.get("x-bad").is_none());
+        assert_eq!(out.get("authorization").unwrap(), "Bearer at");
+    }
+
+    // ── Cross-protocol bridge planning ──
+
+    use proxy_common::protocol::{
+        ProtocolAdapter, ResponseTranslator, TranslatedRequest, WireProtocol,
+    };
+    use std::sync::Arc;
+
+    /// Adapter that claims Anthropic ⇄ Codex.
+    struct StubAdapter;
+
+    impl ProtocolAdapter for StubAdapter {
+        fn supports(&self, from: WireProtocol, to: WireProtocol) -> bool {
+            matches!(
+                (from, to),
+                (WireProtocol::Anthropic, WireProtocol::Codex)
+                    | (WireProtocol::Codex, WireProtocol::Anthropic)
+            )
+        }
+        fn translate_request(
+            &self,
+            _from: WireProtocol,
+            _to: WireProtocol,
+            body: &[u8],
+        ) -> Result<TranslatedRequest, String> {
+            Ok(TranslatedRequest {
+                body: body.to_vec(),
+                stream: false,
+                model: None,
+            })
+        }
+        fn response_translator(
+            &self,
+            _from: WireProtocol,
+            _to: WireProtocol,
+        ) -> Option<Box<dyn ResponseTranslator>> {
+            None
+        }
+    }
+
+    fn provider_with_protocols(protocols: &[&str]) -> proxy_common::Provider {
+        proxy_common::Provider {
+            name: "p".into(),
+            url: "https://api.example.com".into(),
+            codex_url: Some("https://api.example.com/codex".into()),
+            token: None,
+            proxy: None,
+            protocols: protocols.iter().map(|p| p.to_string()).collect(),
+            account: None,
+        }
+    }
+
+    #[test]
+    fn no_bridge_when_the_provider_speaks_the_client_protocol() {
+        let provider = provider_with_protocols(&["anthropic"]);
+        assert!(plan_bridge(
+            ApiProtocol::Anthropic,
+            &provider,
+            Some(&(Arc::new(StubAdapter) as Arc<dyn ProtocolAdapter>))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn no_bridge_for_a_provider_with_an_empty_allow_list() {
+        // Empty protocols historically means "serves everything"; bridging must
+        // not kick in and change existing behaviour.
+        let provider = provider_with_protocols(&[]);
+        assert!(plan_bridge(
+            ApiProtocol::Anthropic,
+            &provider,
+            Some(&(Arc::new(StubAdapter) as Arc<dyn ProtocolAdapter>))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_codex_only_provider_is_bridged_for_anthropic_clients() {
+        let provider = provider_with_protocols(&["codex"]);
+        let adapter: Arc<dyn ProtocolAdapter> = Arc::new(StubAdapter);
+        let plan = plan_bridge(ApiProtocol::Anthropic, &provider, Some(&adapter))
+            .expect("bridge should be planned");
+        assert_eq!(plan.target, ApiProtocol::Codex);
+        assert_eq!(plan.path, "/responses");
+    }
+
+    #[test]
+    fn no_bridge_without_an_adapter() {
+        let provider = provider_with_protocols(&["codex"]);
+        assert!(plan_bridge(ApiProtocol::Anthropic, &provider, None).is_none());
+    }
+
+    #[test]
+    fn a_provider_serving_neither_protocol_is_not_bridged() {
+        let provider = provider_with_protocols(&["gemini"]);
+        let adapter: Arc<dyn ProtocolAdapter> = Arc::new(StubAdapter);
+        assert!(plan_bridge(ApiProtocol::Anthropic, &provider, Some(&adapter)).is_none());
+    }
+
+    #[test]
+    fn api_protocol_wire_conversion_round_trips() {
+        for protocol in [ApiProtocol::Anthropic, ApiProtocol::Codex] {
+            assert_eq!(protocol.to_wire().as_str(), protocol.request_type());
+            assert_eq!(
+                protocol.other().to_wire().as_str(),
+                protocol.other().request_type()
+            );
+        }
+        assert_eq!(ApiProtocol::Anthropic.other(), ApiProtocol::Codex);
+        assert_eq!(ApiProtocol::Codex.other(), ApiProtocol::Anthropic);
+        assert_eq!(ApiProtocol::Anthropic.default_path(), "/v1/messages");
+        assert_eq!(ApiProtocol::Codex.default_path(), "/responses");
     }
 }

@@ -390,7 +390,7 @@ AppConfig
 │     └── session_delete_after_days: 0
 │
 ├── server: ServerConfig
-│     └── { listen_address, http_port, proxy_port, mcp_proxy_port }
+│     └── { listen_address, http_port, proxy_port, auth_token, ws_include_bodies }
 │
 └── logging: LoggingConfig
       └── { level }

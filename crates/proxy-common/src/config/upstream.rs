@@ -23,7 +23,14 @@ impl TierRule {
         if !self.provider.is_empty() {
             self.provider.clone()
         } else {
-            default.and_then(|d| if !d.provider.is_empty() { Some(d.provider.clone()) } else { None })
+            default
+                .and_then(|d| {
+                    if !d.provider.is_empty() {
+                        Some(d.provider.clone())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_default()
         }
     }

@@ -1,0 +1,11 @@
+[package]
+name = "proxy-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+proxy-common = { path = "../proxy-common" }
+serde_json = "1"
+uuid = { version = "1", features = ["v7"] }
+tracing = "0.1"

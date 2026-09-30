@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import { loadI18n, applyI18n, t } from './i18n.js';
+import { bindAccountEvents, loadAccounts } from './accounts.js';
 import {
     renderPage, updateRequestCount, clearAllTables,
     showRequestDetail, updateFilterOptions, getSessionGroups,
@@ -154,6 +155,7 @@ function handleMessage(msg) {
             resyncState('lagged');
             break;
         case 'UpstreamChanged':
+            loadAccounts();
             applyUpstreamState(
                 msg.payload.active_upstream,
                 msg.payload.active_codex_upstream,
@@ -414,6 +416,8 @@ Object.assign(window, {
 (async function init() {
     await loadI18n();
     applyI18n();
+    bindAccountEvents();
+    loadAccounts();
 
     // Summary panel starts hidden — only shown when a session is selected in Inspector
     document.getElementById('summary-panel').classList.add('hidden');

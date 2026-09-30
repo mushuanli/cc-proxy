@@ -335,7 +335,9 @@ pub async fn export_tasks(
     let mut seen: HashSet<TaskId> = HashSet::new();
 
     for sid in &body.session_ids {
-        let Ok(sid) = SessionId::new(sid.clone()) else { continue };
+        let Ok(sid) = SessionId::new(sid.clone()) else {
+            continue;
+        };
         if let Ok(list) = state.store.task_list_full(&sid).await {
             for task in list {
                 if seen.insert(task.id.clone()) {
@@ -364,12 +366,7 @@ pub async fn export_tasks(
     }
 
     match build_export_zip(&tasks) {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [("content-type", "application/zip")],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => (StatusCode::OK, [("content-type", "application/zip")], bytes).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -409,7 +406,12 @@ fn format_task_time(started_at_ms: i64) -> String {
 
 /// Convert control characters in the response portion of an exported task.
 fn sanitize_task_response(task_json: &mut Value) {
-    for key in ["response_body", "normalized_response", "sse_events", "content_text"] {
+    for key in [
+        "response_body",
+        "normalized_response",
+        "sse_events",
+        "content_text",
+    ] {
         if let Some(value) = task_json.get_mut(key) {
             sanitize_json_control_chars(value);
         }

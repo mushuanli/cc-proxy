@@ -163,6 +163,17 @@ self.archive_dir.join(format!("{}.yaml", session_id.as_str()))
 - 非 loopback 绑定时强制启用认证，或启动时拒绝不安全配置。
 - WebSocket 事件按最小必要数据发送，敏感 body 可提供显式开关。
 
+> **状态更新（本轮审查）**：本文写于修复之前，部分结论已不成立：
+> - `/ws` 与 `/api/*` 现在都校验 `auth_token`（`web/mod.rs` 的 `auth_guard`、`ws.rs`），
+>   HTTP 用 `Authorization: Bearer` 或 `cp_proxy_auth` cookie，WS 用 `?token=`；
+>   WS 另有 `Origin` 对 `Host` 的校验（`is_allowed_origin`），即上面建议的前两条已部分落地；
+> - 但仍有两处**未解决**，是绑定非 loopback 前必须知道的：
+>   1. `auth_guard` 曾把 token 通过 `Set-Cookie` 发给**任何**匿名 `GET /`，
+>      使认证形同虚设。已改为只发给 loopback 对端，远程必须自带 token。
+>   2. **代理端口（`proxy_port`）至今没有任何鉴权**（`relay.rs` 的 `build_router`
+>      只有一个 fallback）。它等于一个开放的出站代理，暴露到公网即等于把
+>      provider 与凭据借给所有人。
+
 ### [P1] 3. “流式”请求会等上游完整结束后才向客户端返回
 
 位置：

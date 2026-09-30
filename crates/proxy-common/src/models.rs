@@ -329,6 +329,16 @@ pub struct ProviderInfo {
     pub has_token: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Protocols this provider serves (`anthropic` / `codex`); empty = all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<String>,
+    /// Codex-specific endpoint; absent = use `url` for codex too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_url: Option<String>,
+    /// Name of the `[[proxy.accounts]]` entry this provider authenticates with.
+    /// The write path (add/update) needs it too, so the read path must return it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 // ── Upstream info (for frontend) ──

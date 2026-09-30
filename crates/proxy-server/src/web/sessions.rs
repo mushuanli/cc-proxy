@@ -285,7 +285,9 @@ async fn aggregate_session_summary(
     let mut out = proxy_session::TimelineSummary::default();
     let mut any = false;
     for (_task_id, json) in tasks {
-        let Ok(summary) = serde_json::from_str::<TaskSummaryV1>(&json) else { continue };
+        let Ok(summary) = serde_json::from_str::<TaskSummaryV1>(&json) else {
+            continue;
+        };
         any = true;
         for up in summary.user_prompts {
             if !out.user_prompts.contains(&up.text) {

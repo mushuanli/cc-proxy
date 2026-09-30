@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::account::AccountConfig;
+
 pub const AUTO_PROXY_UPSTREAM: &str = "__auto__";
 pub const FORBID_PROXY_UPSTREAM: &str = "__forbid__";
 
@@ -25,6 +27,7 @@ impl Default for AppConfig {
                 http_proxy: None,
                 providers: Vec::new(),
                 upstreams: Vec::new(),
+                accounts: Vec::new(),
                 retry_count: 3,
                 request_timeout_secs: 120,
                 request_retention_hours: 8,
@@ -66,6 +69,10 @@ pub struct ProxyConfig {
     pub providers: Vec<Provider>,
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
+    /// Upstream accounts usable as credentials, in either api-key or plan mode.
+    /// Referenced by name from `Provider::account`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<AccountConfig>,
 
     #[serde(default = "default_retry_count")]
     pub retry_count: u32,

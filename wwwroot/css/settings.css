@@ -389,3 +389,72 @@
 .pe-protocols input[type="checkbox"] { accent-color: var(--accent, #4a8fd0); }
 .pe-protocols-hint { width: 100%; font-size: 0.72rem; color: var(--text-muted); }
 .mx-pop-protocols { padding: 2px 0 4px; }
+
+/* ── planx Accounts table ─────────────────────────────────────────────────── */
+.acct-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.acct-table th {
+    text-align: left; padding: 7px 12px; font-weight: 600; font-size: 0.72rem;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.acct-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.acct-table tr:last-child td { border-bottom: none; }
+.acct-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+.acct-name { font-weight: 600; font-family: var(--font-mono); }
+.acct-meta { font-size: 0.7rem; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px; }
+.acct-muted { color: var(--text-muted); }
+.acct-ok   { color: #5fb87a; }
+.acct-warn { color: #d4a44c; }
+.acct-err  { color: #d46a6a; font-size: 0.72rem; }
+
+.acct-tag {
+    display: inline-block; padding: 1px 7px; border-radius: 3px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    font-family: var(--font-mono); font-size: 0.7rem;
+}
+.acct-actions { text-align: right; white-space: nowrap; }
+.acct-actions .btn-sm { margin-left: 4px; }
+.acct-empty { text-align: center; color: var(--text-muted); padding: 18px 0 !important; }
+
+.acct-quota { min-width: 190px; }
+.acct-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.acct-bar-label { width: 58px; font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted); flex-shrink: 0; }
+.acct-bar-track { flex: 1; height: 5px; background: var(--bg); border-radius: 3px; overflow: hidden; min-width: 60px; }
+.acct-bar-fill { display: block; height: 100%; background: #4a90a4; }
+.acct-bar.mid  .acct-bar-fill { background: #d4a44c; }
+.acct-bar.high .acct-bar-fill { background: #d46a6a; }
+.acct-bar-pct { width: 32px; text-align: right; font-size: 0.7rem; font-family: var(--font-mono); flex-shrink: 0; }
+.acct-extras { margin-top: 3px; font-size: 0.7rem; }
+
+.acct-modal { min-width: 420px; max-width: 560px; max-height: 88vh; overflow-y: auto; }
+.acct-form { margin-top: 6px; }
+.acct-field { margin-bottom: 8px; }
+.acct-field label { display: block; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 3px; }
+.acct-field .mx-pop-input { margin-bottom: 0; }
+.acct-field select.mx-pop-input { font-family: var(--font-mono); }
+.acct-inline { display: flex; align-items: center; gap: 8px; }
+.acct-inline label { margin-bottom: 0; display: flex; align-items: center; gap: 5px; color: var(--text); font-size: 0.75rem; }
+
+/* Collapsible "advanced" sections. The recommended path stays visible; the rest
+   is one click away and out of the way by default. */
+.acct-adv,
+.mx-adv { margin: 2px 0 8px; }
+.acct-adv > summary,
+.mx-adv > summary {
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    padding: 3px 0;
+    user-select: none;
+}
+.acct-adv > summary:hover,
+.mx-adv > summary:hover { color: var(--text); }
+.acct-adv[open] > summary,
+.mx-adv[open] > summary {
+    color: var(--text);
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+.mx-adv .mx-pop-field-label:first-of-type { margin-top: 2px; }

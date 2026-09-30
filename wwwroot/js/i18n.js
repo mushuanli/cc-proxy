@@ -22,15 +22,37 @@ export function t(key, params) {
     return val;
 }
 
+/// Translate, falling back to the English wording supplied by the caller.
+///
+/// `t()` returns the key when no dictionary is loaded. That is right for
+/// `data-i18n` attributes (the HTML already holds English, so `applyI18n` skips
+/// missing keys) but wrong for strings assembled in JS, where the key would be
+/// rendered literally.
+export function tOr(key, english, params) {
+    const text = t(key, params);
+    return text === key ? english : text;
+}
+
+// `t()` returns the key itself when a translation is missing, which is how the
+// English build is meant to work: `loadI18n()` only fetches zh.json, so English
+// keeps the wording already present in the HTML. Writing the key back would
+// replace readable English with "settings.some_key", so missing keys are skipped.
+function resolved(key) {
+    const text = t(key);
+    return text && text !== key ? text : null;
+}
+
 export function applyI18n() {
     document.querySelectorAll('[data-i18n]').forEach(el => {
-        const text = t(el.dataset.i18n);
+        const text = resolved(el.dataset.i18n);
         if (text) el.textContent = text;
     });
     document.querySelectorAll('[data-i18n-title]').forEach(el => {
-        el.title = t(el.dataset.i18nTitle);
+        const text = resolved(el.dataset.i18nTitle);
+        if (text) el.title = text;
     });
     document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
-        el.placeholder = t(el.dataset.i18nPlaceholder);
+        const text = resolved(el.dataset.i18nPlaceholder);
+        if (text) el.placeholder = text;
     });
 }

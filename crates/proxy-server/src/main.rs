@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod watcher;
 mod web;
 mod ws;
 
@@ -22,6 +23,11 @@ use proxy_common::{ConfigStore, EventBus};
 use proxy_relay::{CaptureControl, RelayHandler};
 use proxy_store::{ProxyStore, ProxyStoreConfig};
 
+/// How often the planx registry refreshes credentials that are about to expire.
+/// An upstream 401 is handled immediately by the relay's in-request retry, so
+/// this is a safety net rather than the primary refresh path.
+const PLANX_REFRESH_INTERVAL_SECS: u64 = 300;
+
 pub struct AppState {
     pub config: ConfigStore,
     pub store: ProxyStore,
@@ -30,6 +36,9 @@ pub struct AppState {
     pub capture: CaptureControl,
     pub session: std::sync::Arc<proxy_session::SessionRepo>,
     pub summary_jobs: Arc<SummaryJobs>,
+    /// Live planx account registry. Always present; it may hold zero accounts,
+    /// which is what allows the first account to be added without a restart.
+    pub planx: Arc<proxy_planx::PlanxRegistry>,
 }
 
 impl AppState {
@@ -54,7 +63,17 @@ impl AppState {
                     candidate.server.auth_token = Some(generated);
                     Ok(())
                 })
-                .await?;
+                .await
+                // Without context this surfaces as a bare `io error: Permission
+                // denied`, which says nothing about *what* could not be written.
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "cannot persist the generated auth_token to '{config_path}': {error}.\n\
+                         The working directory must be writable on first start: the token, \
+                         data/datav2.db and captures/ are created there.\n\
+                         Set server.auth_token in the config yourself to skip this write."
+                    )
+                })?;
         }
         let config_snapshot = config.get().await;
 
@@ -81,8 +100,30 @@ impl AppState {
             })
             .map_err(|e| anyhow::anyhow!("failed to open session repo: {e}"))?,
         );
-        let session_ingest: std::sync::Arc<dyn proxy_session::SessionIngest> =
-            session_repo.clone();
+        let session_ingest: std::sync::Arc<dyn proxy_session::SessionIngest> = session_repo.clone();
+
+        // planx: subscription accounts as upstream credentials.
+        //
+        // The registry is built even with zero accounts. A registry that only
+        // exists when the startup config already had a working account could
+        // never learn about the *first* account added later — the dashboard CRUD
+        // path and the config watcher both converge on `PlanxRegistry::reload`,
+        // which needs a live registry to reload into.
+        //
+        // Injecting an empty registry is behaviour-neutral: a provider without an
+        // `account` never consults it.
+        let planx = std::sync::Arc::new(
+            proxy_planx::PlanxRegistry::from_config(
+                &config_snapshot.proxy.accounts,
+                config_snapshot.proxy.http_proxy.as_deref(),
+                proxy_planx::ProbeUrls::default(),
+            )
+            .await?,
+        );
+        proxy_planx::spawn_refresher(planx.clone(), PLANX_REFRESH_INTERVAL_SECS);
+        tracing::info!("[planx] {} account(s) active", planx.len());
+        let account_auth: proxy_common::PlanAuthHandle =
+            Some(planx.clone() as std::sync::Arc<dyn proxy_common::PlanAuthProvider>);
 
         let relay = RelayHandler::new(
             config.clone(),
@@ -92,9 +133,24 @@ impl AppState {
             capture.clone(),
         )
         .with_session_ingest(session_ingest)
+        .with_account_auth(account_auth)
+        .with_protocol_adapter(Some(std::sync::Arc::new(
+            proxy_bridge::AnthropicCodexAdapter::new(),
+        )))
         .with_retry_config(
             config_snapshot.proxy.retry_count,
             config_snapshot.proxy.request_timeout_secs,
+        );
+
+        // Hot-reload watcher. Two triggers converge on the same reload path:
+        //   1. an API edit (the dashboard) emits `UpstreamChanged` on the bus;
+        //   2. a hand-edit of config.toml changes the file mtime.
+        // Without (2) a manual edit would silently require a restart.
+        watcher::spawn(
+            config.clone(),
+            events.clone(),
+            planx.clone(),
+            std::path::PathBuf::from(config_path),
         );
 
         Ok(Self {
@@ -105,6 +161,7 @@ impl AppState {
             capture,
             session: session_repo,
             summary_jobs: Arc::new(SummaryJobs::new()),
+            planx,
         })
     }
 }
@@ -162,10 +219,7 @@ impl SummaryJob {
     }
 
     /// Transition the job to Done or Failed based on the archive result.
-    pub fn finish(
-        &self,
-        result: Result<Vec<proxy_store::ArchiveInfo>, proxy_store::StoreError>,
-    ) {
+    pub fn finish(&self, result: Result<Vec<proxy_store::ArchiveInfo>, proxy_store::StoreError>) {
         let state = match result {
             Ok(items) => SummaryJobState::Done {
                 summarized: items
@@ -222,8 +276,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::fmt::layer()
                 .event_format(CompactFormat)
                 .with_filter(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("info")),
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
                 ),
         )
         .init();
@@ -315,7 +368,9 @@ async fn main() -> anyhow::Result<()> {
                     let dp = r.provider_or(def);
                     match def {
                         Some(d) if r.provider == d.provider && r.model == d.model => "—".into(),
-                        Some(d) if r.provider.is_empty() || r.provider == d.provider => r.model.clone(),
+                        Some(d) if r.provider.is_empty() || r.provider == d.provider => {
+                            r.model.clone()
+                        }
                         _ => format!("{}/{}", dp, r.model),
                     }
                 }
@@ -353,10 +408,15 @@ async fn main() -> anyhow::Result<()> {
     sep("└", "┴", "┘");
 
     // ── Listen ──
-    let is_loopback = config.server.listen_address == "127.0.0.1"
-        || config.server.listen_address == "::1"
-        || config.server.listen_address == "localhost";
-    if !is_loopback {
+    // `listen_address` is validated as an IP literal, so this parse cannot fail
+    // for a config that got this far. `is_loopback()` is used instead of string
+    // comparison so 127.0.0.0/8 and ::1 are all recognised, and `0.0.0.0` / `::`
+    // (all interfaces) correctly count as *not* loopback.
+    let listen_ip: std::net::IpAddr = config.server.listen_address.trim().parse()?;
+    if !listen_ip.is_loopback() {
+        // Defence in depth: AppState::new generates a token when none is set, so
+        // in practice this never fires — but a non-loopback bind without a token
+        // must not be possible.
         if config.server.auth_token.as_deref().unwrap_or("").is_empty() {
             anyhow::bail!(
                 "server.auth_token is required when listen_address '{}' is not loopback",
@@ -364,32 +424,73 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         tracing::info!(
-            "[server] listen_address={} with auth_token",
+            "[server] listening on {} (non-loopback, auth_token enforced on /api and /ws)",
             config.server.listen_address
         );
     }
 
     let http_router = web::build_router(state.clone());
-    let http_addr = SocketAddr::new(
-        config.server.listen_address.parse()?,
-        config.server.http_port,
-    );
+    let http_addr = SocketAddr::new(listen_ip, config.server.http_port);
     let proxy_router = state.relay.clone().build_router();
-    let proxy_addr = SocketAddr::new(
-        config.server.listen_address.parse()?,
-        config.server.proxy_port,
-    );
-
-    tracing::info!("Dashboard: http://{http_addr}");
-    tracing::info!("API relay: http://{proxy_addr}");
+    let proxy_addr = SocketAddr::new(listen_ip, config.server.proxy_port);
 
     let http_listener = TcpListener::bind(http_addr).await?;
     let proxy_listener = TcpListener::bind(proxy_addr).await?;
 
+    // Log the *bound* address, not the requested one: with `http_port = 0` the OS
+    // picks the port, and the requested address would be a lie.
+    tracing::info!("Dashboard: {}", listen_hint(http_listener.local_addr()?));
+    tracing::info!("API relay: {}", listen_hint(proxy_listener.local_addr()?));
+
+    // `with_connect_info` is required by the auth middleware, which needs the
+    // peer address to decide whether the dashboard cookie may be handed out.
     tokio::try_join!(
-        axum::serve(http_listener, http_router),
+        axum::serve(
+            http_listener,
+            http_router.into_make_service_with_connect_info::<SocketAddr>(),
+        ),
         axum::serve(proxy_listener, proxy_router),
     )?;
 
     Ok(())
+}
+
+/// A human-usable URL for a bound listener.
+///
+/// `0.0.0.0` / `::` are valid bind addresses but not URLs you can open, so an
+/// all-interfaces bind also reports the loopback URL to try locally.
+fn listen_hint(bound: SocketAddr) -> String {
+    if bound.ip().is_unspecified() {
+        format!(
+            "http://{bound}  (all interfaces; locally: http://127.0.0.1:{})",
+            bound.port()
+        )
+    } else {
+        format!("http://{bound}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::listen_hint;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn an_unspecified_bind_reports_a_usable_loopback_url() {
+        let hint = listen_hint("0.0.0.0:5000".parse::<SocketAddr>().unwrap());
+        assert!(hint.contains("0.0.0.0:5000"), "{hint}");
+        assert!(hint.contains("http://127.0.0.1:5000"), "{hint}");
+    }
+
+    #[test]
+    fn a_specific_bind_is_reported_as_is() {
+        assert_eq!(
+            listen_hint("127.0.0.1:5000".parse::<SocketAddr>().unwrap()),
+            "http://127.0.0.1:5000"
+        );
+        assert_eq!(
+            listen_hint("[::1]:5000".parse::<SocketAddr>().unwrap()),
+            "http://[::1]:5000"
+        );
+    }
 }

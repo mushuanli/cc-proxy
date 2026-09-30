@@ -6,9 +6,10 @@ mod sessions;
 mod settings;
 mod static_files;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -50,6 +51,7 @@ async fn api_logger(req: Request, next: Next) -> Response {
 /// the same-site HttpOnly dashboard cookie.
 async fn auth_guard(
     state: State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     req: Request,
     next: Next,
@@ -63,7 +65,17 @@ async fn auth_guard(
                 .and_then(|v| v.to_str().ok())
                 .is_none_or(|dest| dest == "document");
         let mut response = next.run(req).await;
-        if is_document {
+        // The convenience cookie is handed out **only to a loopback peer**.
+        // `auth_token` is the only thing guarding /api and /ws, so returning it
+        // to any anonymous client that fetches `/` would make it decorative as
+        // soon as the dashboard is reachable from anywhere but localhost.
+        // A remote browser must open `/?token=<token>` once (see main.js) or send
+        // `Authorization: Bearer <token>`.
+        //
+        // `to_canonical()` maps IPv4-mapped addresses (`::ffff:127.0.0.1`) onto
+        // IPv4, which matters when bound to `::`.
+        let from_loopback = peer.ip().to_canonical().is_loopback();
+        if is_document && from_loopback {
             if let Some(token) = config
                 .server
                 .auth_token
@@ -136,10 +148,16 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             "/api/model-pricing/:id",
             put(settings::update_pricing).delete(settings::delete_pricing),
         )
+        .route("/api/model-pricing/:id/refs", get(settings::pricing_refs))
         .route(
-            "/api/model-pricing/:id/refs",
-            get(settings::pricing_refs),
+            "/api/accounts",
+            get(settings::list_accounts).post(settings::add_account),
         )
+        .route(
+            "/api/accounts/:name",
+            axum::routing::put(settings::update_account).delete(settings::delete_account),
+        )
+        .route("/api/accounts/:name/probe", post(settings::probe_account))
         .route(
             "/api/providers",
             get(settings::list_providers).post(settings::add_provider),
@@ -148,10 +166,7 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
             "/api/providers/:name",
             put(settings::update_provider).delete(settings::delete_provider),
         )
-        .route(
-            "/api/providers/:name/refs",
-            get(settings::provider_refs),
-        )
+        .route("/api/providers/:name/refs", get(settings::provider_refs))
         .route(
             "/api/upstreams",
             get(settings::list_upstreams).post(settings::add_upstream),

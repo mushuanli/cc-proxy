@@ -211,8 +211,7 @@ model = "deepseek-v4-pro"
 [server]
 http_port = 5000
 proxy_port = 8888
-mcp_proxy_port = 9999
-listen_address = "127.0.0.1"
+listen_address = "127.0.0.1"   # or 0.0.0.0 / :: to listen on every interface
 ```
 
 See `config.toml.template` for detailed configuration.

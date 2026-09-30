@@ -69,11 +69,17 @@ level = "info"   # trace | debug | info | warn | error
 
 # ── Server ports ─────────────────────────────────────────────────────────────
 [server]
+# 必须是 IP 字面量（不做 DNS 解析）：
+#   127.0.0.1  仅本机（默认）
+#   0.0.0.0    所有 IPv4 网卡
+#   ::         所有 IPv6 网卡（Linux 上通常也接受 IPv4 映射）
+#   192.168.x.x 指定网卡
+# 非 loopback 时 /api 与 /ws 会强制校验 auth_token（未设置会在首次启动时自动生成并落盘）。
+# 只有两个监听端口；http_port 与 proxy_port 不能相同，也不能为 0。
 listen_address = "127.0.0.1"
 http_port      = 5000   # Dashboard UI
 proxy_port     = 8888   # Reverse: ANTHROPIC_BASE_URL=http://127.0.0.1:8888
                          # Forward: HTTP_PROXY=http://127.0.0.1:8888 (absolute URI)
-mcp_proxy_port = 9999   # MCP traffic
 
 # ── Proxy & Upstream Routing ──────────────────────────────────────────────────
 [proxy]
@@ -191,3 +197,71 @@ name    = "mix"
 high    = { provider = "anthropic", model = "claude-opus" }
 low     = { model = "deepseek-v4-flash" }
 default = { provider = "deepseek", model = "deepseek-v4-pro" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# planx — 上游账号（两个家族 × 两种模式）
+#
+#   family = gpt     → ChatGPT / Codex
+#   family = claude  → Anthropic / Claude Code
+#   mode   = plan    → 订阅账号 OAuth（可刷新，自动补出站身份）
+#   mode   = api_key → 静态密钥
+#
+# 用法：给 provider 设 account = "<账号名>"（不要再设 token），
+#      需要时把上游指到该 provider：
+#        anthropic 走 active_upstream = "claude-plan"
+#        codex     走 active_codex_upstream = "gpt-plan"
+#
+# 注意：token 与 account 互斥；claude 不支持 auth_json / persist；
+#       账号支持热重载（面板改动或手改本文件都会被 ConfigWatcher 拾取）。
+# ─────────────────────────────────────────────────────────────────────────────
+# [[proxy.accounts]]
+# name      = "gpt-plan"          # GPT × plan
+# family    = "gpt"
+# mode      = "plan"
+# auth_json = "~/.codex/auth.json"
+# persist   = true                # 刷新后原子回写（0600，保留未知字段）
+# identity  = "codex_tui"         # codex_tui（默认）| codex_cli_rs | passthrough
+#
+# [[proxy.accounts]]
+# name    = "gpt-key"             # GPT × api_key
+# family  = "gpt"
+# mode    = "api_key"
+# api_key = "sk-..."
+#
+# [[proxy.accounts]]
+# name          = "claude-plan"   # Claude × plan
+# family        = "claude"
+# mode          = "plan"
+# refresh_token = "sk-ant-ort01-..."   # 或 access_token = "sk-ant-oat01-..."（setup-token）
+# identity      = "claude_code"   # claude_code（默认）| passthrough
+#
+# [[proxy.accounts]]
+# name    = "claude-key"          # Claude × api_key
+# family  = "claude"
+# mode    = "api_key"
+# api_key = "sk-ant-api03-..."
+#
+# 任意账号都可加 impersonate（需 --features impersonate）；
+# 验证画像是否真的生效：cargo run -p proxy-planx --features impersonate --example fingerprint
+# impersonate = "chrome"          # off | chrome | chrome142 | edge | firefox | safari
+#
+# [[proxy.providers]]
+# name      = "claude-plan"
+# url       = "https://api.anthropic.com"
+# protocols = ["anthropic"]
+# account   = "claude-plan"
+#
+# [[proxy.providers]]
+# name         = "gpt-plan"
+# url          = "https://chatgpt.com/backend-api/codex"
+# protocols    = ["codex"]
+# account      = "gpt-plan"
+# codex_url    = "https://chatgpt.com/backend-api/codex"
+#
+# [[proxy.upstreams]]
+# name    = "claude-plan"
+# default = { provider = "claude-plan", model = "claude-sonnet" }
+#
+# [[proxy.upstreams]]
+# name    = "gpt-plan"
+# default = { provider = "gpt-plan" }
