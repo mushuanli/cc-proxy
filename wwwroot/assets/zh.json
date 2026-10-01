@@ -66,8 +66,8 @@
     "select_all_title": "全选",
     "copy": "复制当前页",
     "codex_upstream": "Codex:",
-    "plan_connection": "Plan:",
-    "plan_off": "— 关闭（用 upstream/tier 路由）—"
+    "relay_group_upstream": "Upstream（provider + tier 路由）",
+    "relay_group_plan": "Plan（订阅账号，绕过 tier）"
   },
   "pagination": {
     "per_page_20": "20 条/页",
@@ -255,7 +255,9 @@
     "catalog_manual": "该 provider 的 models_kind = manual：不抓取上游，客户端能用的是你配置的 {n} 个模型",
     "catalog_only_upstream": "上游有、但你没配置（不会出现在客户端列表里）：{list}",
     "catalog_only_local": "你配置了、但上游这次没列出（可能是版本或网关差异）：{list}",
-    "close": "关闭"
+    "close": "关闭",
+    "relay_overridden": "plan 生效中",
+    "relay_overridden_hint": "当前由 plan 连接接管：所有请求直连该订阅账号的端点，上表的 upstream 都不生效"
   },
   "summary": {
     "title": "概要",

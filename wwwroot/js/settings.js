@@ -94,7 +94,6 @@ export function applyUpstreamState(active, codexActive, proxyActive, upstreams, 
     if (effort !== undefined) { state.activeEffort = effort; }
     populateUpstreamSelect(upstreams, active);
     populateCodexUpstreamSelect(upstreams, state.activeCodexUpstream);
-    populatePlanSelect();
 
     populateEffortSelect(state.activeEffort);
     renderModelMatrix();
@@ -114,53 +113,47 @@ function renderGlobalProxy() {
 
 // ── Upstream / Effort selects (Inspector toolbar) ──
 
-export function populateUpstreamSelect(upstreams, active) {
+/// The relay's target: **one** control, because only one target is ever in
+/// effect. An upstream routes through providers and tiers; a plan connects
+/// straight to a subscription account's endpoint. Plan wins when both are
+/// configured, so the configured upstream is kept as the fallback you return to
+/// when plan is switched off.
+export async function populateUpstreamSelect(upstreams, active) {
     const select = document.getElementById('upstream-select');
-    select.innerHTML = '';
-    if (!upstreams || upstreams.length === 0) {
-        select.innerHTML = '<option value="">— no upstreams —</option>';
-        return;
-    }
-    [...upstreams].sort((a, b) => a.name.localeCompare(b.name)).forEach(u => {
-        const opt = document.createElement('option');
-        opt.value = u.name;
-        opt.textContent = u.name + (u.active ? ' ✓' : '');
-        if (u.name === active || u.active) opt.selected = true;
-        select.appendChild(opt);
-    });
-}
-
-/// The relay's plan connection: a peer of an upstream, named after an account.
-///
-/// Listed from the accounts (not the upstreams), because a plan is defined by a
-/// subscription account and bypasses providers and tiers. The empty option turns
-/// plan mode off and returns the relay to upstream/tier routing.
-export async function populatePlanSelect() {
-    const select = document.getElementById('plan-select');
     if (!select) return;
-    let accounts = state.accountList;
-    if (!accounts) {
-        try {
-            accounts = await (await fetch('/api/accounts')).json();
-            state.accountList = accounts;
-        } catch { return; }
-    }
-    const plans = (accounts || []).filter(a => a.mode === 'plan');
-    select.innerHTML = `<option value="">${esc(t('inspector.plan_off'))}</option>`
-        + plans.map(a => `<option value="${esc(a.name)}">${esc(a.name)} (${esc(a.family)})</option>`).join('');
-    select.value = state.activePlan && plans.some(a => a.name === state.activePlan)
-        ? state.activePlan
-        : '';
-}
 
-document.getElementById('plan-select')?.addEventListener('change', async () => {
-    const name = document.getElementById('plan-select').value;
-    await fetch('/api/plan/activate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-    });
-});
+    let plans = (state.accountList || []).filter(a => a.mode === 'plan');
+    if (!state.accountList) {
+        try {
+            state.accountList = await (await fetch('/api/accounts')).json();
+            plans = (state.accountList || []).filter(a => a.mode === 'plan');
+        } catch { plans = []; }
+    }
+
+    const group = (label, entries) => entries.length
+        ? `<optgroup label="${esc(label)}">${entries}</optgroup>`
+        : '';
+    const upstreamOptions = [...(upstreams || [])]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(u => `<option value="${esc(u.name)}">${esc(u.name)}${u.active ? ' ✓' : ''}</option>`)
+        .join('');
+    const planOptions = plans
+        .map(a => `<option value="${esc('plan:' + a.name)}">${esc(a.name)} (${esc(a.family)})</option>`)
+        .join('');
+
+    select.innerHTML = (upstreamOptions || planOptions)
+        ? group(t('inspector.relay_group_upstream'), upstreamOptions)
+            + group(t('inspector.relay_group_plan'), planOptions)
+        : `<option value="">${esc(t('settings.no_upstreams'))}</option>`;
+
+    // The plan is what is actually in effect when it is set.
+    if (state.activePlan) {
+        select.value = 'plan:' + state.activePlan;
+    } else {
+        const chosen = (upstreams || []).find(u => u.name === active || u.active);
+        select.value = chosen ? chosen.name : '';
+    }
+}
 
 export function populateCodexUpstreamSelect(upstreams, active) {
     const select = document.getElementById('codex-upstream-select');
@@ -1044,7 +1037,7 @@ export function renderUpstreamTable() {
         <th class="ut-th ut-col-active ut-proxy-th${isAuto ? ' ut-proxy-th-auto' : ''}${isForbid ? ' ut-proxy-th-forbid' : ''}" data-name="${isForbid ? '__auto__' : '__forbid__'}" title="${isForbid ? 'Click to switch to Auto (auto-detect)' : 'Click to forbid transparent proxy'}">
             Transparent Proxy<span class="ut-proxy-th-active">${isForbid ? '⊘ Forbid' : (isAuto ? '◉ Auto' : esc(proxyActiveName))}</span>
         </th>
-        <th class="ut-th ut-col-active">Relay</th>
+        <th class="ut-th ut-col-active">Relay${state.activePlan ? ` <span class="ut-proxy-th-active">⊘ ${esc(t('settings.relay_overridden'))}</span>` : ''}</th>
         <th class="ut-th ut-col-tier">Opus</th>
         <th class="ut-th ut-col-tier">Sonnet</th>
         <th class="ut-th ut-col-tier">Haiku</th>
@@ -1075,9 +1068,13 @@ function tierCellHtml(rule, defRule) {
 }
 
 function upstreamRowHtml(u) {
-    const activeCell = u.active
-        ? `<span class="ut-active-check" title="${t('settings.active_badge')}">✓</span>`
-        : `<button class="btn-sm ut-activate-btn" data-name="${esc(u.name)}">${t('settings.activate')}</button>`;
+    // With a plan connection active, no upstream is in effect — saying otherwise
+    // is exactly the confusion this column caused.
+    const activeCell = state.activePlan
+        ? `<span class="mx-none" title="${esc(t('settings.relay_overridden_hint'))}">—</span>`
+        : (u.active
+            ? `<span class="ut-active-check" title="${t('settings.active_badge')}">✓</span>`
+            : `<button class="btn-sm ut-activate-btn" data-name="${esc(u.name)}">${t('settings.activate')}</button>`);
     const proxyCell = u.proxy_active
         ? `<span class="ut-proxy-on" title="Transparent proxy active (click to change)">◉</span>`
         : `<span class="ut-proxy-off" title="Click to use as transparent proxy">◯</span>`;
@@ -1315,9 +1312,26 @@ document.getElementById('btn-matrix-add-model').addEventListener('click', openAd
 
 // Upstream select in Inspector toolbar
 document.getElementById('upstream-select').addEventListener('change', async () => {
-    const name = document.getElementById('upstream-select').value;
-    if (!name) return;
-    await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate`, { method: 'POST' });
+    const value = document.getElementById('upstream-select').value;
+    if (!value) return;
+    if (value.startsWith('plan:')) {
+        // Plan mode: it takes precedence over any configured upstream.
+        await fetch('/api/plan/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: value.slice('plan:'.length) }),
+        });
+        return;
+    }
+    // Choosing an upstream leaves plan mode; the upstream becomes the target again.
+    if (state.activePlan) {
+        await fetch('/api/plan/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: '' }),
+        });
+    }
+    await fetch(`/api/upstreams/${encodeURIComponent(value)}/activate`, { method: 'POST' });
 });
 
 // Codex upstream select — activates the codex-specific upstream

@@ -186,7 +186,12 @@ plan 模式下：
 | gpt × api_key | `https://api.openai.com/v1` | codex | openai（`data[].id`）|
 | claude × 任意 | `https://api.anthropic.com` | anthropic | anthropic（`data[].id`）|
 
-会话管理（Inspector）工具栏的 **Plan:** 下拉即切换它；接口是 `POST /api/plan/activate`，body `{"name": "<account>"}`，`name` 为空即关闭。
+因为**同一时刻只有一个目标生效**，会话管理（Inspector）工具栏只用**一个 `Relay:` 下拉**表达它：
+两组选项 —— `Upstream`（provider + tier 路由）与 `Plan`（订阅账号，绕过 tier）。选中 plan 即写 `active_plan`；
+选中 upstream 会先清空 `active_plan` 再设 `active_upstream`（所以关掉 plan 能回到原来的 upstream）。
+接口是 `POST /api/plan/activate`，body `{"name": "<account>"}`，`name` 为空即关闭。
+
+（`Codex:` 下拉保留并且与 `Relay:` **不冲突**：它只对 Codex 协议请求生效，是协议级覆盖，两者可同时配置。）
 
 ### 两个「模型清单」是两回事
 
