@@ -183,6 +183,13 @@ async fn proxy_handler(
         return local_models_response(&relay, request.headers()).await;
     }
 
+    // An OpenAI chat-completions client would otherwise be parsed as Anthropic,
+    // bridged to the plan and fail with "upstream returned no translatable body" —
+    // a message that says nothing about the actual problem. Say it instead.
+    if !is_transparent && uri.path().ends_with("/chat/completions") {
+        return unsupported_wire(uri.path());
+    }
+
     let headers = request.headers().clone();
     let body = match axum::body::to_bytes(request.into_body(), 32 * 1024 * 1024).await {
         Ok(body) => body,
@@ -199,6 +206,35 @@ async fn proxy_handler(
     } else {
         handle_reverse_proxy(relay, method, uri, headers, body).await
     }
+}
+
+/// Explain an unsupported client wire protocol in the shape the caller expects.
+///
+/// OpenAI clients read `error.message`, so a chat-completions client gets that
+/// shape and a usable hint rather than a bridged, untranslatable upstream error.
+fn unsupported_wire(path: &str) -> Response<Body> {
+    let doubled = path.starts_with("/v1/v1/");
+    let hint = if doubled {
+        " Also note the request path is /v1/v1/…: the client's base URL already includes /v1, so drop it."
+    } else {
+        ""
+    };
+    tracing::warn!("[relay] rejecting unsupported client protocol at {path}");
+    let body = serde_json::json!({
+        "error": {
+            "message": format!(
+                "cc-proxy serves the Anthropic Messages API (/v1/messages) and the OpenAI \
+                 Responses API (/v1/responses); /v1/chat/completions is not implemented.{hint}"
+            ),
+            "type": "invalid_request_error",
+            "code": "unsupported_wire_protocol",
+        }
+    });
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 /// Answer `GET /v1/models` from the local configuration.
