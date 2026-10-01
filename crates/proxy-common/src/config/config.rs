@@ -40,6 +40,7 @@ impl Default for AppConfig {
                 proxy_port: 8888,
                 auth_token: None,
                 ws_include_bodies: false,
+                cors_origins: Vec::new(),
             },
             logging: LoggingConfig {
                 level: "info".into(),
@@ -159,6 +160,14 @@ pub struct ServerConfig {
     /// Include prompt/response bodies in WebSocket events (off by default).
     #[serde(default)]
     pub ws_include_bodies: bool,
+    /// Browser origins allowed to call the proxy port, e.g.
+    /// `["http://192.168.31.10:3000"]`; `["*"]` allows any.
+    ///
+    /// Empty (the default) sends no CORS headers at all. That is the safe
+    /// default because the proxy port is unauthenticated: allowing `*` lets any
+    /// page the operator visits spend their upstream quota.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cors_origins: Vec<String>,
 }
 
 fn default_listen_addr() -> String {

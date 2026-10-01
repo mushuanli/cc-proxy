@@ -270,10 +270,28 @@ ServerConfig {
     proxy_port: u16,         // 默认 8888（反向或正向代理入口）
     auth_token: Option<String>,   // 非 loopback 时 /api 与 /ws 强制校验
     ws_include_bodies: bool,      // 默认 false
+    cors_origins: Vec<String>,    // 默认空 = 不发 CORS 头；["*"] = 任意来源
 }
 ```
 
 **监听范围**：只有两个监听套接字（`http_port` 与 `proxy_port`），没有端口范围、端口列表或多地址；
+### 浏览器（CORS）
+
+代理口（`proxy_port`）**没有鉴权**，所以浏览器页面从别的来源调用它时，必须由服务端放行：
+
+```toml
+[server]
+# 只放行这些来源（浏览器 Origin 的形态：scheme://host[:port]，不带路径）
+cors_origins = ["http://192.168.31.10:3000"]
+```
+
+- 留空（默认）= 不发任何 CORS 头 → 浏览器会拦下请求（`No 'Access-Control-Allow-Origin' header`）。
+- `["*"]` = 放行任意来源。**这是个坑**：代理口无鉴权，等于让操作者访问过的任意网页都能花他的上游额度。
+  只在端口仅本机可达、或前面另有鉴权层时使用。
+- 预检（`OPTIONS`）会由服务端直接应答，**不再转发到上游**；`allow-methods`/`allow-headers` 为 `*`，
+  以覆盖浏览器客户端会发的 `authorization` / `x-api-key` / `anthropic-version` / `content-type`。
+- 改这项需要**重启**（`[server]` 在启动时生效；proxy/upstream/账号等仍是热生效）。
+
 `listen_address` 必须是 IP 字面量，**不做 DNS 解析**：
 
 | 取值 | 含义 |

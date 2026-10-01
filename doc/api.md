@@ -189,6 +189,9 @@ request/response messages。
 cc-proxy 不追踪模型创建时间，但两家 SDK 都会反序列化该字段。
 `client_version` 之类的查询参数会被忽略；该请求不进 tasks 列表（不产生上游响应，记进去只会是噪声）。
 
+> 浏览器页面从其他来源调用需要 `server.cors_origins` 放行（见 `doc/config.md`）；
+> 预检 `OPTIONS` 由服务端应答，不会转发到上游。
+
 ### `POST /api/providers/:name/models`（管理口）
 
 抓取该 provider 自己的目录（面板里模型矩阵的 provider 列头「清单」按钮）。

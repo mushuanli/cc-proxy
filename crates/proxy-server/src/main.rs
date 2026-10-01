@@ -431,7 +431,14 @@ async fn main() -> anyhow::Result<()> {
 
     let http_router = web::build_router(state.clone());
     let http_addr = SocketAddr::new(listen_ip, config.server.http_port);
-    let proxy_router = state.relay.clone().build_router();
+    // Browser clients cannot call the proxy port cross-origin without CORS, and a
+    // preflight is an `OPTIONS` that would otherwise be forwarded upstream. The
+    // allowlist is opt-in because this port is unauthenticated: `["*"]` would let
+    // any page the operator visits spend their upstream quota.
+    let proxy_router = match cors_layer(&config.server.cors_origins) {
+        Some(cors) => state.relay.clone().build_router().layer(cors),
+        None => state.relay.clone().build_router(),
+    };
     let proxy_addr = SocketAddr::new(listen_ip, config.server.proxy_port);
 
     let http_listener = TcpListener::bind(http_addr).await?;
@@ -459,6 +466,51 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// `0.0.0.0` / `::` are valid bind addresses but not URLs you can open, so an
 /// all-interfaces bind also reports the loopback URL to try locally.
+/// CORS layer for the proxy port, or `None` when no origin is allowed.
+///
+/// `["*"]` allows any origin, which is a documented footgun: this port has no
+/// auth. Otherwise origins match exactly, tolerating a stored trailing slash
+/// because browsers never send one.
+fn cors_layer(origins: &[String]) -> Option<tower_http::cors::CorsLayer> {
+    let cleaned: Vec<&str> = origins
+        .iter()
+        .map(|origin| origin.trim().trim_end_matches('/'))
+        .filter(|origin| !origin.is_empty())
+        .collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.contains(&"*") {
+        tracing::warn!(
+            "[server] CORS allows every origin on the proxy port, which has no auth; \
+             set server.cors_origins to exact origins if others can reach this port"
+        );
+        // `permissive` also answers the preflight for the headers browser clients
+        // send: authorization, x-api-key, anthropic-version, content-type.
+        return Some(tower_http::cors::CorsLayer::permissive());
+    }
+
+    let allowed: Vec<axum::http::HeaderValue> = cleaned
+        .iter()
+        .filter_map(|origin| match origin.parse() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::warn!("[server] ignoring invalid CORS origin '{origin}'");
+                None
+            }
+        })
+        .collect();
+    if allowed.is_empty() {
+        return None;
+    }
+    Some(
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::list(allowed))
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any),
+    )
+}
+
 fn listen_hint(bound: SocketAddr) -> String {
     if bound.ip().is_unspecified() {
         format!(

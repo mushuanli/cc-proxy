@@ -80,6 +80,12 @@ listen_address = "127.0.0.1"
 http_port      = 5000   # Dashboard UI
 proxy_port     = 8888   # Reverse: ANTHROPIC_BASE_URL=http://127.0.0.1:8888
                          # Forward: HTTP_PROXY=http://127.0.0.1:8888 (absolute URI)
+#
+# 浏览器跨域（CORS）。代理口没有鉴权，浏览器页面直接调用它必须由服务端放行。
+# 留空 = 不发送任何 CORS 头（默认，最安全）。
+# cors_origins = ["http://192.168.31.10:3000"]   # 只放行这些来源
+# cors_origins = ["*"]                           # 放行任意来源（无鉴权，慎用）
+# 注意：改这项要重启进程（[server] 在启动时生效）。
 
 # ── Proxy & Upstream Routing ──────────────────────────────────────────────────
 [proxy]

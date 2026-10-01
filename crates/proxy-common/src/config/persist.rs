@@ -275,6 +275,13 @@ fn write_server_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         "ws_include_bodies",
         toml_edit::value(config.server.ws_include_bodies),
     );
+    if !config.server.cors_origins.is_empty() {
+        let mut origins = toml_edit::Array::new();
+        for origin in &config.server.cors_origins {
+            origins.push(origin.as_str());
+        }
+        tbl.insert("cors_origins", toml_edit::value(origins));
+    }
     doc["server"] = toml_edit::Item::Table(tbl);
 }
 

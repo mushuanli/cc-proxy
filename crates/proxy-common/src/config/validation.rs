@@ -396,6 +396,7 @@ impl AppConfig {
         }
         self.validate_listen_address(errors);
         self.validate_listen_ports(errors);
+        self.validate_cors_origins(errors);
     }
 
     /// The bind address must be an IP literal.
@@ -414,6 +415,35 @@ impl AppConfig {
                  (127.0.0.1, 0.0.0.0 for all IPv4 interfaces, ::1, :: for all IPv6, \
                  or a specific address); host names are not resolved"
             ));
+        }
+    }
+
+    /// CORS entries are browser origins: scheme + host + optional port, nothing
+    /// else. A bare `host:port` is the common mistake, so say what is missing.
+    fn validate_cors_origins(&self, errors: &mut Vec<String>) {
+        for raw in &self.server.cors_origins {
+            let origin = raw.trim().trim_end_matches('/');
+            if origin == "*" {
+                continue;
+            }
+            if origin.is_empty() {
+                errors.push("server.cors_origins contains an empty entry".to_string());
+                continue;
+            }
+            if !(origin.starts_with("http://") || origin.starts_with("https://")) {
+                errors.push(format!(
+                    "server.cors_origins entry '{raw}' must include the scheme, e.g. http://192.168.31.10:3000"
+                ));
+                continue;
+            }
+            let authority = origin
+                .trim_start_matches("http://")
+                .trim_start_matches("https://");
+            if authority.is_empty() || authority.contains(['/', '?', '#']) {
+                errors.push(format!(
+                    "server.cors_origins entry '{raw}' must be an origin only (scheme://host[:port]), with no path"
+                ));
+            }
         }
     }
 
@@ -732,6 +762,41 @@ mod tests {
         assert!(
             errors.iter().any(|e| e.contains("unknown impersonate")),
             "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn cors_origins_must_be_origins() {
+        fn errors_for(origins: &[&str]) -> Vec<String> {
+            let mut config = AppConfig::default();
+            config.server.cors_origins = origins.iter().map(|o| o.to_string()).collect();
+            config.validate()
+        }
+
+        for good in ["*", "http://192.168.31.10:3000", "https://ui.example.com"] {
+            assert!(errors_for(&[good]).is_empty(), "{good}");
+        }
+        // A trailing slash is what people paste; browsers never send one.
+        assert!(errors_for(&["http://192.168.31.10:3000/"]).is_empty());
+
+        for bad in [
+            "192.168.31.10:3000",
+            "http://host/path",
+            "http://",
+            "ftp://host",
+            "",
+        ] {
+            let errors = errors_for(&[bad]);
+            assert!(
+                errors.iter().any(|e| e.contains("cors_origins")),
+                "{bad}: {errors:?}"
+            );
+        }
+
+        let errors = errors_for(&["192.168.31.10:3000"]);
+        assert!(
+            errors.iter().any(|e| e.contains("must include the scheme")),
+            "the common mistake should say what is missing: {errors:?}"
         );
     }
 
