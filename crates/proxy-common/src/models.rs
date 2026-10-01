@@ -388,6 +388,8 @@ pub enum WsMessage {
         active_upstream: String,
         active_codex_upstream: String,
         active_proxy_upstream: String,
+        /// Active **plan connection** (an account name), empty when off.
+        active_plan: String,
         upstreams: Vec<UpstreamInfo>,
         providers: Vec<ProviderInfo>,
         active_effort: String,

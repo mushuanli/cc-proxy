@@ -342,6 +342,10 @@ struct UpstreamPlan {
 
 /// The inputs of a route decision.
 struct RouteRequest<'a> {
+    /// `true` when `upstream_name` names a **plan account** rather than an
+    /// upstream: the plan is a peer of an upstream and bypasses provider/tier
+    /// routing entirely.
+    plan: bool,
     providers: &'a [proxy_common::Provider],
     /// Transparent forward mode: the request URL itself picks the provider.
     auto_detect: bool,
@@ -371,6 +375,10 @@ async fn resolve_upstream_plan(
                 request.path_or_url
             )))
         });
+    }
+
+    if request.plan {
+        return plan_connection(relay, &request).await;
     }
 
     let route = match relay
@@ -416,6 +424,86 @@ async fn resolve_upstream_plan(
         token: provider.and_then(|p| p.token.clone()),
         account: provider.and_then(|p| p.account.clone()),
         protocol,
+        bridge,
+    })
+}
+
+/// A plan connection: a peer of an upstream, but defined by a subscription
+/// account, so there are no providers, tiers or model translation.
+///
+/// The client's own model name is used verbatim — which only makes sense together
+/// with `GET /v1/models` advertising the plan's real catalogue, so a client asks
+/// for something the plan actually serves.
+async fn plan_connection(
+    relay: &RelayHandler,
+    request: &RouteRequest<'_>,
+) -> Result<UpstreamPlan, Box<Response<Body>>> {
+    let account = request.upstream_name;
+    // `auto` means "do not inject", matching the upstream path.
+    let active_effort = relay
+        .config
+        .get()
+        .await
+        .proxy
+        .active_effort
+        .trim()
+        .to_string();
+    let Some(endpoint) = relay.account_auth.plan_endpoint(account) else {
+        return Err(Box::new(bad_gateway(format!(
+            "Plan connection '{account}' is not a configured account (it names a \
+             [[proxy.accounts]] entry, not an upstream)"
+        ))));
+    };
+    if relay.account_auth.resolve_account(account).is_none() {
+        // Fail closed rather than forward the client's own credential.
+        return Err(Box::new(bad_gateway(format!(
+            "Plan connection '{account}' has no usable credential"
+        ))));
+    }
+
+    // The plan speaks one wire protocol; a client speaking the other is bridged.
+    let target = match endpoint.protocol {
+        proxy_common::protocol::WireProtocol::Anthropic => upstream::ApiProtocol::Anthropic,
+        proxy_common::protocol::WireProtocol::Codex => upstream::ApiProtocol::Codex,
+    };
+    let bridge = if target == request.protocol {
+        None
+    } else {
+        let Some(adapter) = relay.protocol_adapter.as_ref() else {
+            return Err(Box::new(bad_gateway(format!(
+                "Plan connection '{account}' speaks {:?} but the client speaks {:?}, \
+                 and this build has no protocol adapter",
+                target.request_type(),
+                request.protocol.request_type()
+            ))));
+        };
+        if !adapter.supports(request.protocol.to_wire(), target.to_wire()) {
+            return Err(Box::new(bad_gateway(format!(
+                "Plan connection '{account}' cannot bridge {:?} -> {:?}",
+                request.protocol.request_type(),
+                target.request_type()
+            ))));
+        }
+        Some(upstream::BridgePlan {
+            target,
+            path: target.default_path(),
+            adapter: adapter.clone(),
+        })
+    };
+
+    Ok(UpstreamPlan {
+        route: proxy_common::ResolvedRoute {
+            upstream: account.to_string(),
+            // The account is the connection; surface it where a provider would be.
+            provider: account.to_string(),
+            configured_model: request.request_model.to_string(),
+            resolved_model: request.request_model.to_string(),
+            effort: (!active_effort.is_empty() && active_effort != "auto").then_some(active_effort),
+        },
+        base_url: endpoint.base_url,
+        token: None,
+        account: Some(account.to_string()),
+        protocol: target,
         bridge,
     })
 }
@@ -504,16 +592,10 @@ async fn proxy_request(
     // ── Resolve route config (needed before session_id for headless fallback) ──
     let config_snapshot = relay.config.get().await;
     let ws_include_bodies = config_snapshot.server.ws_include_bodies;
-    let upstream_name = if is_transparent && !config_snapshot.proxy.active_proxy_upstream.is_empty()
-    {
-        &config_snapshot.proxy.active_proxy_upstream
-    } else if protocol == upstream::ApiProtocol::Codex
-        && !config_snapshot.proxy.active_codex_upstream.is_empty()
-    {
-        &config_snapshot.proxy.active_codex_upstream
-    } else {
-        &config_snapshot.proxy.active_upstream
-    };
+    let target = config_snapshot
+        .proxy
+        .select_target(is_transparent, protocol.to_wire());
+    let (upstream_name, plan_mode) = (target.name(), target.is_plan());
 
     // ── Session ID: use header/body value, else fall back to latest recording session ──
     let session_id_str = upstream::extract_request_session_id(protocol, &headers, &body_json);
@@ -538,6 +620,7 @@ async fn proxy_request(
     let plan = match resolve_upstream_plan(
         &relay,
         RouteRequest {
+            plan: plan_mode,
             providers: &config_snapshot.proxy.providers,
             auto_detect: upstream_name == AUTO_PROXY_UPSTREAM && is_transparent,
             path_or_url,

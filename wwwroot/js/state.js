@@ -31,6 +31,9 @@ export const state = {
     upstreamList: [],
     modelPricingList: [],
     activeUpstream: '',
+    // Active plan connection (an account name); '' = upstream/tier routing.
+    activePlan: '',
+    activePlan: '',
     activeProxyUpstream: '',
     activeEffort: 'auto',
     EFFORT_LEVELS: ['auto', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],

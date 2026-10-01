@@ -89,6 +89,10 @@ proxy_port     = 8888   # Reverse: ANTHROPIC_BASE_URL=http://127.0.0.1:8888
 
 # ── Proxy & Upstream Routing ──────────────────────────────────────────────────
 [proxy]
+# Plan 连接：与 upstream 并列的第三种目标，值是 [[proxy.accounts]] 的名字。
+# 非空 = plan 模式：绕过 provider/tier、不做模型翻译，所有请求直连该账号的厂商端点；
+# GET /v1/models 也改为返回这个 plan 自己可用的模型。留空 = 关闭（旧行为不变）。
+# active_plan = "gpt-plan"
 active_upstream = "deepseek-only"
 # Transparent forward-proxy traffic can select a different upstream.
 # "__forbid__" = reject transparent proxy traffic (default).

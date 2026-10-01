@@ -103,6 +103,7 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         "active_codex_upstream",
         toml_edit::value(proxy.active_codex_upstream.as_str()),
     );
+    tbl.insert("active_plan", toml_edit::value(proxy.active_plan.as_str()));
     tbl.insert(
         "active_proxy_upstream",
         toml_edit::value(proxy.active_proxy_upstream.as_str()),
@@ -307,6 +308,7 @@ mod tests {
     fn codex_route_config() -> AppConfig {
         let mut config = AppConfig::default();
         config.proxy.active_codex_upstream = "codex-pool".into();
+        config.proxy.active_plan = "gpt-plan".into();
         // The selector must resolve, or `migrate()` (which `load_config` runs)
         // repairs it and the round-trip assertion no longer sees it.
         config.proxy.upstreams.push(crate::config::UpstreamConfig {
@@ -338,6 +340,7 @@ mod tests {
 
         let reloaded = load_config(&path).await.unwrap();
         assert_eq!(reloaded.proxy.active_codex_upstream, "codex-pool");
+        assert_eq!(reloaded.proxy.active_plan, "gpt-plan");
         assert_eq!(reloaded.proxy.providers.len(), 1);
         assert_eq!(
             reloaded.proxy.providers[0].protocols,

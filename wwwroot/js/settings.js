@@ -82,8 +82,9 @@ function accountProtocolProblem(pop) {
 
 // ── Shared state update from server ──
 
-export function applyUpstreamState(active, codexActive, proxyActive, upstreams, providers, effort, pricing, httpProxy) {
+export function applyUpstreamState(active, codexActive, proxyActive, upstreams, providers, effort, pricing, httpProxy, activePlan) {
     state.activeUpstream = active;
+    state.activePlan = activePlan || '';
     state.activeCodexUpstream = codexActive || '';
     state.activeProxyUpstream = proxyActive || active;
     state.upstreamList = upstreams || [];
@@ -93,6 +94,7 @@ export function applyUpstreamState(active, codexActive, proxyActive, upstreams, 
     if (effort !== undefined) { state.activeEffort = effort; }
     populateUpstreamSelect(upstreams, active);
     populateCodexUpstreamSelect(upstreams, state.activeCodexUpstream);
+    populatePlanSelect();
 
     populateEffortSelect(state.activeEffort);
     renderModelMatrix();
@@ -127,6 +129,38 @@ export function populateUpstreamSelect(upstreams, active) {
         select.appendChild(opt);
     });
 }
+
+/// The relay's plan connection: a peer of an upstream, named after an account.
+///
+/// Listed from the accounts (not the upstreams), because a plan is defined by a
+/// subscription account and bypasses providers and tiers. The empty option turns
+/// plan mode off and returns the relay to upstream/tier routing.
+export async function populatePlanSelect() {
+    const select = document.getElementById('plan-select');
+    if (!select) return;
+    let accounts = state.accountList;
+    if (!accounts) {
+        try {
+            accounts = await (await fetch('/api/accounts')).json();
+            state.accountList = accounts;
+        } catch { return; }
+    }
+    const plans = (accounts || []).filter(a => a.mode === 'plan');
+    select.innerHTML = `<option value="">${esc(t('inspector.plan_off'))}</option>`
+        + plans.map(a => `<option value="${esc(a.name)}">${esc(a.name)} (${esc(a.family)})</option>`).join('');
+    select.value = state.activePlan && plans.some(a => a.name === state.activePlan)
+        ? state.activePlan
+        : '';
+}
+
+document.getElementById('plan-select')?.addEventListener('change', async () => {
+    const name = document.getElementById('plan-select').value;
+    await fetch('/api/plan/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+    });
+});
 
 export function populateCodexUpstreamSelect(upstreams, active) {
     const select = document.getElementById('codex-upstream-select');

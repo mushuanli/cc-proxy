@@ -622,6 +622,7 @@ pub async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResp
     Json(json!({
         "active_upstream": config.proxy.active_upstream,
         "active_codex_upstream": config.proxy.active_codex_upstream,
+        "active_plan": config.proxy.active_plan,
         "active_proxy_upstream": config.proxy.active_proxy_upstream,
         "active_effort": config.proxy.active_effort,
         "http_proxy": config.proxy.http_proxy,
@@ -1183,6 +1184,7 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
         active_upstream: active.clone(),
         active_codex_upstream: c.proxy.active_codex_upstream.clone(),
         active_proxy_upstream: c.proxy.active_proxy_upstream.clone(),
+        active_plan: c.proxy.active_plan.clone(),
         upstreams: c
             .proxy
             .upstreams
@@ -1634,6 +1636,57 @@ pub async fn provider_models(
         "error": catalog.error,
     }))
     .into_response()
+}
+
+/// Activate (or clear) the relay's **plan connection**.
+///
+/// A plan is a peer of an upstream: named after a `[[proxy.accounts]]` entry, it
+/// bypasses providers and tiers, sends every request to that account's vendor
+/// endpoint, and makes `GET /v1/models` report the plan's own models. An empty
+/// name clears it and returns the relay to upstream/tier routing.
+pub async fn activate_plan(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    if !name.is_empty() {
+        let known = state
+            .config
+            .get()
+            .await
+            .proxy
+            .accounts
+            .iter()
+            .any(|account| account.name == name);
+        if !known {
+            return err_response(&format!(
+                "'{name}' is not a configured account; a plan names a [[proxy.accounts]] entry"
+            ));
+        }
+    }
+
+    let log_name = name.clone();
+    let result = state
+        .config
+        .update(move |c| {
+            c.proxy.active_plan = name;
+            Ok(())
+        })
+        .await;
+    match result {
+        Ok(_) => {
+            state.events.publish(upstream_changed(&state.config).await);
+            tracing::info!("[api] activate_plan: name={log_name}");
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => err_response(&e.to_string()),
+    }
 }
 
 #[cfg(test)]

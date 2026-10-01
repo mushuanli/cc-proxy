@@ -156,6 +156,38 @@ account   = "claude-sub"
 - `impersonate` 需要 `cargo build -p proxy-server --features impersonate`
 - `cli_version` 只能填版本形态的字符串（字母数字与 `.` `-` `_`，≤32 字符）
 
+### `active_plan`：与 upstream 并列的「plan 连接」
+
+relay 的目标（「连到哪个上游」）有三种，`upstream` 与 `plan` 是**同一层**的东西：
+
+| 目标 | 由什么定义 | 路由 |
+|---|---|---|
+| `active_proxy_upstream` | upstream 名 / `__auto__` / `__forbid__` | 透明代理 |
+| **`active_plan`** | **`[[proxy.accounts]]` 的 name（订阅账号）** | **绕过 provider 与 tier，全部请求直连该账号的厂商端点** |
+| `active_upstream` / `active_codex_upstream` | upstream 名 | provider + tier 路由 + 模型翻译 |
+
+```toml
+[proxy]
+active_plan = "gpt-plan"      # 非空 = plan 模式；留空 = 关闭（行为与以前完全一致）
+```
+
+plan 模式下：
+
+- **所有报文都转发到这个 plan 的连接**——不经过 provider/tier，也**不做模型翻译**，客户端报什么模型名就用什么；
+- 因此 **`GET /v1/models` 返回这个 plan 自己可用的模型**（用该账号的凭据读取厂商目录，缓存 5 分钟；取不到时回退到配置的 `model_pricing`，绝不因此让客户端失败）。这样客户端拿到的清单与它实际能要的模型一致；
+- **优先级高于协议槽位**：`active_codex_upstream` 只对 Codex 协议请求生效，而 plan 对所有协议生效——否则 Claude Code（Anthropic 线）会静默继续用 `active_upstream`，plan 永远不生效；
+- 客户端协议与 plan 端点协议不同时自动走 bridge（Claude Code → GPT plan）。
+
+端点由**账号的 family + mode** 决定（不是配置里的 URL）：
+
+| 账号 | 端点 | 线协议 | 目录形状 |
+|---|---|---|---|
+| gpt × plan | `https://chatgpt.com/backend-api/codex` | codex | codex（`models[].slug`，带推理档位）|
+| gpt × api_key | `https://api.openai.com/v1` | codex | openai（`data[].id`）|
+| claude × 任意 | `https://api.anthropic.com` | anthropic | anthropic（`data[].id`）|
+
+会话管理（Inspector）工具栏的 **Plan:** 下拉即切换它；接口是 `POST /api/plan/activate`，body `{"name": "<account>"}`，`name` 为空即关闭。
+
 ### 两个「模型清单」是两回事
 
 | 面 | 端点 | 内容 | 数据源 |

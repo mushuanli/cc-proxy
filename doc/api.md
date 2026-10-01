@@ -168,6 +168,13 @@ request/response messages。
 | GET | `/api/health` | 健康检查（requests/hooks/mcp 数量） |
 | GET | `/` 及其他 | 回退到 `rust-embed` 静态文件服务（wwwroot/） |
 
+## Plan 连接
+
+`POST /api/plan/activate`，body `{"name": "<account 名>"}`；`name` 为空即关闭 plan 模式。
+
+plan 模式把 relay 的目标从「upstream + provider/tier」切换为「某个订阅账号的厂商端点」，
+所有协议都走它（必要时 bridge），且 `/v1/models` 改为返回该 plan 自己的模型目录。
+
 ## 模型清单
 
 ### `GET /v1/models`（代理口，面向客户端）

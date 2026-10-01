@@ -39,6 +39,7 @@
 #![deny(unsafe_code)]
 
 pub mod credential;
+pub mod endpoint;
 pub mod error;
 pub mod identity;
 pub mod jwt;
@@ -47,6 +48,7 @@ pub mod registry;
 pub mod transport;
 
 pub use credential::{Credentials, TokenStore};
+pub use endpoint::endpoint_for;
 pub use error::{PlanxError, Result};
 pub use identity::{Identity, CLAUDE_API_VERSION, CLAUDE_OAUTH_BETA, DEFAULT_CLAUDE_CLI_VERSION};
 pub use probe::{AccountQuota, ProbeUrls, QuotaWindow};

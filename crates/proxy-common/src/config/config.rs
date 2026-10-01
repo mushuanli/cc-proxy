@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::account::AccountConfig;
+use crate::protocol::WireProtocol;
 
 pub const AUTO_PROXY_UPSTREAM: &str = "__auto__";
 pub const FORBID_PROXY_UPSTREAM: &str = "__forbid__";
@@ -22,6 +23,7 @@ impl Default for AppConfig {
             proxy: ProxyConfig {
                 active_upstream: String::new(),
                 active_codex_upstream: String::new(),
+                active_plan: String::new(),
                 active_proxy_upstream: default_proxy_upstream(),
                 active_effort: String::new(),
                 http_proxy: None,
@@ -89,6 +91,64 @@ impl AppConfig {
     }
 }
 
+/// Where a request is sent: one of the relay's three target kinds.
+///
+/// `Upstream` and `Plan` are peers — both name *which upstream to talk to* — but
+/// they resolve differently: an upstream goes through provider/tier routing (and
+/// model translation), while a plan is a direct subscription connection where the
+/// client's own model name is used as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayTarget<'a> {
+    /// Transparent-proxy traffic, routed by the request URL or a named upstream.
+    Proxy(&'a str),
+    /// A subscription account's own endpoint; bypasses upstreams and tiers.
+    Plan(&'a str),
+    /// An ordinary upstream: provider + tier routing.
+    Upstream(&'a str),
+}
+
+impl<'a> RelayTarget<'a> {
+    /// The configured name this target points at.
+    pub fn name(&self) -> &'a str {
+        match self {
+            RelayTarget::Proxy(name) | RelayTarget::Plan(name) | RelayTarget::Upstream(name) => {
+                name
+            }
+        }
+    }
+
+    /// Whether this target bypasses provider/tier routing.
+    pub fn is_plan(&self) -> bool {
+        matches!(self, RelayTarget::Plan(_))
+    }
+}
+
+impl ProxyConfig {
+    /// Which target serves this request.
+    ///
+    /// Precedence, most specific first:
+    /// 1. transparent-proxy traffic → `active_proxy_upstream`;
+    /// 2. **a plan connection** (`active_plan` set) → that account's endpoint, for
+    ///    every client protocol. The plan is deliberately consulted *before* the
+    ///    protocol slots: `active_codex_upstream` only applies to Codex-protocol
+    ///    requests, so a plan reached from an Anthropic client (Claude Code, via
+    ///    the bridge) would otherwise be silently ignored;
+    /// 3. a Codex-protocol request → `active_codex_upstream` (when set);
+    /// 4. otherwise → `active_upstream`.
+    pub fn select_target(&self, is_transparent: bool, protocol: WireProtocol) -> RelayTarget<'_> {
+        if is_transparent && !self.active_proxy_upstream.is_empty() {
+            return RelayTarget::Proxy(&self.active_proxy_upstream);
+        }
+        if !self.active_plan.is_empty() {
+            return RelayTarget::Plan(&self.active_plan);
+        }
+        if protocol == WireProtocol::Codex && !self.active_codex_upstream.is_empty() {
+            return RelayTarget::Upstream(&self.active_codex_upstream);
+        }
+        RelayTarget::Upstream(&self.active_upstream)
+    }
+}
+
 /// Proxy behavior settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -97,6 +157,18 @@ pub struct ProxyConfig {
     /// Codex-specific upstream. Empty = fall back to `active_upstream`.
     #[serde(default)]
     pub active_codex_upstream: String,
+    /// Active **plan connection**, named after a `[[proxy.accounts]]` entry.
+    ///
+    /// A plan is a peer of an upstream — both answer "which upstream do we talk
+    /// to" — but it is defined by a *subscription account* rather than by
+    /// providers and tiers: every request goes to that account's vendor endpoint,
+    /// and no tier routing or model translation happens, so a client can ask for
+    /// exactly the models `GET /v1/models` advertises for the plan.
+    ///
+    /// Empty (the default) = no plan connection, and every existing configuration
+    /// behaves exactly as before.
+    #[serde(default)]
+    pub active_plan: String,
     #[serde(default = "default_proxy_upstream")]
     pub active_proxy_upstream: String,
     #[serde(default)]
@@ -270,6 +342,57 @@ mod tests {
     #[test]
     fn declared_models_is_empty_when_nothing_is_configured() {
         assert!(AppConfig::default().declared_models().is_empty());
+    }
+
+    fn target_config(plan: &str, codex: &str, upstream: &str) -> ProxyConfig {
+        let mut config = AppConfig::default();
+        config.proxy.active_plan = plan.into();
+        config.proxy.active_codex_upstream = codex.into();
+        config.proxy.active_upstream = upstream.into();
+        config.proxy.active_proxy_upstream = AUTO_PROXY_UPSTREAM.into();
+        config.proxy
+    }
+
+    #[test]
+    fn a_plan_connection_serves_every_client_protocol() {
+        use crate::protocol::WireProtocol;
+        // The point of a plan target: it is consulted before the protocol slots,
+        // so an Anthropic client (Claude Code, bridged) uses the plan too —
+        // `active_codex_upstream` alone would silently be ignored there.
+        let config = target_config("gpt-sub", "codex-pool", "claude-pool");
+
+        for protocol in [WireProtocol::Anthropic, WireProtocol::Codex] {
+            let target = config.select_target(false, protocol);
+            assert_eq!(target, RelayTarget::Plan("gpt-sub"), "{protocol:?}");
+            assert!(target.is_plan());
+            assert_eq!(target.name(), "gpt-sub");
+        }
+
+        // Transparent traffic is still the proxy slot's business.
+        let target = config.select_target(true, WireProtocol::Anthropic);
+        assert_eq!(target, RelayTarget::Proxy("__auto__"));
+
+        // No plan configured: exactly the previous behaviour.
+        let config = target_config("", "codex-pool", "claude-pool");
+        assert_eq!(
+            config.select_target(false, WireProtocol::Codex),
+            RelayTarget::Upstream("codex-pool")
+        );
+        assert_eq!(
+            config.select_target(false, WireProtocol::Anthropic),
+            RelayTarget::Upstream("claude-pool")
+        );
+    }
+
+    #[test]
+    fn a_plan_must_name_an_account_not_an_upstream() {
+        let mut config = AppConfig::default();
+        config.proxy.active_plan = "not-an-account".into();
+        let errors = config.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("active_plan")),
+            "{errors:?}"
+        );
     }
 
     #[test]

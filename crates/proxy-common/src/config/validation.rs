@@ -52,6 +52,14 @@ impl AppConfig {
                 errors.push(format!("{field} '{value}' not found in upstreams"));
             }
         }
+        // A plan is a connection, not an upstream: it must name a real account.
+        let plan = self.proxy.active_plan.trim();
+        if !plan.is_empty() && !self.proxy.accounts.iter().any(|a| a.name == plan) {
+            errors.push(format!(
+                "active_plan '{plan}' not found in accounts (it names a [[proxy.accounts]] entry, not an upstream)"
+            ));
+        }
+
         let proxy_upstream = self.proxy.active_proxy_upstream.as_str();
         if !proxy_upstream.is_empty()
             && proxy_upstream != AUTO_PROXY_UPSTREAM

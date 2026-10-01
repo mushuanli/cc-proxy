@@ -108,6 +108,34 @@ fn merge_pair(pairs: &mut Vec<(String, String)>, name: &str, value: &str) {
     }
 }
 
+/// Where a **plan connection** talks to.
+///
+/// A plan is a peer of an upstream — both answer "which upstream do we talk to" —
+/// but it is defined by a subscription account rather than by providers and tiers.
+/// The relay asks for this through [`PlanAuthProvider`], so it still never learns
+/// anything about OAuth: it only learns a base URL and a wire protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanEndpoint {
+    /// Base URL the protocol's path is appended to.
+    pub base_url: String,
+    /// Wire protocol used for inference against this endpoint.
+    pub protocol: crate::protocol::WireProtocol,
+    /// Catalog kind to read the plan's model list with.
+    pub models_kind: crate::config::ModelsKind,
+}
+
+/// One entry of a plan's model catalog, as the relay needs it.
+///
+/// Deliberately narrow: the client-facing `/v1/models` only needs an id and an
+/// optional display name. The richer admin view (reasoning levels, context
+/// windows) stays in `proxy-planx`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
 /// Boxed future alias so the trait stays object-safe without `async-trait`.
 pub type PlanAuthFuture<'a> = Pin<Box<dyn Future<Output = Option<UpstreamAuth>> + Send + 'a>>;
 
@@ -131,7 +159,23 @@ pub trait PlanAuthProvider: Send + Sync {
     ///
     /// Returns `None` when the account is unknown or the refresh failed.
     fn force_refresh<'a>(&'a self, name: &'a str) -> PlanAuthFuture<'a>;
+
+    /// Where this plan connection points, or `None` when the account is unknown.
+    ///
+    /// Cheap and synchronous, like [`PlanAuthProvider::resolve`].
+    fn endpoint(&self, name: &str) -> Option<PlanEndpoint>;
+
+    /// The plan's own model catalog, for the client-facing `GET /v1/models`.
+    ///
+    /// Implementations cache; `None` means "could not tell", in which case the
+    /// caller falls back to the configured model list rather than failing the
+    /// client's request.
+    fn models<'a>(&'a self, name: &'a str) -> PlanModelsFuture<'a>;
 }
+
+/// Boxed future for [`PlanAuthProvider::models`].
+pub type PlanModelsFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<Vec<CatalogModel>>> + Send + 'a>>;
 
 /// Injected handle. `None` = no subscription accounts configured.
 pub type PlanAuthHandle = Option<Arc<dyn PlanAuthProvider>>;
@@ -143,6 +187,12 @@ pub trait PlanAuthHandleExt {
 
     /// Force a refresh; resolves to `None` when unconfigured.
     fn refresh_account<'a>(&'a self, name: &'a str) -> PlanAuthFuture<'a>;
+
+    /// Where a plan connection points; `None` when unconfigured or unknown.
+    fn plan_endpoint(&self, name: &str) -> Option<PlanEndpoint>;
+
+    /// A plan's own catalog; resolves to `None` when unconfigured or unknown.
+    fn plan_models<'a>(&'a self, name: &'a str) -> PlanModelsFuture<'a>;
 }
 
 impl PlanAuthHandleExt for PlanAuthHandle {
@@ -153,6 +203,17 @@ impl PlanAuthHandleExt for PlanAuthHandle {
     fn refresh_account<'a>(&'a self, name: &'a str) -> PlanAuthFuture<'a> {
         match self {
             Some(provider) => provider.force_refresh(name),
+            None => Box::pin(async { None }),
+        }
+    }
+
+    fn plan_endpoint(&self, name: &str) -> Option<PlanEndpoint> {
+        self.as_ref().and_then(|provider| provider.endpoint(name))
+    }
+
+    fn plan_models<'a>(&'a self, name: &'a str) -> PlanModelsFuture<'a> {
+        match self {
+            Some(provider) => provider.models(name),
             None => Box::pin(async { None }),
         }
     }
@@ -184,6 +245,25 @@ mod tests {
                 self.has_account(name).then(|| UpstreamAuth::Headers {
                     set: vec![("authorization".into(), "Bearer at-2".into())],
                     append: vec![],
+                })
+            })
+        }
+
+        fn endpoint(&self, name: &str) -> Option<PlanEndpoint> {
+            self.has_account(name).then(|| PlanEndpoint {
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                protocol: crate::protocol::WireProtocol::Codex,
+                models_kind: crate::config::ModelsKind::Codex,
+            })
+        }
+
+        fn models<'a>(&'a self, name: &'a str) -> PlanModelsFuture<'a> {
+            Box::pin(async move {
+                self.has_account(name).then(|| {
+                    vec![CatalogModel {
+                        id: "gpt-6.1-sol".into(),
+                        display_name: Some("GPT-6.1-Sol".into()),
+                    }]
                 })
             })
         }

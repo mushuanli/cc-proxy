@@ -224,8 +224,9 @@ impl ApiProtocol {
         }
     }
 
-    /// Default upstream path for a protocol (used when bridging).
-    fn default_path(self) -> &'static str {
+    /// Default upstream path for a protocol (used when bridging, and to build a
+    /// plan connection's URL).
+    pub(crate) fn default_path(self) -> &'static str {
         match self {
             Self::Anthropic => "/v1/messages",
             Self::Codex => "/responses",

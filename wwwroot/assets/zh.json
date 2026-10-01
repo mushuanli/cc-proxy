@@ -65,7 +65,9 @@
     "delete": "删除",
     "select_all_title": "全选",
     "copy": "复制当前页",
-    "codex_upstream": "Codex:"
+    "codex_upstream": "Codex:",
+    "plan_connection": "Plan:",
+    "plan_off": "— 关闭（用 upstream/tier 路由）—"
   },
   "pagination": {
     "per_page_20": "20 条/页",

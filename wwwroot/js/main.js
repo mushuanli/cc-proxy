@@ -165,6 +165,7 @@ function handleMessage(msg) {
                 msg.payload.active_effort,
                 msg.payload.model_pricing,
                 msg.payload.http_proxy,
+                msg.payload.active_plan,
             );
             break;
     }
@@ -426,7 +427,7 @@ Object.assign(window, {
 
     fetch('/api/upstreams')
         .then(r => r.json())
-        .then(data => applyUpstreamState(data.active_upstream, data.active_codex_upstream, data.active_proxy_upstream, data.upstreams, data.providers, data.active_effort, data.model_pricing, data.http_proxy));
+        .then(data => applyUpstreamState(data.active_upstream, data.active_codex_upstream, data.active_proxy_upstream, data.upstreams, data.providers, data.active_effort, data.model_pricing, data.http_proxy, data.active_plan));
 
     // Sessions and requests are loaded by resyncState() in WS onopen
 

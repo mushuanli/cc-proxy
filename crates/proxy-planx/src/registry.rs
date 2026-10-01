@@ -25,7 +25,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use proxy_common::auth::{PlanAuthFuture, PlanAuthProvider, UpstreamAuth};
+use proxy_common::auth::{
+    CatalogModel, PlanAuthFuture, PlanAuthProvider, PlanEndpoint, PlanModelsFuture, UpstreamAuth,
+};
 use proxy_common::config::{AccountConfig, AccountFamily, AccountMode};
 
 use crate::credential::{expand_tilde, Credentials, TokenStore};
@@ -58,6 +60,11 @@ pub struct PlanAccount {
     /// Set when the local Codex CLI reports a version newer than the one we
     /// advertise — a stale version silently shrinks the upstream model manifest.
     stale_cli_version: Option<String>,
+    /// The vendor endpoint this account's plan connection talks to.
+    endpoint: PlanEndpoint,
+    /// Last catalogue read, with its timestamp: the client-facing `/v1/models`
+    /// must not hit the network on every poll.
+    catalog: RwLock<Option<(i64, Vec<CatalogModel>)>>,
 }
 
 impl std::fmt::Debug for PlanAccount {
@@ -89,6 +96,7 @@ impl PlanAccount {
         let store = Self::build_store(config, http.clone()).await?;
         let identity = Identity::from_profile_name(config.identity.as_deref(), config.family)
             .with_cli_version(config.cli_version.as_deref());
+        let endpoint = crate::endpoint::endpoint_for(config.family, config.mode);
         // Best-effort drift check against the local Codex installation.
         let stale_cli_version = config
             .auth_json_path()
@@ -123,6 +131,8 @@ impl PlanAccount {
             current: RwLock::new(None),
             quota: RwLock::new(None),
             stale_cli_version: None,
+            endpoint: crate::endpoint::endpoint_for(config.family, config.mode),
+            catalog: RwLock::new(None),
         };
         if !account.impersonate.is_off() && !crate::transport::IMPERSONATION_COMPILED {
             // Otherwise the operator sets a profile and silently gets the default
@@ -224,6 +234,79 @@ impl PlanAccount {
     /// A newer version the local Codex CLI reported, when we are behind it.
     pub fn stale_cli_version(&self) -> Option<&str> {
         self.stale_cli_version.as_deref()
+    }
+
+    /// The vendor endpoint this plan connection talks to.
+    pub fn endpoint(&self) -> &PlanEndpoint {
+        &self.endpoint
+    }
+
+    /// This account's model catalog, fetched at most once per [`CATALOG_TTL_SECS`].
+    ///
+    /// Returns the last known good list when a refresh fails, and `None` when
+    /// nothing was ever fetched — the caller then falls back to the configured
+    /// models rather than failing the client's request.
+    pub async fn catalog(&self) -> Option<Vec<CatalogModel>> {
+        let now = chrono::Utc::now().timestamp();
+        if let Ok(guard) = self.catalog.read() {
+            if let Some((fetched_at, models)) = guard.as_ref() {
+                if !models.is_empty() && now - fetched_at < CATALOG_TTL_SECS {
+                    return Some(models.clone());
+                }
+            }
+        }
+
+        let kind = self.endpoint.models_kind;
+        if !kind.fetches() {
+            return None;
+        }
+        let auth = self.current_auth()?;
+        let url = format!(
+            "{}{}",
+            self.endpoint.base_url.trim_end_matches('/'),
+            kind.default_path()
+        );
+        let fetched = probe::fetch_models(probe::ModelsRequest {
+            client: &self.http,
+            kind,
+            url: &url,
+            auth: &auth,
+            impersonation: self.impersonate,
+            client_version: &self.identity.client_version,
+        })
+        .await;
+
+        if let Some(error) = fetched.error {
+            tracing::warn!(
+                "[planx] account '{}' catalog fetch failed: {error}",
+                self.name
+            );
+            // Fall back to whatever we already have, even if it is stale.
+            return self
+                .catalog
+                .read()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|(_, models)| models.clone()));
+        }
+
+        let models: Vec<CatalogModel> = fetched
+            .models
+            .into_iter()
+            .map(|model| CatalogModel {
+                id: model.id,
+                display_name: model.display_name,
+            })
+            .collect();
+        if let Ok(mut guard) = self.catalog.write() {
+            *guard = Some((now, models.clone()));
+        }
+        tracing::info!(
+            "[planx] account '{}' catalog: {} model(s) from {}",
+            self.name,
+            models.len(),
+            fetched.url
+        );
+        Some(models)
     }
 
     pub fn store(&self) -> Option<&TokenStore> {
@@ -417,6 +500,9 @@ impl PlanAccount {
         quota
     }
 }
+
+/// How long a plan's model catalog is reused before being read again.
+const CATALOG_TTL_SECS: i64 = 300;
 
 /// Trimmed non-empty value.
 fn filled(value: &Option<String>) -> Option<&str> {
@@ -635,6 +721,14 @@ impl PlanAuthProvider for PlanxRegistry {
         self.account(name)?.current_auth()
     }
 
+    fn endpoint(&self, name: &str) -> Option<PlanEndpoint> {
+        Some(self.account(name)?.endpoint().clone())
+    }
+
+    fn models<'a>(&'a self, name: &'a str) -> PlanModelsFuture<'a> {
+        Box::pin(async move { self.account(name)?.catalog().await })
+    }
+
     fn force_refresh<'a>(&'a self, name: &'a str) -> PlanAuthFuture<'a> {
         Box::pin(async move {
             let account = self.account(name)?;
@@ -728,6 +822,8 @@ mod tests {
             current: RwLock::new(None),
             quota: RwLock::new(None),
             stale_cli_version: None,
+            endpoint: crate::endpoint::endpoint_for(family, AccountMode::Plan),
+            catalog: RwLock::new(None),
         }
     }
 
@@ -752,6 +848,8 @@ mod tests {
             current: RwLock::new(None),
             quota: RwLock::new(None),
             stale_cli_version: None,
+            endpoint: crate::endpoint::endpoint_for(family, AccountMode::ApiKey),
+            catalog: RwLock::new(None),
         };
         account.republish();
         account
@@ -998,6 +1096,8 @@ mod tests {
             current: RwLock::new(None),
             quota: RwLock::new(None),
             stale_cli_version: None,
+            endpoint: crate::endpoint::endpoint_for(AccountFamily::Gpt, AccountMode::Plan),
+            catalog: RwLock::new(None),
         };
         // `refresh_now` is the path the relay's 401 retry takes.
         let error = account.refresh_now().await.unwrap_err().to_string();

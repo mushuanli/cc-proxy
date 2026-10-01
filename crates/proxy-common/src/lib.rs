@@ -10,7 +10,10 @@ pub mod response;
 pub use config::*;
 
 // Re-export the upstream-auth seam
-pub use auth::{PlanAuthFuture, PlanAuthHandle, PlanAuthHandleExt, PlanAuthProvider, UpstreamAuth};
+pub use auth::{
+    CatalogModel, PlanAuthFuture, PlanAuthHandle, PlanAuthHandleExt, PlanAuthProvider,
+    PlanEndpoint, PlanModelsFuture, UpstreamAuth,
+};
 
 // Re-export the cross-protocol translation seam
 pub use protocol::{
