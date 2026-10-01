@@ -1608,6 +1608,58 @@ mod tests {
 
     #[test]
     #[test]
+    fn the_chatgpt_backend_body_gets_what_it_demands() {
+        // The exact shape an OpenAI-compatible Responses client sends: a bare
+        // string `input`, which the official API accepts and this backend does not
+        // ("Input must be a list"), plus `instructions` and `tools`.
+        let mut body = serde_json::json!({
+            "model": "gpt-6.1-sol",
+            "input": "tell 10 word story",
+            "instructions": "You are a helpful assistant.",
+            "stream": true,
+            "tool_choice": "auto",
+            "tools": [{ "type": "function", "name": "read_file",
+                        "parameters": { "type": "object" } }],
+        });
+        normalize_codex_backend_body(&mut body);
+
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(
+            body["input"],
+            serde_json::json!([{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "tell 10 word story" }],
+            }]),
+            "a string input must become the one-item list this backend accepts"
+        );
+        // Untouched fields stay untouched.
+        assert_eq!(body["instructions"], "You are a helpful assistant.");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn an_existing_list_input_and_stream_flag_are_left_alone() {
+        let mut body = serde_json::json!({
+            "model": "gpt-6.1-sol",
+            "input": [{ "role": "user", "content": "hi" }],
+            "include": ["custom"],
+        });
+        normalize_codex_backend_body(&mut body);
+        assert_eq!(body["input"][0]["role"], "user", "a list keeps its shape");
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["custom"]),
+            "an explicit include wins"
+        );
+    }
+
+    #[test]
     fn the_models_shape_follows_the_credential_style() {
         let mut anthropic = HeaderMap::new();
         anthropic.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
