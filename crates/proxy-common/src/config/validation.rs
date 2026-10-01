@@ -1,5 +1,5 @@
 use crate::config::{
-    AccountConfig, AccountFamily, AppConfig, IdentityProfile, Impersonation, Provider,
+    AccountConfig, AccountFamily, AppConfig, IdentityProfile, Impersonation, ModelsKind, Provider,
     AUTO_PROXY_UPSTREAM, FORBID_PROXY_UPSTREAM,
 };
 use crate::protocol::WireProtocol;
@@ -265,6 +265,41 @@ impl AppConfig {
                 errors.push(format!("provider '{label}' has an empty account"));
             }
             self.validate_provider_credentials(provider, label, errors);
+            self.validate_provider_catalog(provider, label, errors);
+        }
+    }
+
+    /// Catalog overrides: a known kind name, and an absolute http(s) URL.
+    fn validate_provider_catalog(
+        &self,
+        provider: &Provider,
+        label: &str,
+        errors: &mut Vec<String>,
+    ) {
+        if let Some(raw) = provider
+            .models_kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty())
+        {
+            if ModelsKind::parse(raw).is_none() {
+                errors.push(format!(
+                    "provider '{label}': unknown models_kind '{raw}' (expected one of {})",
+                    ModelsKind::accepted_names()
+                ));
+            }
+        }
+        if let Some(raw) = provider
+            .models_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            if !raw.starts_with("http://") && !raw.starts_with("https://") {
+                errors.push(format!(
+                    "provider '{label}': models_url '{raw}' must be an absolute http(s) URL"
+                ));
+            }
         }
     }
 
@@ -437,6 +472,8 @@ mod tests {
             codex_url: None,
             protocols: vec![],
             account: None,
+            models_url: None,
+            models_kind: None,
         });
         config.proxy.providers.push(crate::provider::Provider {
             name: "test".into(),
@@ -446,6 +483,8 @@ mod tests {
             codex_url: None,
             protocols: vec![],
             account: None,
+            models_url: None,
+            models_kind: None,
         });
         let errors = config.validate();
         assert!(!errors.is_empty());
@@ -476,6 +515,8 @@ mod tests {
             proxy: None,
             protocols: vec!["codex".into()],
             account: Some(account.into()),
+            models_url: None,
+            models_kind: None,
         }
     }
 
@@ -640,6 +681,8 @@ mod tests {
             protocols: vec!["grpc".into()],
             codex_url: None,
             account: None,
+            models_url: None,
+            models_kind: None,
         });
         let errors = config.validate();
         assert!(
@@ -814,6 +857,8 @@ mod tests {
             protocols: vec![],
             codex_url: None,
             account: None,
+            models_url: None,
+            models_kind: None,
         });
         let errors = config.validate();
         assert!(

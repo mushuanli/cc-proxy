@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::account::AccountFamily;
+use super::models::ModelsKind;
 use crate::protocol::WireProtocol;
 
 /// A cloud provider endpoint.
@@ -31,6 +33,62 @@ pub struct Provider {
     /// api-key or plan mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Explicit catalog URL, when the upstream's model list does not live at the
+    /// kind's default path (self-hosted gateways usually differ).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_url: Option<String>,
+    /// How to read this provider's model catalog. `None` = infer (see
+    /// [`Provider::catalog_kind`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_kind: Option<String>,
+}
+
+impl Provider {
+    /// How to read this provider's catalog.
+    ///
+    /// Inference order, most specific first:
+    /// 1. an explicit `models_kind`;
+    /// 2. a Claude account, which means an Anthropic-shaped endpoint;
+    /// 3. a `chatgpt.com` base, whose manifest is the Codex one;
+    /// 4. everything else is OpenAI-shaped, by far the most common.
+    ///
+    /// Protocol is deliberately *not* used: gateways routinely serve an
+    /// OpenAI-shaped catalog while relaying Anthropic requests.
+    pub fn catalog_kind(&self, account_family: Option<AccountFamily>) -> ModelsKind {
+        if let Some(kind) = self.models_kind.as_deref().and_then(ModelsKind::parse) {
+            return kind;
+        }
+        if account_family == Some(AccountFamily::Claude) {
+            return ModelsKind::Anthropic;
+        }
+        if self.url.contains("chatgpt.com") {
+            return ModelsKind::Codex;
+        }
+        ModelsKind::OpenAi
+    }
+
+    /// Absolute catalog URL for this provider.
+    ///
+    /// An explicit `models_url` wins; otherwise the kind's path is appended to
+    /// the same base the relay uses.
+    pub fn catalog_url(&self, account_family: Option<AccountFamily>) -> String {
+        if let Some(url) = self
+            .models_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            return url.to_string();
+        }
+        let kind = self.catalog_kind(account_family);
+        let base = self
+            .codex_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or(&self.url)
+            .trim_end_matches('/');
+        format!("{base}{}", kind.default_path())
+    }
 }
 
 impl Provider {
@@ -76,6 +134,8 @@ mod tests {
             protocols: protocols.iter().map(|p| p.to_string()).collect(),
             codex_url: None,
             account: None,
+            models_url: None,
+            models_kind: None,
         }
     }
 

@@ -238,7 +238,22 @@
     "advanced": "高级选项",
     "protocols": "协议",
     "protocols_hint": "留空 = 服务全部协议。选择账号时会自动勾上对应的那一个。",
-    "outbound_proxy": "出站网络代理"
+    "outbound_proxy": "出站网络代理",
+    "catalog_btn": "清单",
+    "catalog_btn_hint": "拉取该上游自己的模型清单（管理视角，不等于客户端 /v1/models 返回的路由表）",
+    "catalog_title": "上游模型清单：{name}",
+    "catalog_loading": "拉取中…",
+    "catalog_meta": "类型 {kind} · 共 {n} 个 · {url}",
+    "catalog_col_id": "模型 ID",
+    "catalog_col_display": "显示名",
+    "catalog_col_levels": "推理档位",
+    "catalog_col_ctx": "上下文",
+    "catalog_hidden": "上游隐藏",
+    "catalog_empty": "上游没返回任何模型",
+    "catalog_manual": "该 provider 的 models_kind = manual：不抓取上游，客户端能用的是你配置的 {n} 个模型",
+    "catalog_only_upstream": "上游有、但你没配置（不会出现在客户端列表里）：{list}",
+    "catalog_only_local": "你配置了、但上游这次没列出（可能是版本或网关差异）：{list}",
+    "close": "关闭"
   },
   "summary": {
     "title": "概要",

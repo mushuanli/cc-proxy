@@ -270,6 +270,63 @@ pub fn plan_bridge(
         })
 }
 
+/// Which family's `/v1/models` shape the caller expects.
+///
+/// Both families use the same path, so headers are the only signal: Claude
+/// clients send `anthropic-version` (and `x-api-key`), Codex clients send
+/// `Authorization: Bearer` alongside `version`/`originator`.
+pub fn detect_models_client(headers: &HeaderMap) -> ApiProtocol {
+    let has = |name: &str| headers.contains_key(name);
+    if has("anthropic-version") || (has("x-api-key") && !has("authorization")) {
+        ApiProtocol::Anthropic
+    } else {
+        ApiProtocol::Codex
+    }
+}
+
+/// Model creation time is not tracked by cc-proxy; the field is still emitted
+/// because both SDK families deserialize it.
+const MODEL_CREATED_UNIX: i64 = 0;
+const MODEL_CREATED_RFC3339: &str = "1970-01-01T00:00:00Z";
+
+/// `GET /v1/models` in the OpenAI shape.
+pub fn openai_models_body(ids: &[String]) -> serde_json::Value {
+    let data: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "object": "model",
+                "created": MODEL_CREATED_UNIX,
+                "owned_by": "cc-proxy",
+            })
+        })
+        .collect();
+    serde_json::json!({ "object": "list", "data": data })
+}
+
+/// `GET /v1/models` in the Anthropic shape.
+pub fn anthropic_models_body(ids: &[String]) -> serde_json::Value {
+    let data: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "type": "model",
+                "id": id,
+                "display_name": id,
+                "created_at": MODEL_CREATED_RFC3339,
+            })
+        })
+        .collect();
+    // One unpaginated page; `before_id`/`after_id`/`limit` are ignored.
+    serde_json::json!({
+        "data": data,
+        "has_more": false,
+        "first_id": ids.first(),
+        "last_id": ids.last(),
+    })
+}
+
 pub fn detect_protocol(path: &str, body: &serde_json::Value) -> ApiProtocol {
     if path.contains("/responses")
         || (body.get("input").is_some() && body.get("messages").is_none())
@@ -1462,6 +1519,8 @@ mod tests {
             proxy: None,
             protocols: protocols.iter().map(|p| p.to_string()).collect(),
             account: None,
+            models_url: None,
+            models_kind: None,
         }
     }
 
@@ -1513,6 +1572,58 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn the_models_shape_follows_the_credential_style() {
+        let mut anthropic = HeaderMap::new();
+        anthropic.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        assert_eq!(detect_models_client(&anthropic), ApiProtocol::Anthropic);
+
+        // Claude Code sends both; the pair still reads as Anthropic.
+        let mut both = anthropic.clone();
+        both.insert("x-api-key", HeaderValue::from_static("sk-ant-x"));
+        assert_eq!(detect_models_client(&both), ApiProtocol::Anthropic);
+
+        // The Codex CLI sends `Authorization: Bearer`.
+        let mut codex = HeaderMap::new();
+        codex.insert("authorization", HeaderValue::from_static("Bearer at"));
+        codex.insert("originator", HeaderValue::from_static("codex-tui"));
+        assert_eq!(detect_models_client(&codex), ApiProtocol::Codex);
+
+        // An api-key Style Claude call without the version header is still Claude.
+        let mut key_only = HeaderMap::new();
+        key_only.insert("x-api-key", HeaderValue::from_static("sk-ant-x"));
+        assert_eq!(detect_models_client(&key_only), ApiProtocol::Anthropic);
+    }
+
+    #[test]
+    fn both_model_list_shapes_are_well_formed() {
+        let ids = vec!["claude-opus-4-1".to_string(), "gpt-6-sol".to_string()];
+
+        let openai = openai_models_body(&ids);
+        assert_eq!(openai["object"], "list");
+        assert_eq!(openai["data"][0]["id"], "claude-opus-4-1");
+        assert_eq!(openai["data"][0]["object"], "model");
+        assert!(
+            openai["data"][0]["created"].is_i64(),
+            "SDKs deserialize this"
+        );
+
+        let anthropic = anthropic_models_body(&ids);
+        assert_eq!(anthropic["data"][0]["type"], "model");
+        assert_eq!(anthropic["data"][0]["id"], "claude-opus-4-1");
+        assert_eq!(anthropic["data"][0]["display_name"], "claude-opus-4-1");
+        assert!(anthropic["data"][0]["created_at"].is_string());
+        assert_eq!(anthropic["has_more"], false);
+        assert_eq!(anthropic["first_id"], "claude-opus-4-1");
+        assert_eq!(anthropic["last_id"], "gpt-6-sol");
+
+        // An empty configuration is a valid, empty list — not an error.
+        assert_eq!(openai_models_body(&[])["data"].as_array().unwrap().len(), 0);
+        let empty = anthropic_models_body(&[]);
+        assert!(empty["first_id"].is_null());
+        assert_eq!(empty["has_more"], false);
+    }
+
     fn api_protocol_wire_conversion_round_trips() {
         for protocol in [ApiProtocol::Anthropic, ApiProtocol::Codex] {
             assert_eq!(protocol.to_wire().as_str(), protocol.request_type());

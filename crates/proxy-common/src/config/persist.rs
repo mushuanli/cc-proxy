@@ -159,6 +159,12 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         if let Some(ref account) = p.account {
             pt.insert("account", toml_edit::value(account.as_str()));
         }
+        if let Some(ref models_url) = p.models_url {
+            pt.insert("models_url", toml_edit::value(models_url.as_str()));
+        }
+        if let Some(ref models_kind) = p.models_kind {
+            pt.insert("models_kind", toml_edit::value(models_kind.as_str()));
+        }
         providers_arr.push(pt);
     }
     tbl.insert("providers", toml_edit::Item::ArrayOfTables(providers_arr));
@@ -312,6 +318,8 @@ mod tests {
             protocols: vec!["codex".into()],
             codex_url: Some("https://api.example.com/v1".into()),
             account: None,
+            models_url: None,
+            models_kind: None,
         });
         config
     }
@@ -373,6 +381,8 @@ mod tests {
             protocols: vec![],
             codex_url: None,
             account: None,
+            models_url: None,
+            models_kind: None,
         });
         persist_config(&path, &config).await.unwrap();
 
@@ -425,6 +435,8 @@ mod tests {
             protocols: vec!["codex".into()],
             codex_url: None,
             account: Some("gpt-plan".into()),
+            models_url: None,
+            models_kind: None,
         });
         persist_config(&path, &config).await.unwrap();
 

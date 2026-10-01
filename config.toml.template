@@ -115,6 +115,15 @@ retry_count               = 3
 name  = "anthropic"
 url   = "https://api.anthropic.com"
 token = "sk-ant-..."
+# 模型目录（面板模型矩阵里 provider 列头的「清单」按钮抓的就是它）。
+# 留空 = 按接入类型推断（先看 models_kind，再看账号家族，再看 URL 是否 chatgpt.com）：
+#   openai    /v1/models      data[].id       OpenAI 兼容网关，最常见
+#   anthropic /v1/models      data[].id       需 anthropic-version（账号身份自带；纯 token 时自动补）
+#   codex     /models         models[].slug   ChatGPT 后端，按 client_version 门控
+#   gemini    /v1beta/models  models[].name   名称归一化；注意 cc-proxy 不能转发到 Gemini，仅用于看目录
+#   manual    不抓取：客户端 /v1/models 返回的就是你配置的模型
+# models_kind = "openai"
+# models_url  = "https://gateway.internal/v1/models"   # 自建网关直接覆盖地址
 # Per-provider proxy for relay → this provider (overrides global http_proxy).
 # Unset = inherit global http_proxy. "" = direct. URL = use this proxy.
 # proxy = "http://proxy:8080"

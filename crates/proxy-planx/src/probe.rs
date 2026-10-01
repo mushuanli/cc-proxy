@@ -18,7 +18,7 @@
 //!   without a network or an HTTP mock.
 
 use proxy_common::auth::UpstreamAuth;
-use proxy_common::config::AccountFamily;
+use proxy_common::config::{AccountFamily, ModelsKind};
 use serde::{Deserialize, Deserializer};
 
 use crate::error::{truncate, PlanxError, Result};
@@ -441,6 +441,235 @@ pub struct ProbeRequest<'a> {
     pub impersonation: Impersonation,
 }
 
+/// One model as the upstream advertises it, normalized across catalog kinds.
+///
+/// Only the fields the dashboard needs are modelled; anything else in the payload
+/// is deliberately dropped, so an upstream schema addition cannot break a fetch.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UpstreamModel {
+    pub id: String,
+    pub display_name: Option<String>,
+    /// Values of `supported_reasoning_levels[].effort` (Codex catalogs only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_levels: Vec<String>,
+    /// `default_reasoning_level` (Codex catalogs only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// The upstream hides it from its own picker (`visibility: "hide"`), which is
+    /// how internal models like `codex-auto-review` are marked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+}
+
+/// A catalog listing, plus how the fetch went.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AccountModels {
+    /// Catalog kind that was read (see [`proxy_common::ModelsKind`]).
+    pub kind: ModelsKind,
+    /// The URL actually called (includes a Codex `client_version` when relevant).
+    pub url: String,
+    pub fetched_at: i64,
+    pub models: Vec<UpstreamModel>,
+    /// Populated instead of failing hard when the fetch did not succeed.
+    pub error: Option<String>,
+}
+
+impl AccountModels {
+    fn failed(kind: ModelsKind, url: &str, error: impl Into<String>) -> Self {
+        Self {
+            kind,
+            url: url.to_string(),
+            fetched_at: chrono::Utc::now().timestamp(),
+            models: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// A catalog request.
+pub struct ModelsRequest<'a> {
+    pub client: &'a engine::Client,
+    pub kind: ModelsKind,
+    /// Absolute catalog URL, already resolved from the provider.
+    pub url: &'a str,
+    pub auth: &'a UpstreamAuth,
+    pub impersonation: Impersonation,
+    /// Advertised CLI version: the Codex manifest is gated on it, so it travels in
+    /// the query string rather than a header.
+    pub client_version: &'a str,
+}
+
+/// `anthropic-version` for catalogs read with a plain api key, where the account's
+/// identity headers (which carry it) are not in play.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Fetch one upstream's model catalog.
+///
+/// Returns `AccountModels::failed` rather than an error, matching [`probe`], so a
+/// single unreachable upstream cannot break a listing.
+pub async fn fetch_models(request: ModelsRequest<'_>) -> AccountModels {
+    // The advertised version is validated to be URL-safe ([A-Za-z0-9._-]) when an
+    // account loads, so it needs no escaping here.
+    let url = match request.kind {
+        ModelsKind::Codex => format!(
+            "{}{}client_version={}",
+            request.url,
+            if request.url.contains('?') { '&' } else { '?' },
+            request.client_version
+        ),
+        _ => request.url.to_string(),
+    };
+
+    // A plan account's identity already carries `anthropic-version`; a bare api
+    // key does not, and the endpoint wants it.
+    let needs_version = request.kind == ModelsKind::Anthropic
+        && !request
+            .auth
+            .header_pairs()
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("anthropic-version"));
+    let extra: &[(&str, &str)] = if needs_version {
+        &[("anthropic-version", ANTHROPIC_VERSION)]
+    } else {
+        &[]
+    };
+
+    let response = match send_get(
+        request.client,
+        &url,
+        request.auth,
+        request.impersonation,
+        extra,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => return AccountModels::failed(request.kind, &url, error.to_string()),
+    };
+    let status = response.status();
+    let body = response.bytes().await.unwrap_or_default();
+    if !status.is_success() {
+        return AccountModels::failed(
+            request.kind,
+            &url,
+            format!(
+                "{url} returned {status}: {}",
+                truncate(&String::from_utf8_lossy(&body), 200)
+            ),
+        );
+    }
+
+    let models = parse_models(request.kind, &body);
+    AccountModels {
+        kind: request.kind,
+        url,
+        fetched_at: chrono::Utc::now().timestamp(),
+        models,
+        error: None,
+    }
+}
+
+/// Parse a catalog payload. Split from I/O so every shape is testable offline.
+pub fn parse_models(kind: ModelsKind, body: &[u8]) -> Vec<UpstreamModel> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(items) = value
+        .get(match kind {
+            ModelsKind::Codex | ModelsKind::Gemini => "models",
+            ModelsKind::OpenAi | ModelsKind::Anthropic => "data",
+            ModelsKind::Manual => return Vec::new(),
+        })
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| match kind {
+            ModelsKind::Codex => codex_model(item),
+            ModelsKind::Gemini => gemini_model(item),
+            ModelsKind::OpenAi | ModelsKind::Anthropic => plain_model(item, "id"),
+            ModelsKind::Manual => None,
+        })
+        .collect()
+}
+
+/// OpenAI-shaped and Anthropic-shaped catalogs share the `data[].id` shape.
+fn plain_model(item: &serde_json::Value, id_key: &str) -> Option<UpstreamModel> {
+    let id = item.get(id_key).and_then(serde_json::Value::as_str)?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(UpstreamModel {
+        id: id.to_string(),
+        display_name: string_field(item, "display_name"),
+        // Reasoning effort is a client-side concept on these families.
+        reasoning_levels: Vec::new(),
+        default_reasoning_level: None,
+        context_window: None,
+        hidden: false,
+    })
+}
+
+fn codex_model(item: &serde_json::Value) -> Option<UpstreamModel> {
+    let id = item.get("slug").and_then(serde_json::Value::as_str)?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(UpstreamModel {
+        id: id.to_string(),
+        display_name: string_field(item, "display_name"),
+        reasoning_levels: item
+            .get("supported_reasoning_levels")
+            .and_then(serde_json::Value::as_array)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(|level| level.get("effort").and_then(serde_json::Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        default_reasoning_level: string_field(item, "default_reasoning_level"),
+        context_window: item
+            .get("context_window")
+            .and_then(serde_json::Value::as_u64),
+        hidden: item.get("visibility").and_then(serde_json::Value::as_str) == Some("hide"),
+    })
+}
+
+/// Gemini names models `models/gemini-2.0-flash`; the resource prefix is dropped
+/// so the id can be used directly as a model name.
+fn gemini_model(item: &serde_json::Value) -> Option<UpstreamModel> {
+    let raw = item.get("name").and_then(serde_json::Value::as_str)?.trim();
+    let id = raw.strip_prefix("models/").unwrap_or(raw).trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(UpstreamModel {
+        id: id.to_string(),
+        display_name: string_field(item, "displayName"),
+        reasoning_levels: Vec::new(),
+        default_reasoning_level: None,
+        context_window: item
+            .get("inputTokenLimit")
+            .and_then(serde_json::Value::as_u64),
+        hidden: false,
+    })
+}
+
+fn string_field(item: &serde_json::Value, key: &str) -> Option<String> {
+    item.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 /// Probe one account's quota.
 ///
 /// Returns `AccountQuota::failed` rather than an error so a single unreachable
@@ -462,11 +691,31 @@ pub async fn probe(request: ProbeRequest<'_>) -> AccountQuota {
 }
 
 async fn send(request: &ProbeRequest<'_>) -> Result<engine::Response> {
-    let mut builder = request
-        .client
-        .get(request.url)
+    send_get(
+        request.client,
+        request.url,
+        request.auth,
+        request.impersonation,
+        &[],
+    )
+    .await
+}
+
+/// One authenticated GET through the maintenance client.
+///
+/// Shared by both probe kinds so the credential composition and the optional
+/// emulation profile can never drift between them.
+async fn send_get(
+    client: &engine::Client,
+    url: &str,
+    auth: &UpstreamAuth,
+    impersonation: Impersonation,
+    extra: &[(&str, &str)],
+) -> Result<engine::Response> {
+    let mut builder = client
+        .get(url)
         .header(engine::header::ACCEPT, "application/json");
-    for (name, value) in request.auth.header_pairs() {
+    for (name, value) in auth.header_pairs() {
         match (
             engine::header::HeaderName::from_bytes(name.as_bytes()),
             engine::header::HeaderValue::from_str(&value),
@@ -475,9 +724,16 @@ async fn send(request: &ProbeRequest<'_>) -> Result<engine::Response> {
             _ => tracing::warn!("[planx] dropping invalid probe header '{name}'"),
         }
     }
-    Ok(apply_emulation(builder, request.impersonation)
-        .send()
-        .await?)
+    for (name, value) in extra {
+        match (
+            engine::header::HeaderName::from_bytes(name.as_bytes()),
+            engine::header::HeaderValue::from_str(value),
+        ) {
+            (Ok(name), Ok(value)) => builder = builder.header(name, value),
+            _ => tracing::warn!("[planx] dropping invalid extra header '{name}'"),
+        }
+    }
+    Ok(apply_emulation(builder, impersonation).send().await?)
 }
 
 fn failure_message(family: AccountFamily, url: &str, status: u16, body: &[u8]) -> String {
@@ -772,5 +1028,127 @@ mod tests {
         .await;
         assert!(quota.error.is_some());
         assert!(quota.windows.is_empty());
+    }
+    // ── model manifests ──
+    //
+    // The fixtures mirror real payloads: the GPT one is trimmed from a live
+    // `…/backend-api/codex/models?client_version=0.159.2` response, the Claude one
+    // from the documented `/v1/models` shape.
+
+    const CODEX_FIXTURE: &str = r#"{"models":[
+        {"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol",
+         "default_reasoning_level":"low","visibility":"list","context_window":272000,
+         "supported_reasoning_levels":[
+            {"effort":"low","description":"Fast responses"},
+            {"effort":"medium","description":"Balanced"},
+            {"effort":"ultra","description":"Maximum delegation"}]},
+        {"slug":"codex-auto-review","display_name":"Codex Auto Review",
+         "default_reasoning_level":"medium","visibility":"hide","context_window":272000,
+         "supported_reasoning_levels":[{"effort":"low","description":"x"}]},
+        {"slug":"  ","display_name":"blank is skipped"}
+    ]}"#;
+
+    const CLAUDE_FIXTURE: &str = r#"{"data":[
+        {"type":"model","id":"claude-opus-4-1","display_name":"Claude Opus 4.1",
+         "created_at":"2025-08-05T00:00:00Z"},
+        {"type":"model","id":"claude-sonnet-4-5","display_name":"Claude Sonnet 4.5",
+         "created_at":"2025-09-29T00:00:00Z"}],
+        "has_more":false,"first_id":"claude-opus-4-1","last_id":"claude-sonnet-4-5"}"#;
+
+    const GEMINI_FIXTURE: &str = r#"{"models":[
+        {"name":"models/gemini-2.0-flash","displayName":"Gemini 2.0 Flash",
+         "inputTokenLimit":1048576},
+        {"name":"models/gemini-2.5-pro","displayName":"Gemini 2.5 Pro",
+         "inputTokenLimit":2097152}],
+        "nextPageToken":"page2"}"#;
+
+    #[test]
+    fn codex_manifest_keeps_levels_visibility_and_context() {
+        let models = parse_models(ModelsKind::Codex, CODEX_FIXTURE.as_bytes());
+        assert_eq!(models.len(), 2, "the blank slug is dropped");
+
+        let first = &models[0];
+        assert_eq!(first.id, "gpt-6.1-sol");
+        assert_eq!(first.display_name.as_deref(), Some("GPT-6.1-Sol"));
+        assert_eq!(
+            first.reasoning_levels,
+            vec!["low", "medium", "ultra"],
+            "levels are kept in the upstream's order, including `ultra`"
+        );
+        assert_eq!(first.default_reasoning_level.as_deref(), Some("low"));
+        assert_eq!(first.context_window, Some(272_000));
+        assert!(!first.hidden);
+
+        let hidden = &models[1];
+        assert_eq!(hidden.id, "codex-auto-review");
+        assert!(
+            hidden.hidden,
+            "visibility: hide is how internal models are marked"
+        );
+    }
+
+    #[test]
+    fn anthropic_catalog_carries_no_reasoning_levels() {
+        let models = parse_models(ModelsKind::Anthropic, CLAUDE_FIXTURE.as_bytes());
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "claude-opus-4-1");
+        assert_eq!(models[0].display_name.as_deref(), Some("Claude Opus 4.1"));
+        // Effort is client-side on this family; nothing is invented here.
+        assert!(models[0].reasoning_levels.is_empty());
+        assert!(models[0].default_reasoning_level.is_none());
+        assert!(!models[0].hidden);
+    }
+
+    #[test]
+    fn a_surprising_manifest_degrades_to_an_empty_list() {
+        for body in ["", "not json", "{}", r#"{"models":{}}"#, r#"{"data":null}"#] {
+            for kind in ModelsKind::ALL {
+                assert!(
+                    parse_models(*kind, body.as_bytes()).is_empty(),
+                    "{kind:?}: {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openai_and_anthropic_share_the_data_id_shape() {
+        // `/v1/models` on both families: `data[].id`. The Codex and Gemini
+        // catalogs live under `models[]` instead.
+        let body = br#"{"object":"list","data":[{"id":"gpt-6-sol","object":"model"},
+                                                {"id":"claude-opus-4-1","type":"model"}]}"#;
+        for kind in [ModelsKind::OpenAi, ModelsKind::Anthropic] {
+            let models = parse_models(kind, body);
+            assert_eq!(models.len(), 2, "{kind:?}");
+            assert_eq!(models[0].id, "gpt-6-sol");
+            assert_eq!(models[1].id, "claude-opus-4-1");
+        }
+    }
+
+    #[test]
+    fn gemini_names_lose_their_resource_prefix() {
+        let models = parse_models(ModelsKind::Gemini, GEMINI_FIXTURE.as_bytes());
+        assert_eq!(models.len(), 2);
+        // `models/gemini-2.0-flash` -> usable as a model name.
+        assert_eq!(models[0].id, "gemini-2.0-flash");
+        assert_eq!(models[0].display_name.as_deref(), Some("Gemini 2.0 Flash"));
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[1].id, "gemini-2.5-pro");
+    }
+
+    #[test]
+    fn a_manual_catalog_fetches_nothing() {
+        // `manual` means the gateway decides / models are declared by hand.
+        let models = parse_models(ModelsKind::Manual, CODEX_FIXTURE.as_bytes());
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn failed_model_fetch_reports_instead_of_panicking() {
+        let failed = AccountModels::failed(ModelsKind::Codex, "https://x/models", "boom");
+        assert_eq!(failed.error.as_deref(), Some("boom"));
+        assert!(failed.models.is_empty());
+        assert_eq!(failed.url, "https://x/models");
+        assert!(failed.fetched_at > 0);
     }
 }

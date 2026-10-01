@@ -145,6 +145,8 @@ mod tests {
             proxy: None,
             protocols: vec![],
             account: None,
+            models_url: None,
+            models_kind: None,
         });
 
         config.proxy.upstreams.push(UpstreamConfig {

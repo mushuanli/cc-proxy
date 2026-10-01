@@ -171,6 +171,18 @@ async fn proxy_handler(
         return handle_connect_tunnel(&mut request, uri).await;
     }
 
+    // `GET /v1/models` is answered locally for reverse-proxy requests.
+    //
+    // The upstream path differs per family and per protocol — the Codex manifest
+    // lives at `{codex_base}/models` with no `/v1`, and a plan account would
+    // otherwise have the client's path glued onto its responses endpoint — so the
+    // answer comes from the local configuration: the models a client can actually
+    // be routed to, not an upstream list that routing may rewrite. Forward-proxy
+    // requests (full URL) keep passing through untouched.
+    if method == Method::GET && !is_transparent && uri.path() == "/v1/models" {
+        return local_models_response(&relay, request.headers()).await;
+    }
+
     let headers = request.headers().clone();
     let body = match axum::body::to_bytes(request.into_body(), 32 * 1024 * 1024).await {
         Ok(body) => body,
@@ -187,6 +199,29 @@ async fn proxy_handler(
     } else {
         handle_reverse_proxy(relay, method, uri, headers, body).await
     }
+}
+
+/// Answer `GET /v1/models` from the local configuration.
+///
+/// Both families use this path with different response shapes, so the shape is
+/// picked from the credential style. Not recorded as a task: it is a metadata
+/// query that never reaches an upstream, and recording it would clutter the
+/// request list with entries that have no upstream response.
+async fn local_models_response(relay: &RelayHandler, headers: &HeaderMap) -> Response<Body> {
+    let models = relay.config.get().await.declared_models();
+    let body = match upstream::detect_models_client(headers) {
+        upstream::ApiProtocol::Anthropic => upstream::anthropic_models_body(&models),
+        upstream::ApiProtocol::Codex => upstream::openai_models_body(&models),
+    };
+    tracing::debug!(
+        "[models] answered {} model(s) from the local config",
+        models.len()
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 // ── CONNECT tunnel ──

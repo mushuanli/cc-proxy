@@ -458,3 +458,19 @@
     border-bottom: 1px solid var(--border);
 }
 .mx-adv .mx-pop-field-label:first-of-type { margin-top: 2px; }
+
+/* Provider catalog button (sits inside the provider column header) */
+.mx-cat-btn {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 5px;
+    border: 1px solid var(--border, #3a3a3a);
+    border-radius: 3px;
+    font-size: 0.62rem;
+    opacity: 0.65;
+    cursor: pointer;
+}
+.mx-cat-btn:hover { opacity: 1; }
+.prov-catalog-modal { max-width: 880px; width: 90vw; }
+.prov-catalog-scroll { max-height: 55vh; overflow: auto; }
+.mx-cat-id { font-family: var(--font-mono); }

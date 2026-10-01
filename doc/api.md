@@ -168,6 +168,47 @@ request/response messages。
 | GET | `/api/health` | 健康检查（requests/hooks/mcp 数量） |
 | GET | `/` 及其他 | 回退到 `rust-embed` 静态文件服务（wwwroot/） |
 
+## 模型清单
+
+### `GET /v1/models`（代理口，面向客户端）
+
+返回**你配置的路由表**，不联网，所以永远不会因为上游不可达而失败。
+
+两个家族共用这个路径，因此**按凭据风格分流响应结构**：带 `anthropic-version`（或只有 `x-api-key`）→ Anthropic 形态；
+否则（`Authorization: Bearer`）→ OpenAI 形态。
+
+```jsonc
+// OpenAI 形态
+{ "object": "list", "data": [ { "id": "gpt-6-sol", "object": "model", "created": 0, "owned_by": "cc-proxy" } ] }
+// Anthropic 形态
+{ "data": [ { "type": "model", "id": "gpt-6-sol", "display_name": "gpt-6-sol", "created_at": "1970-01-01T00:00:00Z" } ],
+  "has_more": false, "first_id": "gpt-6-sol", "last_id": "gpt-6-sol" }
+```
+
+要出现在这个清单里，就在 `model_pricing`（或 tier 规则）里声明它。`created`/`created_at` 是占位值：
+cc-proxy 不追踪模型创建时间，但两家 SDK 都会反序列化该字段。
+`client_version` 之类的查询参数会被忽略；该请求不进 tasks 列表（不产生上游响应，记进去只会是噪声）。
+
+### `POST /api/providers/:name/models`（管理口）
+
+抓取该 provider 自己的目录（面板里模型矩阵的 provider 列头「清单」按钮）。
+
+```jsonc
+{ "ok": true, "kind": "codex", "manual": false,
+  "url": "https://chatgpt.com/backend-api/codex/models?client_version=0.159.2",
+  "fetched_at": 1790777891,
+  "models": [ { "id": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol",
+                "reasoning_levels": ["low","medium","high","xhigh","max","ultra"],
+                "default_reasoning_level": "low", "context_window": 272000, "hidden": false } ],
+  "declared": ["gpt-6-sol"],
+  "only_upstream": ["gpt-6.1-sol"],   // 上游有、你没配置（客户端看不到）
+  "only_local": [],                    // 你配了、上游这次没列出
+  "error": null }
+```
+
+凭据：provider 绑定了账号就用账号的（plan 模式含身份头），否则用它的 `token`。
+`kind = manual` 时返回 `manual: true` 且不联网。
+
 ## WebSocket 消息
 
 路径：`/ws`，Tagged union JSON（`{type, payload}`）

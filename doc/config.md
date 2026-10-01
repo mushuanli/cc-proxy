@@ -37,6 +37,8 @@ Provider {
     protocols: Vec<String>,         // 该 Provider 服务的协议（"anthropic" / "codex"）；空 = 全部
     codex_url: Option<String>,      // codex 协议专用端点；空 = 复用 url
     account: Option<String>,        // 引用 [[proxy.accounts]] 的 name；与 token 互斥
+    models_url: Option<String>,     // 覆盖模型目录地址（自建网关常用）
+    models_kind: Option<String>,    // openai | anthropic | codex | gemini | manual；空 = 推断
 }
 ```
 
@@ -153,6 +155,28 @@ account   = "claude-sub"
 - 账号配置在**启动时**加载一次；面板改动需重启生效（P1 计划接配置变更事件）。
 - `impersonate` 需要 `cargo build -p proxy-server --features impersonate`
 - `cli_version` 只能填版本形态的字符串（字母数字与 `.` `-` `_`，≤32 字符）
+
+### 两个「模型清单」是两回事
+
+| 面 | 端点 | 内容 | 数据源 |
+|---|---|---|---|
+| **客户端** | `GET /v1/models`（代理口） | 客户端**能要**的模型 = 你声明的路由表 | `model_pricing[].id`，为空时回退 tier 规则里的 `model`；**离线可用** |
+| **管理** | `POST /api/providers/:name/models` | 上游**自己的**目录（含推理档位、上下文窗口） | 联网抓取该 provider 的目录端点，见下 |
+
+为什么分开：客户端发 `claude-opus-4-1` 可能被 bridge/tier 路由到别的上游模型，所以「能要什么」由**你的配置**决定；
+而上游目录是「它有什么」，两者不一致本身就是有用信号——面板会把差异标出来（`only_upstream` / `only_local`）。
+
+目录按**接入类型**读取（`models_kind`，空则由「账号家族 / URL 是否 chatgpt.com / 其余」推断为 anthropic / codex / openai）：
+
+| kind | 路径 | 载荷 | 说明 |
+|---|---|---|---|
+| `openai` | `/v1/models` | `data[].id` | OpenAI 兼容网关，Bearer |
+| `anthropic` | `/v1/models` | `data[].id` | 需 `anthropic-version`（账号身份自带；纯 token 时自动补），分页 |
+| `codex` | `/models` | `models[].slug` | ChatGPT 后端；按 `client_version` 门控，且带 `supported_reasoning_levels` |
+| `gemini` | `/v1beta/models` | `models[].name` | 名称归一化（`models/x` → `x`）。**注意：cc-proxy 的线协议只有 anthropic/codex，不能转发到 Gemini**，此项只用于看目录 |
+| `manual` | — | — | 由网关决定或手动声明：**不抓取**，客户端列表就是你的配置 |
+
+`models_url` 会完全覆盖推导出的地址（自建网关/私有部署用）；留空即按上表推导。
 
 ### 关于 `cli_version` 与身份画像
 

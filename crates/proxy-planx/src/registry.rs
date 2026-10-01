@@ -770,6 +770,7 @@ mod tests {
         ProbeUrls {
             gpt: "http://127.0.0.1:1/usage".to_string(),
             claude: "http://127.0.0.1:1/usage".to_string(),
+            ..Default::default()
         }
     }
 

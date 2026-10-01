@@ -298,6 +298,18 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
                 "protocols": p.protocols,
                 "codex_url": p.codex_url,
                 "account": p.account,
+                "models_url": p.models_url,
+                "models_kind": p.models_kind,
+                // What would be used if neither override is set, so the UI can
+                // show the effective choice instead of an empty field.
+                "catalog_kind": p
+                    .catalog_kind(
+                        p.account
+                            .as_deref()
+                            .and_then(|name| config.proxy.accounts.iter().find(|a| a.name == name))
+                            .map(|a| a.family),
+                    )
+                    .as_str(),
             })
         })
         .collect();
@@ -341,6 +353,19 @@ pub async fn add_provider(
         .get("account")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // Catalog overrides: absent = keep the inferred kind and derived URL.
+    let models_url = body
+        .get("models_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from);
+    let models_kind = body
+        .get("models_kind")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from);
     let log_name = name.clone();
     let result = state
         .config
@@ -353,6 +378,8 @@ pub async fn add_provider(
                 proxy: provider_proxy,
                 protocols,
                 account,
+                models_url,
+                models_kind,
             });
             Ok(())
         })
@@ -416,6 +443,24 @@ pub async fn update_provider(
                     p.account = body
                         .get("account")
                         .and_then(|v| v.as_str())
+                        .map(String::from);
+                }
+                // Catalog overrides: present-but-blank clears them, which puts the
+                // kind back to inference and the URL back to the derived default.
+                if body.get("models_url").is_some() {
+                    p.models_url = body
+                        .get("models_url")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(String::from);
+                }
+                if body.get("models_kind").is_some() {
+                    p.models_kind = body
+                        .get("models_kind")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
                         .map(String::from);
                 }
             }
@@ -1447,6 +1492,148 @@ pub async fn probe_account(
             .into_response();
     };
     Json(json!({"ok": quota.error.is_none(), "quota": quota})).into_response()
+}
+
+/// `POST /api/providers/:name/models` — read an upstream's model catalog.
+///
+/// The catalog is an *admin* view: it answers "what does this upstream offer",
+/// which is not the same list the client-facing `/v1/models` returns (that one is
+/// the configured routing table, see `AppConfig::declared_models`). Credentials
+/// come from the named account when the provider has one, else from its token.
+pub async fn provider_models(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let config = state.config.get().await;
+    let Some(provider) = config
+        .proxy
+        .providers
+        .iter()
+        .find(|p| p.name == name)
+        .cloned()
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "error": format!("provider '{name}' does not exist")})),
+        )
+            .into_response();
+    };
+
+    let account = provider
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|account| !account.is_empty())
+        .and_then(|account| state.planx.account(account));
+    let account_family = account.as_ref().map(|account| account.family());
+    let kind = provider.catalog_kind(account_family);
+    let declared = config.declared_models();
+
+    // A manual catalog is a legitimate answer, not an error: the gateway may not
+    // publish one at all, in which case the configured models *are* the catalog.
+    if !kind.fetches() {
+        return Json(json!({
+            "ok": true,
+            "kind": kind.as_str(),
+            "manual": true,
+            "models": [],
+            "declared": declared,
+            "only_upstream": [],
+            "only_local": declared,
+            "error": serde_json::Value::Null,
+        }))
+        .into_response();
+    }
+
+    let auth = match account.as_ref() {
+        Some(account) => match account.current_auth() {
+            Some(auth) => auth,
+            None => {
+                return Json(json!({
+                    "ok": false,
+                    "kind": kind.as_str(),
+                    "error": format!("account '{}' has no usable credential", account.name()),
+                }))
+                .into_response()
+            }
+        },
+        None => match provider
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            Some(token) => proxy_common::UpstreamAuth::Static(token.to_string()),
+            None => {
+                return Json(json!({
+                    "ok": false,
+                    "kind": kind.as_str(),
+                    "error": format!("provider '{name}' has neither an account nor a token"),
+                }))
+                .into_response()
+            }
+        },
+    };
+    let client_version = account
+        .as_ref()
+        .map(|account| account.identity().client_version.clone())
+        .unwrap_or_default();
+    let impersonation = account
+        .as_ref()
+        .map(|account| account.impersonation())
+        .unwrap_or(proxy_common::Impersonation::Off);
+    let proxy = provider
+        .proxy
+        .as_deref()
+        .or(config.proxy.http_proxy.as_deref());
+    let client = match proxy_planx::transport::maintenance_client(proxy) {
+        Ok(client) => client,
+        Err(error) => {
+            return Json(json!({
+                "ok": false,
+                "kind": kind.as_str(),
+                "error": format!("could not build a maintenance client: {error}"),
+            }))
+            .into_response()
+        }
+    };
+
+    let url = provider.catalog_url(account_family);
+    let catalog = proxy_planx::probe::fetch_models(proxy_planx::probe::ModelsRequest {
+        client: &client,
+        kind,
+        url: &url,
+        auth: &auth,
+        impersonation,
+        client_version: &client_version,
+    })
+    .await;
+
+    // Drift, both ways: what the upstream has that we do not route, and what we
+    // route that the upstream did not mention.
+    let upstream: Vec<String> = catalog.models.iter().map(|m| m.id.clone()).collect();
+    let only_upstream: Vec<&String> = upstream
+        .iter()
+        .filter(|id| !declared.contains(id))
+        .collect();
+    let only_local: Vec<&String> = declared
+        .iter()
+        .filter(|id| !upstream.contains(id))
+        .collect();
+
+    Json(json!({
+        "ok": catalog.error.is_none(),
+        "kind": catalog.kind.as_str(),
+        "manual": false,
+        "url": catalog.url,
+        "fetched_at": catalog.fetched_at,
+        "models": catalog.models,
+        "declared": declared,
+        "only_upstream": only_upstream,
+        "only_local": only_local,
+        "error": catalog.error,
+    }))
+    .into_response()
 }
 
 #[cfg(test)]

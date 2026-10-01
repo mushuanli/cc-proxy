@@ -186,7 +186,7 @@ export function renderModelMatrix() {
         <th class="mx-th mx-col-price" title="Output / Million tokens">Out</th>
         <th class="mx-th mx-col-price" title="Cache Write / Million tokens">CW</th>
         <th class="mx-th mx-col-price" title="Cache Read / Million tokens">CR</th>
-        ${providerCols.map(p => `<th class="mx-th mx-col-provider mx-th-provider" data-prov="${esc(p)}" title="Edit ${esc(p)}">${esc(p)}</th>`).join('')}
+        ${providerCols.map(p => `<th class="mx-th mx-col-provider mx-th-provider" data-prov="${esc(p)}" title="Edit ${esc(p)}">${esc(p)}<span class="mx-cat-btn" data-prov-catalog="${esc(p)}" title="${esc(t('settings.catalog_btn_hint'))}">${esc(t('settings.catalog_btn'))}</span></th>`).join('')}
         <th class="mx-th mx-col-del"></th>
     </tr>`;
 
@@ -252,6 +252,15 @@ export function bindMatrixEvents() {
         th.addEventListener('click', (e) => {
             e.stopPropagation();
             openProviderHeaderPopover(th);
+        });
+    });
+
+    // Provider catalog: a separate hit target, so it does not open the
+    // URL/token popover that owns the rest of the header.
+    document.getElementById('model-matrix-head').querySelectorAll('[data-prov-catalog]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showProviderCatalog(btn.dataset.provCatalog);
         });
     });
 
@@ -430,12 +439,88 @@ function providerPopoverHtml(title, p) {
             <input class="mx-pop-input mx-pop-codex-url" type="text" value="${p?.codex_url ? esc(p.codex_url) : ''}" placeholder="https://api.example.com/v1">
             <label class="mx-pop-field-label">${tOr('settings.outbound_proxy', 'Outbound network proxy')}</label>
             <input class="mx-pop-input mx-pop-proxy" type="text" value="${p?.proxy ? esc(p.proxy) : ''}" placeholder="仅 Relay 生效 / http://proxy:8080">
+            <label class="mx-pop-field-label">${tOr('settings.models_kind', 'Model catalog kind')}</label>
+            <select class="mx-pop-input mx-pop-models-kind">
+                <option value="">${esc(tOr('settings.models_kind_auto', 'auto (infer from account/URL)'))}</option>
+                ${['openai', 'anthropic', 'codex', 'gemini', 'manual'].map(k =>
+                    `<option value="${k}" ${p?.models_kind === k ? 'selected' : ''}>${k}</option>`).join('')}
+            </select>
+            <input class="mx-pop-input mx-pop-models-url" type="text"
+                   value="${p?.models_url ? esc(p.models_url) : ''}"
+                   placeholder="${esc(tOr('settings.models_url_ph', 'catalog URL override (leave empty to derive)'))}">
+            <div class="pe-hint">${esc(tOr('settings.models_kind_hint', 'Different vendors differ: OpenAI-compatible uses /v1/models with data[], Anthropic adds a version header, the Codex backend uses /models, Gemini uses /v1beta/models with models[]. `manual` fetches nothing.'))}</div>
         </details>
         <label class="mx-pop-field-label">${t('settings.token')} <span style="font-weight:normal;color:var(--text-muted)">(${t('settings.keep_current_token')})</span></label>
         <input class="mx-pop-input mx-pop-token" type="password" placeholder="sk-...">`;
 }
 
-export function openProviderHeaderPopover(th) {
+/// Show an upstream's own model catalog (an admin view).
+///
+/// Deliberately *not* the same list the client-facing `/v1/models` returns: that
+/// one is the configured routing table. This one answers "what does the upstream
+/// offer", and the diff between the two is what makes drift visible.
+async function showProviderCatalog(provName) {
+    const overlay = document.createElement('div');
+    overlay.className = 'mx-overlay';
+    overlay.innerHTML = `
+        <div class="mx-modal prov-catalog-modal">
+            <div class="mx-pop-title">${esc(t('settings.catalog_title', { name: provName }))}</div>
+            <div id="prov-catalog-body" class="mx-pop-hint">${esc(t('settings.catalog_loading'))}</div>
+            <div class="mx-pop-actions">
+                <button class="btn-sm" id="prov-catalog-close">${esc(t('settings.close'))}</button>
+            </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#prov-catalog-close').addEventListener('click', close);
+
+    const body = overlay.querySelector('#prov-catalog-body');
+    try {
+        const resp = await fetch(`/api/providers/${encodeURIComponent(provName)}/models`, { method: 'POST' });
+        body.innerHTML = renderCatalog(await resp.json());
+    } catch (err) {
+        body.innerHTML = `<div class="acct-err">${esc(String(err))}</div>`;
+    }
+}
+
+function renderCatalog(data) {
+    if (data.error) {
+        return `<div class="acct-err">${esc(data.error)}</div>`;
+    }
+    if (data.manual) {
+        return `<div class="mx-pop-hint">${esc(t('settings.catalog_manual', { n: (data.declared || []).length }))}</div>`;
+    }
+    const rows = (data.models || []).map(m => `<tr>
+            <td class="mx-td mx-cat-id">${esc(m.id)}</td>
+            <td class="mx-td">${esc(m.display_name || '—')}</td>
+            <td class="mx-td">${esc((m.reasoning_levels || []).join(' · ') || '—')}</td>
+            <td class="mx-td">${m.context_window ? esc(String(m.context_window)) : '—'}</td>
+            <td class="mx-td">${m.hidden ? `<span class="acct-muted">${esc(t('settings.catalog_hidden'))}</span>` : ''}</td>
+        </tr>`).join('');
+    const onlyUpstream = (data.only_upstream || []);
+    const onlyLocal = (data.only_local || []);
+    return `
+        <div class="mx-pop-hint">${esc(t('settings.catalog_meta', {
+            kind: data.kind, n: (data.models || []).length, url: data.url,
+        }))}</div>
+        <div class="prov-catalog-scroll">
+            <table class="mx-table">
+                <thead><tr>
+                    <th class="mx-th">${esc(t('settings.catalog_col_id'))}</th>
+                    <th class="mx-th">${esc(t('settings.catalog_col_display'))}</th>
+                    <th class="mx-th">${esc(t('settings.catalog_col_levels'))}</th>
+                    <th class="mx-th">${esc(t('settings.catalog_col_ctx'))}</th>
+                    <th class="mx-th"></th>
+                </tr></thead>
+                <tbody>${rows || `<tr><td colspan="5" class="mx-empty">${esc(t('settings.catalog_empty'))}</td></tr>`}</tbody>
+            </table>
+        </div>
+        ${onlyUpstream.length ? `<div class="mx-pop-hint">${esc(t('settings.catalog_only_upstream', { list: onlyUpstream.join(', ') }))}</div>` : ''}
+        ${onlyLocal.length ? `<div class="mx-pop-hint">${esc(t('settings.catalog_only_local', { list: onlyLocal.join(', ') }))}</div>` : ''}`;
+}
+
+function openProviderHeaderPopover(th) {
     closeMatrixPopover();
     const provName = th.dataset.prov;
     const p = state.providerList.find(p => p.name === provName);
@@ -471,6 +556,9 @@ export function openProviderHeaderPopover(th) {
         if (problem) { alert(problem); return; }
         const accountName = pop.querySelector('.mx-pop-account')?.value || '';
         const body = { name: provName, url, proxy: proxy || null, account: accountName || null };
+        // Present-but-empty clears the override, which restores inference.
+        body.models_kind = pop.querySelector('.mx-pop-models-kind')?.value || null;
+        body.models_url = pop.querySelector('.mx-pop-models-url')?.value.trim() || null;
         if (token) body.token = token;
         if (codexUrl) body.codex_url = codexUrl;
         const protocols = [];

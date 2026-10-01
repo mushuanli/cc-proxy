@@ -159,6 +159,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         )
         .route("/api/accounts/:name/probe", post(settings::probe_account))
         .route(
+            "/api/providers/:name/models",
+            post(settings::provider_models),
+        )
+        .route(
             "/api/providers",
             get(settings::list_providers).post(settings::add_provider),
         )

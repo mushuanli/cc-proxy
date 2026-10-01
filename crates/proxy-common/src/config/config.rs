@@ -48,6 +48,46 @@ impl Default for AppConfig {
     }
 }
 
+impl AppConfig {
+    /// Model ids a client may ask for.
+    ///
+    /// Deliberately the *client-facing* list, not the upstream's own manifest: a
+    /// requested id is matched against `model_pricing`, routed by tier and
+    /// possibly bridged to another protocol, so what a client can actually use is
+    /// what the configuration declares. The upstream manifest is a separate,
+    /// admin-facing view (the dashboard fetches it on demand).
+    ///
+    /// Falls back to the models the tier rules name when no pricing matrix is
+    /// configured, so a minimal config still answers.
+    pub fn declared_models(&self) -> Vec<String> {
+        fn push(out: &mut Vec<String>, raw: &str) {
+            let id = raw.trim();
+            if !id.is_empty() && !out.iter().any(|existing| existing == id) {
+                out.push(id.to_string());
+            }
+        }
+
+        let mut out = Vec::new();
+        for entry in &self.model_pricing {
+            push(&mut out, &entry.id);
+        }
+        if out.is_empty() {
+            for upstream in &self.proxy.upstreams {
+                let rules = [
+                    upstream.high.as_ref(),
+                    upstream.mid.as_ref(),
+                    upstream.low.as_ref(),
+                    upstream.default.as_ref(),
+                ];
+                for rule in rules.into_iter().flatten() {
+                    push(&mut out, &rule.model);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Proxy behavior settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -146,3 +186,95 @@ fn default_log_level() -> String {
 pub use super::pricing::ModelPricing;
 pub use super::provider::Provider;
 pub use super::upstream::UpstreamConfig;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AccountConfig, AccountFamily, AccountMode, TierRule};
+
+    fn upstream_with_tiers() -> UpstreamConfig {
+        UpstreamConfig {
+            name: "u".into(),
+            high: Some(TierRule {
+                provider: "p".into(),
+                model: "gpt-6-sol".into(),
+            }),
+            mid: None,
+            low: Some(TierRule {
+                provider: "p".into(),
+                model: "gpt-6-luna".into(),
+            }),
+            default: Some(TierRule {
+                provider: "p".into(),
+                model: "gpt-6-sol".into(),
+            }),
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn declared_models_prefers_the_pricing_matrix() {
+        let mut config = AppConfig::default();
+        config.proxy.upstreams.push(upstream_with_tiers());
+        config.model_pricing.push(ModelPricing {
+            id: "claude-opus-4-1".into(),
+            price: Vec::new(),
+            providers: Default::default(),
+        });
+        config.model_pricing.push(ModelPricing {
+            id: "  claude-sonnet-4-5  ".into(),
+            price: Vec::new(),
+            providers: Default::default(),
+        });
+        // Duplicates and blanks never show up twice (or at all).
+        config.model_pricing.push(ModelPricing {
+            id: "claude-opus-4-1".into(),
+            price: Vec::new(),
+            providers: Default::default(),
+        });
+        config.model_pricing.push(ModelPricing {
+            id: "   ".into(),
+            price: Vec::new(),
+            providers: Default::default(),
+        });
+
+        assert_eq!(
+            config.declared_models(),
+            vec![
+                "claude-opus-4-1".to_string(),
+                "claude-sonnet-4-5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn declared_models_falls_back_to_the_tier_rules() {
+        let mut config = AppConfig::default();
+        config.proxy.upstreams.push(upstream_with_tiers());
+        // No pricing matrix: the models the tiers name, deduped, in tier order.
+        assert_eq!(
+            config.declared_models(),
+            vec!["gpt-6-sol".to_string(), "gpt-6-luna".to_string()]
+        );
+    }
+
+    #[test]
+    fn declared_models_is_empty_when_nothing_is_configured() {
+        assert!(AppConfig::default().declared_models().is_empty());
+    }
+
+    #[test]
+    fn accounts_are_not_models() {
+        // Guard against a future refactor conflating the two lists: the model
+        // list is about routable ids, never about credentials.
+        let mut config = AppConfig::default();
+        config.proxy.accounts.push(AccountConfig {
+            name: "work".into(),
+            family: AccountFamily::Gpt,
+            mode: AccountMode::Plan,
+            refresh_token: Some("rt".into()),
+            ..Default::default()
+        });
+        assert!(config.declared_models().is_empty());
+    }
+}
