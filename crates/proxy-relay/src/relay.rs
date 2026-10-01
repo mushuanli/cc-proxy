@@ -208,15 +208,51 @@ async fn proxy_handler(
 /// query that never reaches an upstream, and recording it would clutter the
 /// request list with entries that have no upstream response.
 async fn local_models_response(relay: &RelayHandler, headers: &HeaderMap) -> Response<Body> {
-    let models = relay.config.get().await.declared_models();
-    let body = match upstream::detect_models_client(headers) {
+    let config = relay.config.get().await;
+    let shape = upstream::detect_models_client(headers);
+
+    // A plan connection answers with the plan's *own* models, so a client asks for
+    // something the plan actually serves. Providers and tiers are not involved in
+    // plan mode, so the configured routing table would be the wrong answer — and a
+    // client that asks for one of those names gets
+    // "The '…' model is not supported when using Codex with a ChatGPT account".
+    let plan = config.proxy.active_plan.trim();
+    let (models, source) = if plan.is_empty() {
+        (config.declared_models(), "the configured models")
+    } else {
+        match relay.account_auth.plan_models(plan).await {
+            Some(catalogue) => {
+                // `visibility: hide` entries are internal to the upstream.
+                let ids: Vec<String> = catalogue
+                    .into_iter()
+                    .filter(|model| !model.hidden)
+                    .map(|model| model.id)
+                    .collect();
+                if ids.is_empty() {
+                    tracing::warn!(
+                        "[models] plan connection '{plan}' advertised no usable models; \
+                         falling back to the configured list"
+                    );
+                    (config.declared_models(), "the configured models")
+                } else {
+                    (ids, "the plan catalogue")
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "[models] plan connection '{plan}' has no catalogue (see the '[planx] … \
+                     catalogue' line above); falling back to the configured list"
+                );
+                (config.declared_models(), "the configured models")
+            }
+        }
+    };
+
+    let body = match shape {
         upstream::ApiProtocol::Anthropic => upstream::anthropic_models_body(&models),
         upstream::ApiProtocol::Codex => upstream::openai_models_body(&models),
     };
-    tracing::debug!(
-        "[models] answered {} model(s) from the local config",
-        models.len()
-    );
+    tracing::info!("[models] answered {} model(s) from {source}", models.len());
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
@@ -491,13 +527,32 @@ async fn plan_connection(
         })
     };
 
+    // A client may ask for something the plan does not serve — its own default, or
+    // a name from the configured list we fell back to when the catalogue could not
+    // be read. The upstream answers that with "The '…' model is not supported when
+    // using Codex with a ChatGPT account", so substitute an advertised model.
+    let catalogue = relay.account_auth.plan_models(account).await;
+    let resolved_model = plan_model(catalogue.as_deref(), request.request_model);
+    if resolved_model != request.request_model {
+        tracing::info!(
+            "[relay] plan '{account}' does not serve '{}'; using '{resolved_model}'",
+            request.request_model
+        );
+    } else if catalogue.is_none() {
+        tracing::warn!(
+            "[relay] plan '{account}' catalogue unavailable; forwarding the client's model \
+             name '{}' as-is",
+            request.request_model
+        );
+    }
+
     Ok(UpstreamPlan {
         route: proxy_common::ResolvedRoute {
             upstream: account.to_string(),
             // The account is the connection; surface it where a provider would be.
             provider: account.to_string(),
             configured_model: request.request_model.to_string(),
-            resolved_model: request.request_model.to_string(),
+            resolved_model,
             effort: (!active_effort.is_empty() && active_effort != "auto").then_some(active_effort),
         },
         base_url: endpoint.base_url,
@@ -506,6 +561,26 @@ async fn plan_connection(
         protocol: target,
         bridge,
     })
+}
+
+/// Which model a plan connection should send.
+///
+/// The client's name wins when the plan advertises it; otherwise the first
+/// non-hidden advertised model is used. Plan mode does not translate through
+/// `model_pricing` (there is no provider to key on), so this is the mapping.
+fn plan_model(catalogue: Option<&[proxy_common::CatalogModel]>, requested: &str) -> String {
+    let Some(models) = catalogue.filter(|models| !models.is_empty()) else {
+        return requested.to_string();
+    };
+    if models.iter().any(|model| model.id == requested) {
+        return requested.to_string();
+    }
+    models
+        .iter()
+        .find(|model| !model.hidden)
+        .or_else(|| models.first())
+        .map(|model| model.id.clone())
+        .unwrap_or_else(|| requested.to_string())
 }
 
 /// Transparent mode: the provider whose base URL prefixes the request URL.
@@ -1897,6 +1972,57 @@ fn stored_request_body(is_transparent: bool, raw: &Bytes, parsed: &serde_json::V
 
 #[cfg(test)]
 mod tests {
+    use super::plan_model;
+    use proxy_common::CatalogModel;
+
+    fn model(id: &str, hidden: bool) -> CatalogModel {
+        CatalogModel {
+            id: id.into(),
+            display_name: None,
+            hidden,
+        }
+    }
+
+    #[test]
+    fn a_plan_keeps_a_model_it_advertises() {
+        let catalogue = vec![model("gpt-6.1-sol", false), model("gpt-6-luna", false)];
+        assert_eq!(plan_model(Some(&catalogue), "gpt-6-luna"), "gpt-6-luna");
+    }
+
+    #[test]
+    fn an_unroutable_name_is_substituted_with_an_advertised_one() {
+        // This is the failure the operator sees otherwise:
+        // "The 'claude-sonnet-4-5' model is not supported when using Codex with a
+        // ChatGPT account."
+        let catalogue = vec![model("gpt-6.1-sol", false), model("gpt-6-luna", false)];
+        assert_eq!(
+            plan_model(Some(&catalogue), "claude-sonnet-4-5"),
+            "gpt-6.1-sol"
+        );
+    }
+
+    #[test]
+    fn a_hidden_model_is_not_chosen_as_the_substitute() {
+        let catalogue = vec![model("codex-auto-review", true), model("gpt-6-sol", false)];
+        assert_eq!(plan_model(Some(&catalogue), "whatever"), "gpt-6-sol");
+        // Unless everything is hidden: something has to be sent.
+        let hidden_only = vec![model("codex-auto-review", true)];
+        assert_eq!(
+            plan_model(Some(&hidden_only), "whatever"),
+            "codex-auto-review"
+        );
+    }
+
+    #[test]
+    fn without_a_catalogue_the_client_name_is_left_alone() {
+        // Best effort: we cannot know better, and inventing a name would be worse.
+        assert_eq!(plan_model(None, "claude-sonnet-4-5"), "claude-sonnet-4-5");
+        assert_eq!(
+            plan_model(Some(&[]), "claude-sonnet-4-5"),
+            "claude-sonnet-4-5"
+        );
+    }
+
     use super::effective_proxy;
 
     #[test]

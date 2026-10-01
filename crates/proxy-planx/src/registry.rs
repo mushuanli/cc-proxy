@@ -260,7 +260,23 @@ impl PlanAccount {
         if !kind.fetches() {
             return None;
         }
-        let auth = self.current_auth()?;
+        // A client's model discovery usually arrives *before* any inference request,
+        // and with an auth.json credential nothing is published until something
+        // refreshes. Loading here is what makes `GET /v1/models` work on a cold
+        // start instead of silently falling back to the configured list.
+        let auth = match self.current_auth() {
+            Some(auth) => auth,
+            None => match self.refresh_now().await {
+                Ok(auth) => auth,
+                Err(error) => {
+                    tracing::warn!(
+                        "[planx] account '{}' has no usable credential for its catalogue yet: {error}",
+                        self.name
+                    );
+                    return None;
+                }
+            },
+        };
         let url = format!(
             "{}{}",
             self.endpoint.base_url.trim_end_matches('/'),
@@ -295,6 +311,7 @@ impl PlanAccount {
             .map(|model| CatalogModel {
                 id: model.id,
                 display_name: model.display_name,
+                hidden: model.hidden,
             })
             .collect();
         if let Ok(mut guard) = self.catalog.write() {

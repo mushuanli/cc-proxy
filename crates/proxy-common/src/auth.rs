@@ -134,6 +134,10 @@ pub struct CatalogModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The upstream hides it from its own picker (e.g. `codex-auto-review`), so it
+    /// is a poor default when substituting an unroutable model name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// Boxed future alias so the trait stays object-safe without `async-trait`.
@@ -263,6 +267,7 @@ mod tests {
                     vec![CatalogModel {
                         id: "gpt-6.1-sol".into(),
                         display_name: Some("GPT-6.1-Sol".into()),
+                        hidden: false,
                     }]
                 })
             })
