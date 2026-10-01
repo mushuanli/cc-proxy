@@ -97,12 +97,6 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         "active_upstream",
         toml_edit::value(proxy.active_upstream.as_str()),
     );
-    // Codex-specific upstream. Must be written or a dashboard edit silently
-    // drops it from disk (memory keeps it until restart).
-    tbl.insert(
-        "active_codex_upstream",
-        toml_edit::value(proxy.active_codex_upstream.as_str()),
-    );
     tbl.insert("active_plan", toml_edit::value(proxy.active_plan.as_str()));
     tbl.insert(
         "active_proxy_upstream",
@@ -307,7 +301,6 @@ mod tests {
     /// Config carrying every provider-protocol field that used to be dropped.
     fn codex_route_config() -> AppConfig {
         let mut config = AppConfig::default();
-        config.proxy.active_codex_upstream = "codex-pool".into();
         config.proxy.active_plan = "gpt-plan".into();
         // The selector must resolve, or `migrate()` (which `load_config` runs)
         // repairs it and the round-trip assertion no longer sees it.
@@ -339,7 +332,6 @@ mod tests {
         persist_config(&path, &codex_route_config()).await.unwrap();
 
         let reloaded = load_config(&path).await.unwrap();
-        assert_eq!(reloaded.proxy.active_codex_upstream, "codex-pool");
         assert_eq!(reloaded.proxy.active_plan, "gpt-plan");
         assert_eq!(reloaded.proxy.providers.len(), 1);
         assert_eq!(
@@ -355,7 +347,7 @@ mod tests {
     }
 
     /// Regression: a dashboard edit rewrites the whole proxy section. Before the
-    /// fix this erased `active_codex_upstream` / `protocols` / `codex_url`.
+    /// fix this erased `protocols` / `codex_url`.
     #[tokio::test]
     async fn repeated_persist_is_stable_and_keeps_codex_fields() {
         let path = temp_config_path("twice");
@@ -369,7 +361,7 @@ mod tests {
         let second = tokio::fs::read_to_string(&path).await.unwrap();
 
         assert_eq!(first, second, "persist must be idempotent");
-        for needle in ["active_codex_upstream", "protocols", "codex_url"] {
+        for needle in ["protocols", "codex_url"] {
             assert!(
                 second.contains(needle),
                 "{needle} missing after re-persist:\n{second}"

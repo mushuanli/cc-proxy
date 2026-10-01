@@ -621,7 +621,6 @@ pub async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResp
     let active = &config.proxy.active_upstream;
     Json(json!({
         "active_upstream": config.proxy.active_upstream,
-        "active_codex_upstream": config.proxy.active_codex_upstream,
         "active_plan": config.proxy.active_plan,
         "active_proxy_upstream": config.proxy.active_proxy_upstream,
         "active_effort": config.proxy.active_effort,
@@ -630,7 +629,6 @@ pub async fn list_upstreams(State(state): State<Arc<AppState>>) -> impl IntoResp
             json!({
                 "name": u.name,
                 "active": u.name == *active,
-                "codex_active": u.name == config.proxy.active_codex_upstream,
                 "proxy_active": u.name == config.proxy.active_proxy_upstream,
                 "high": u.high,
                 "mid": u.mid,
@@ -719,18 +717,7 @@ pub async fn delete_upstream(
             }
             let was_active = c.proxy.active_upstream == name;
             let was_proxy_active = c.proxy.active_proxy_upstream == name;
-            // Leaving these dangling would be rejected by validation, so deleting
-            // the codex-active upstream must not be a dead end.
-            let was_codex_active = c.proxy.active_codex_upstream == name;
             c.proxy.upstreams.retain(|u| u.name != name);
-            if was_codex_active {
-                c.proxy.active_codex_upstream = c
-                    .proxy
-                    .upstreams
-                    .first()
-                    .map(|u| u.name.clone())
-                    .unwrap_or_default();
-            }
             if was_active {
                 c.proxy.active_upstream = c
                     .proxy
@@ -766,19 +753,12 @@ pub async fn delete_upstream(
 pub async fn activate_upstream(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let log_name = name.clone();
-    let target = q.get("target").map(|s| s.as_str()).unwrap_or("anthropic");
-    let is_codex = target == "codex";
     let result = state
         .config
         .update(move |c| {
-            if is_codex {
-                c.proxy.active_codex_upstream = name;
-            } else {
-                c.proxy.active_upstream = name;
-            }
+            c.proxy.active_upstream = name;
             Ok(())
         })
         .await;
@@ -1182,7 +1162,6 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
     let active = &c.proxy.active_upstream;
     WsMessage::UpstreamChanged {
         active_upstream: active.clone(),
-        active_codex_upstream: c.proxy.active_codex_upstream.clone(),
         active_proxy_upstream: c.proxy.active_proxy_upstream.clone(),
         active_plan: c.proxy.active_plan.clone(),
         upstreams: c
@@ -1192,7 +1171,6 @@ async fn upstream_changed(config: &ConfigStore) -> WsMessage {
             .map(|u| UpstreamInfo {
                 name: u.name.clone(),
                 active: u.name == *active,
-                codex_active: u.name == c.proxy.active_codex_upstream,
                 proxy_active: u.name == c.proxy.active_proxy_upstream,
                 high: u.high.as_ref().map(|t| t.into()),
                 mid: u.mid.as_ref().map(|t| t.into()),

@@ -178,7 +178,6 @@ proxy_port = 39902
 
 [proxy]
 active_upstream = "local"
-active_codex_upstream = "local"
 active_proxy_upstream = "local"
 
 [[model_pricing]]

@@ -65,7 +65,6 @@
     "delete": "删除",
     "select_all_title": "全选",
     "copy": "复制当前页",
-    "codex_upstream": "Codex:",
     "relay_group_upstream": "Upstream（provider + tier 路由）",
     "relay_group_plan": "Plan（订阅账号，绕过 tier）"
   },
@@ -359,7 +358,7 @@
   },
   "accounts": {
     "title": "上游账号",
-    "hint": "两个家族（gpt / claude）× 两种模式（api_key / plan）。步骤：① 在这里「+ 添加账号」（gpt 订阅推荐保持默认的 auth.json 路径，其余选项都在「高级选项」里）；② 到 Model Pricing 里点 Provider 列头，把「上游账号」选上；③ 把 active_upstream / active_codex_upstream 指到该 Provider。额度探测只读，不消耗推理额度。",
+    "hint": "两个家族（gpt / claude）× 两种模式（api_key / plan）。步骤：① 在这里「+ 添加账号」（gpt 订阅推荐保持默认的 auth.json 路径，其余选项都在「高级选项」里）；② 到 Model Pricing 里点 Provider 列头，把「上游账号」选上；③ 到会话管理把 Relay 切到该 upstream，或直接把这个账号选为 plan 连接（一次只有一个订阅生效）。额度探测只读，不消耗推理额度。",
     "add": "+ 添加账号",
     "probe_all": "全部探测",
     "probing": "探测中…",

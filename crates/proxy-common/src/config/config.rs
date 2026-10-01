@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use super::account::AccountConfig;
-use crate::protocol::WireProtocol;
 
 pub const AUTO_PROXY_UPSTREAM: &str = "__auto__";
 pub const FORBID_PROXY_UPSTREAM: &str = "__forbid__";
@@ -22,7 +21,6 @@ impl Default for AppConfig {
             model_pricing: Vec::new(),
             proxy: ProxyConfig {
                 active_upstream: String::new(),
-                active_codex_upstream: String::new(),
                 active_plan: String::new(),
                 active_proxy_upstream: default_proxy_upstream(),
                 active_effort: String::new(),
@@ -130,20 +128,15 @@ impl ProxyConfig {
     /// 1. transparent-proxy traffic → `active_proxy_upstream`;
     /// 2. **a plan connection** (`active_plan` set) → that account's endpoint, for
     ///    every client protocol. The plan is deliberately consulted *before* the
-    ///    protocol slots: `active_codex_upstream` only applies to Codex-protocol
-    ///    requests, so a plan reached from an Anthropic client (Claude Code, via
-    ///    the bridge) would otherwise be silently ignored;
-    /// 3. a Codex-protocol request → `active_codex_upstream` (when set);
-    /// 4. otherwise → `active_upstream`.
-    pub fn select_target(&self, is_transparent: bool, protocol: WireProtocol) -> RelayTarget<'_> {
+    ///    upstream: a plan reached from an Anthropic client (Claude Code, via the
+    ///    bridge) must use it, which a protocol-scoped slot could not express;
+    /// 3. otherwise → `active_upstream`.
+    pub fn select_target(&self, is_transparent: bool) -> RelayTarget<'_> {
         if is_transparent && !self.active_proxy_upstream.is_empty() {
             return RelayTarget::Proxy(&self.active_proxy_upstream);
         }
         if !self.active_plan.is_empty() {
             return RelayTarget::Plan(&self.active_plan);
-        }
-        if protocol == WireProtocol::Codex && !self.active_codex_upstream.is_empty() {
-            return RelayTarget::Upstream(&self.active_codex_upstream);
         }
         RelayTarget::Upstream(&self.active_upstream)
     }
@@ -154,9 +147,6 @@ impl ProxyConfig {
 pub struct ProxyConfig {
     #[serde(default)]
     pub active_upstream: String,
-    /// Codex-specific upstream. Empty = fall back to `active_upstream`.
-    #[serde(default)]
-    pub active_codex_upstream: String,
     /// Active **plan connection**, named after a `[[proxy.accounts]]` entry.
     ///
     /// A plan is a peer of an upstream — both answer "which upstream do we talk
@@ -344,10 +334,9 @@ mod tests {
         assert!(AppConfig::default().declared_models().is_empty());
     }
 
-    fn target_config(plan: &str, codex: &str, upstream: &str) -> ProxyConfig {
+    fn target_config(plan: &str, upstream: &str) -> ProxyConfig {
         let mut config = AppConfig::default();
         config.proxy.active_plan = plan.into();
-        config.proxy.active_codex_upstream = codex.into();
         config.proxy.active_upstream = upstream.into();
         config.proxy.active_proxy_upstream = AUTO_PROXY_UPSTREAM.into();
         config.proxy
@@ -355,31 +344,22 @@ mod tests {
 
     #[test]
     fn a_plan_connection_serves_every_client_protocol() {
-        use crate::protocol::WireProtocol;
-        // The point of a plan target: it is consulted before the protocol slots,
-        // so an Anthropic client (Claude Code, bridged) uses the plan too —
-        // `active_codex_upstream` alone would silently be ignored there.
-        let config = target_config("gpt-sub", "codex-pool", "claude-pool");
+        // The point of a plan target: one subscription serves everything, so the
+        // client's protocol never decides whether the plan is used.
+        let config = target_config("gpt-sub", "claude-pool");
 
-        for protocol in [WireProtocol::Anthropic, WireProtocol::Codex] {
-            let target = config.select_target(false, protocol);
-            assert_eq!(target, RelayTarget::Plan("gpt-sub"), "{protocol:?}");
-            assert!(target.is_plan());
-            assert_eq!(target.name(), "gpt-sub");
-        }
+        let target = config.select_target(false);
+        assert_eq!(target, RelayTarget::Plan("gpt-sub"));
+        assert!(target.is_plan());
+        assert_eq!(target.name(), "gpt-sub");
 
         // Transparent traffic is still the proxy slot's business.
-        let target = config.select_target(true, WireProtocol::Anthropic);
-        assert_eq!(target, RelayTarget::Proxy("__auto__"));
+        assert_eq!(config.select_target(true), RelayTarget::Proxy("__auto__"));
 
-        // No plan configured: exactly the previous behaviour.
-        let config = target_config("", "codex-pool", "claude-pool");
+        // No plan configured: the upstream, whatever the client speaks.
+        let config = target_config("", "claude-pool");
         assert_eq!(
-            config.select_target(false, WireProtocol::Codex),
-            RelayTarget::Upstream("codex-pool")
-        );
-        assert_eq!(
-            config.select_target(false, WireProtocol::Anthropic),
+            config.select_target(false),
             RelayTarget::Upstream("claude-pool")
         );
     }

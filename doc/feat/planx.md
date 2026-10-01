@@ -248,7 +248,7 @@ proxy-server   构建并注入                                     装配
 | 能力 | 位置 | 说明 |
 |---|---|---|
 | Codex 协议识别 | `crates/proxy-relay/src/upstream.rs:91` `detect_protocol` | `/responses` 或 body 含 `input` 无 `messages` → `ApiProtocol::Codex` |
-| Codex 专用上游选择 | `crates/proxy-relay/src/relay.rs:311-317` | `active_codex_upstream`，空则回落 `active_upstream` |
+| Codex 专用上游选择 | `crates/proxy-relay/src/relay.rs:311-317` | `active_plan`，空则回落 `active_upstream` |
 | 每 Provider 的 Codex 端点 | `crates/proxy-common/src/config/provider.rs:24` `codex_url` | 解析点 `relay.rs:409-413` |
 | 协议准入 | `crates/proxy-common/src/config/provider.rs:30` `Provider::serves` | 门禁在 `relay.rs:394-406` |
 | **凭据解析（唯一）** | `crates/proxy-relay/src/relay.rs:416` | `let provider_token = provider.and_then(\|p\| p.token.clone());` |
@@ -308,7 +308,7 @@ cc-proxy 已经拥有这些能力，整体合入会造成两套配置、两套 s
 flowchart TB
     subgraph policy["策略层（数据 + 路由，不含行为）"]
         P1["proxy-common::config<br/>Provider.plan_account<br/>ProxyConfig.plan_accounts"]
-        P2["relay.rs 路由<br/>active_codex_upstream / tier"]
+        P2["relay.rs 路由<br/>active_plan / tier"]
     end
 
     subgraph seam["接缝（proxy-common 只定义类型与 trait）"]
@@ -421,7 +421,7 @@ cc-proxy 已经用 commit `a1293f1`（"support Codex CLI with strategy/mechanism
 
 > ⚠️ **前置阻塞项**：cc-proxy 的配置持久化是**手写的字段级 toml_edit writer**
 > （`config/persist.rs:88-175`），不是 serde round-trip。
-> 现状是 `protocols` / `codex_url` / `active_codex_upstream` **根本没被写进文件**
+> 现状是 `protocols` / `codex_url` / `active_plan` **根本没被写进文件**
 > （`persist.rs` 里 grep `codex|protocols` = 0 命中），
 > 而 `ConfigStore::update → persist_config`（`config/store.rs:69`）是唯一持久化路径。
 > **后果：只要在面板上改一次配置，这三个字段就会从 config.toml 里消失**
@@ -435,7 +435,7 @@ cc-proxy 已经用 commit `a1293f1`（"support Codex CLI with strategy/mechanism
 | `src/auth.rs`（新增） | `UpstreamAuth` 枚举 + `PlanAuthProvider` trait | ~50 |
 | `src/config/provider.rs:5` | `Provider` 追加 `plan_account: Option<String>`、`impersonate: Option<String>` | +6 |
 | `src/config/config.rs:50` | `ProxyConfig` 追加 `plan_accounts: Vec<PlanAccountConfig>` + `PlanAccountConfig` 结构 | +30 |
-| `src/config/persist.rs:88-175` | `write_proxy_section` **必须**写出新字段；顺带补齐 `active_codex_upstream` / `protocols` / `codex_url` | +40 |
+| `src/config/persist.rs:88-175` | `write_proxy_section` **必须**写出新字段；顺带补齐 `active_plan` / `protocols` / `codex_url` | +40 |
 | `src/config/validation.rs:5` | 校验 `plan_account` 引用存在、名称唯一；`token` 与 `plan_account` 互斥 | +30 |
 | `src/config/mod.rs:17` | `PlanAccountConfig` 需 **public re-export**（现 `AppConfig`/`ProxyConfig` 是 `pub(crate)`，跨 crate 不能命名） | +2 |
 | `src/web/settings.rs:286` + `src/models.rs:326` | 读路径补齐：`ProviderInfo` / `list_providers` 目前漏掉 `protocols`/`codex_url`，新字段同理需要 | +20 |
@@ -587,7 +587,7 @@ plan_account = "work-plus"           # ← 新增：用订阅账号认证
 
 | 阶段 | 内容 | 侵入面 | 收益 | 验收 |
 |---|---|---|---|---|
-| **P0-a** 修复往返 | 补齐 `persist.rs` 对 `active_codex_upstream` / `protocols` / `codex_url` 的写入 + 读路径 | **低**：`persist.rs` + `settings.rs` + `models.rs` | 修掉现存的数据丢失 bug；为 planx 字段铺路 | 面板改配置后这些字段仍在 config.toml 里 |
+| **P0-a** 修复往返 | 补齐 `persist.rs` 对 `active_plan` / `protocols` / `codex_url` 的写入 + 读路径 | **低**：`persist.rs` + `settings.rs` + `models.rs` | 修掉现存的数据丢失 bug；为 planx 字段铺路 | 面板改配置后这些字段仍在 config.toml 里 |
 | **P0-b** 凭据 + 身份 | `proxy-planx` 的 credential/identity/transport/registry；配置 4 处；relay 2 处插入；装配 1 处 | **低**：新增 1 crate，改 6 文件 | Codex CLI 可直连 plan 账号；零协议改动 | 无 planx 配置时行为逐字节不变 |
 | **P1** 可观测性 | `probe.rs` 拉 wham/订阅；5h/7d 余量与订阅状态写入 task metadata 或新 API | **低**：新增 API + 前端卡片，不动 relay 主链路 | 面板可见 plan 余量；超额前告警 | 探测失败不影响转发 |
 | **P2** 协议翻译 | Anthropic Messages ↔ Codex Responses，让 Claude Code 也能用 plan | **中**：新增 `adapter/` 模块 + relay 3 处插入 | Claude Code 也能跑到 plan 上 | 翻译仅对显式声明的 Provider 生效 |
@@ -660,7 +660,7 @@ planx 的出站会话身份（`session-id` / `thread-id`）应从**下游已有�
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| **配置持久化半接线（现存 bug）** | 面板改一次配置就丢 `protocols`/`codex_url`/`active_codex_upstream`；planx 新字段会同样丢失 | 列为 **P0-a 前置项**；验收要求「面板编辑后 config.toml 仍含全部字段」 |
+| **配置持久化半接线（现存 bug）** | 面板改一次配置就丢 `protocols`/`codex_url`/`active_plan`；planx 新字段会同样丢失 | 列为 **P0-a 前置项**；验收要求「面板编辑后 config.toml 仍含全部字段」 |
 | 401 当次不重试（同步 trait 取舍） | 单次请求失败 | 后台刷新提前量 5 分钟；`invalidate` 立即唤醒；必要时 P1 再引入 401 重试 |
 | refresh_token 轮换丢失 | 账号失效 | 必须有持久化（`persist = true`），原子写 + 0600；已实现于 `plan2api/src/auth.rs` |
 | 身份伪装与「透明代理」定位冲突 | 用户困惑 | 默认关闭；改写差异入库并在 Inspector 展示（§7.2） |
@@ -678,7 +678,7 @@ planx 的出站会话身份（`session-id` / `thread-id`）应从**下游已有�
 
 - [ ] 不含任何 planx 配置时，`cargo test` 全绿，且 `dispatch_upstream` 的入参逐字节等于改动前
 - [ ] **配置往返**：`ConfigStore::update`（面板编辑路径）之后，`config.toml` 仍保留
-      `active_codex_upstream` / `protocols` / `codex_url` / `plan_accounts` / `plan_account`
+      `active_plan` / `protocols` / `codex_url` / `plan_accounts` / `plan_account`
       （P0-a 的验收；这是现存 bug，必须有回归测试）
 - [ ] 旧 `config.toml` 反序列化 → `persist_config()` → 再反序列化，语义等价
 - [ ] `build_upstream_headers` 旧签名与其单测（`upstream.rs:820-931`）零改动通过
@@ -758,7 +758,7 @@ planx 的出站会话身份（`session-id` / `thread-id`）应从**下游已有�
 11. **热重载轮询改为 `(mtime, 长度)`**：只比 mtime 会漏掉 `mv` / `cp -p` /
     秒级时间戳的写入。另外事件总线 `Closed` 时 `recv()` 会立即永久返回错误，
     原来的 `continue` 会把 select 循环变成忙等。
-12. **配置校验补齐**：`active_codex_upstream` 必须存在（此前 `persist.rs` 让它
+12. **配置校验补齐**：`active_plan` 必须存在（此前 `persist.rs` 让它
     落盘后，一个错名字会永久 502）；协议名、账号 family ↔ Provider 协议一致性、
     identity/impersonate 画像名、名称空白与空名。
 

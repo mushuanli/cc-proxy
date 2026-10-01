@@ -41,13 +41,7 @@ impl AppConfig {
 
     /// `active_*` selectors must name an existing upstream.
     fn validate_active_upstreams(&self, errors: &mut Vec<String>) {
-        for (field, value) in [
-            ("active_upstream", self.proxy.active_upstream.as_str()),
-            (
-                "active_codex_upstream",
-                self.proxy.active_codex_upstream.as_str(),
-            ),
-        ] {
+        for (field, value) in [("active_upstream", self.proxy.active_upstream.as_str())] {
             if !value.is_empty() && !self.proxy.upstreams.iter().any(|u| u.name == value) {
                 errors.push(format!("{field} '{value}' not found in upstreams"));
             }
@@ -694,19 +688,6 @@ mod tests {
     }
 
     // ── rules added by the review ──
-
-    #[test]
-    fn active_codex_upstream_must_exist() {
-        let mut config = AppConfig::default();
-        config.proxy.active_codex_upstream = "ghost".into();
-        let errors = config.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("active_codex_upstream 'ghost' not found")),
-            "{errors:?}"
-        );
-    }
 
     #[test]
     fn unknown_protocol_names_are_rejected() {

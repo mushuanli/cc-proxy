@@ -131,7 +131,7 @@ impl PlanAccount {
             current: RwLock::new(None),
             quota: RwLock::new(None),
             stale_cli_version: None,
-            endpoint: crate::endpoint::endpoint_for(config.family, config.mode),
+            endpoint,
             catalog: RwLock::new(None),
         };
         if !account.impersonate.is_off() && !crate::transport::IMPERSONATION_COMPILED {

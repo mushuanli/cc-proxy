@@ -47,7 +47,7 @@ Provider 不再内嵌 models 字段。模型支持由 `ModelPricing.providers` �
 > **持久化注意**：`proxy` 段落由 `config/persist.rs` **手写**字段序列化（不是 serde round-trip）。
 > 新增 Provider 字段时必须同步补 `write_proxy_section` 与读路径
 > （`list_providers` / `ProviderInfo`），否则面板保存一次配置就会把该字段从
-> `config.toml` 里抹掉。`protocols` / `codex_url` / `active_codex_upstream` /
+> `config.toml` 里抹掉。`protocols` / `codex_url` /
 > `account` 曾长期存在这个问题，已修复并有回归测试。
 >
 > 与之配套的规则：**读路径缺字段 = 该字段在面板上不可见、不可编辑**，
@@ -135,7 +135,7 @@ account   = "claude-sub"
 - `identity` / `impersonate` 必须是已知画像名，且 `identity` 不得跨家族
   （写错不会被静默降级，而是报错）；
 - `mode = plan` 至少要有一种凭据来源；`auth_json` / `persist` 仅 `family = gpt`；
-- `active_upstream` / `active_codex_upstream` / `active_proxy_upstream`
+- `active_upstream` / `active_proxy_upstream`
   必须指向已存在的 upstream。
 ```
 
@@ -164,7 +164,7 @@ relay 的目标（「连到哪个上游」）有三种，`upstream` 与 `plan` �
 |---|---|---|
 | `active_proxy_upstream` | upstream 名 / `__auto__` / `__forbid__` | 透明代理 |
 | **`active_plan`** | **`[[proxy.accounts]]` 的 name（订阅账号）** | **绕过 provider 与 tier，全部请求直连该账号的厂商端点** |
-| `active_upstream` / `active_codex_upstream` | upstream 名 | provider + tier 路由 + 模型翻译 |
+| `active_upstream` | upstream 名 | provider + tier 路由 + 模型翻译 |
 
 ```toml
 [proxy]
@@ -175,7 +175,7 @@ plan 模式下：
 
 - **所有报文都转发到这个 plan 的连接**——不经过 provider/tier，也**不做模型翻译**，客户端报什么模型名就用什么；
 - 因此 **`GET /v1/models` 返回这个 plan 自己可用的模型**（用该账号的凭据读取厂商目录，缓存 5 分钟；取不到时回退到配置的 `model_pricing`，绝不因此让客户端失败）。这样客户端拿到的清单与它实际能要的模型一致；
-- **优先级高于协议槽位**：`active_codex_upstream` 只对 Codex 协议请求生效，而 plan 对所有协议生效——否则 Claude Code（Anthropic 线）会静默继续用 `active_upstream`，plan 永远不生效；
+- **对所有协议生效**：不区分客户端说的是 Anthropic 还是 Codex（后者曾是 `active_codex_upstream` 的活，该设置已删除，见下）；
 - 客户端协议与 plan 端点协议不同时自动走 bridge（Claude Code → GPT plan）。
 
 端点由**账号的 family + mode** 决定（不是配置里的 URL）：
@@ -191,7 +191,12 @@ plan 模式下：
 选中 upstream 会先清空 `active_plan` 再设 `active_upstream`（所以关掉 plan 能回到原来的 upstream）。
 接口是 `POST /api/plan/activate`，body `{"name": "<account>"}`，`name` 为空即关闭。
 
-（`Codex:` 下拉保留并且与 `Relay:` **不冲突**：它只对 Codex 协议请求生效，是协议级覆盖，两者可同时配置。）
+> **已删除 `active_codex_upstream`。** 它曾是「按客户端协议选目标」的槽位（Codex 请求走它、Anthropic 请求走
+> `active_upstream`），用途只有一个：同时挂两个订阅、各服务一个客户端家族。但**一次只有一个订阅生效**，
+> 两个控件表达一件事反而容易配错（把 plan 选在 Codex 槽里、客户端说 Anthropic，于是静默不生效）。
+> 现在目标只有两种：**plan 连接**（一个订阅服务全部客户端）或 **upstream**（provider + tier 路由）。
+> 若确实要两个订阅并行，跑两个 cc-proxy 实例（各自 `active_plan` 指向不同账号）比协议分流更清楚。
+> 配置里若还有 `active_codex_upstream`，它会被**忽略**（不再参与路由）。
 
 ### 两个「模型清单」是两回事
 

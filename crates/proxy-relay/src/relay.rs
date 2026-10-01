@@ -592,9 +592,7 @@ async fn proxy_request(
     // ── Resolve route config (needed before session_id for headless fallback) ──
     let config_snapshot = relay.config.get().await;
     let ws_include_bodies = config_snapshot.server.ws_include_bodies;
-    let target = config_snapshot
-        .proxy
-        .select_target(is_transparent, protocol.to_wire());
+    let target = config_snapshot.proxy.select_target(is_transparent);
     let (upstream_name, plan_mode) = (target.name(), target.is_plan());
 
     // ── Session ID: use header/body value, else fall back to latest recording session ──

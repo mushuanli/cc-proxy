@@ -82,10 +82,9 @@ function accountProtocolProblem(pop) {
 
 // ── Shared state update from server ──
 
-export function applyUpstreamState(active, codexActive, proxyActive, upstreams, providers, effort, pricing, httpProxy, activePlan) {
+export function applyUpstreamState(active, proxyActive, upstreams, providers, effort, pricing, httpProxy, activePlan) {
     state.activeUpstream = active;
     state.activePlan = activePlan || '';
-    state.activeCodexUpstream = codexActive || '';
     state.activeProxyUpstream = proxyActive || active;
     state.upstreamList = upstreams || [];
     state.providerList = providers || [];
@@ -93,7 +92,6 @@ export function applyUpstreamState(active, codexActive, proxyActive, upstreams, 
     state.globalProxy = httpProxy || null;
     if (effort !== undefined) { state.activeEffort = effort; }
     populateUpstreamSelect(upstreams, active);
-    populateCodexUpstreamSelect(upstreams, state.activeCodexUpstream);
 
     populateEffortSelect(state.activeEffort);
     renderModelMatrix();
@@ -153,23 +151,6 @@ export async function populateUpstreamSelect(upstreams, active) {
         const chosen = (upstreams || []).find(u => u.name === active || u.active);
         select.value = chosen ? chosen.name : '';
     }
-}
-
-export function populateCodexUpstreamSelect(upstreams, active) {
-    const select = document.getElementById('codex-upstream-select');
-    if (!select) return;
-    select.innerHTML = '';
-    if (!upstreams || upstreams.length === 0) {
-        select.innerHTML = '<option value="">—</option>';
-        return;
-    }
-    [...upstreams].sort((a, b) => a.name.localeCompare(b.name)).forEach(u => {
-        const opt = document.createElement('option');
-        opt.value = u.name;
-        opt.textContent = u.name + (u.codex_active ? ' ✓' : '');
-        if (u.name === active || u.codex_active) opt.selected = true;
-        select.appendChild(opt);
-    });
 }
 
 export function populateEffortSelect(active) {
@@ -1334,12 +1315,6 @@ document.getElementById('upstream-select').addEventListener('change', async () =
     await fetch(`/api/upstreams/${encodeURIComponent(value)}/activate`, { method: 'POST' });
 });
 
-// Codex upstream select — activates the codex-specific upstream
-document.getElementById('codex-upstream-select').addEventListener('change', async () => {
-    const name = document.getElementById('codex-upstream-select').value;
-    if (!name) return;
-    await fetch(`/api/upstreams/${encodeURIComponent(name)}/activate?target=codex`, { method: 'POST' });
-});
 
 // Effort select in Inspector toolbar — saves to active upstream's effort field
 document.getElementById('effort-select').addEventListener('change', async () => {

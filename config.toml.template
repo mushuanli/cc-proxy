@@ -228,7 +228,7 @@ default = { provider = "deepseek", model = "deepseek-v4-pro" }
 # 用法：给 provider 设 account = "<账号名>"（不要再设 token），
 #      需要时把上游指到该 provider：
 #        anthropic 走 active_upstream = "claude-plan"
-#        codex     走 active_codex_upstream = "gpt-plan"
+#        或直接把该账号设为 plan 连接：active_plan = "gpt-plan"（一次只有一个订阅生效）
 #
 # 注意：token 与 account 互斥；claude 不支持 auth_json / persist；
 #       账号支持热重载（面板改动或手改本文件都会被 ConfigWatcher 拾取）。
