@@ -831,6 +831,38 @@ async fn proxy_request(
         );
     }
 
+    // ── ChatGPT Codex backend requirements ──
+    // The backend rejects a body without `store: false` ("Store must be set to
+    // false") and one whose `input` is a bare string ("Input must be a list"). The
+    // Codex CLI always sends `store: false`, `include` and a list, which is why a
+    // native client works but anything else is answered with a 400.
+    //
+    // Applied *after* the cross-protocol translation below, because a bridged body
+    // is rebuilt from the client's protocol and would drop these again.
+    let chatgpt_backend =
+        protocol == upstream::ApiProtocol::Codex && provider_url.contains("chatgpt.com");
+    // This backend only answers SSE ("Stream must be set to true"), and the relay
+    // parses the response according to what the *client* asked for — so forcing the
+    // flag would hand a non-streaming client an SSE body it cannot read. Refuse
+    // clearly instead.
+    if chatgpt_backend && !is_streaming {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "error": {
+                        "message": "The ChatGPT Codex backend is streaming-only; send \
+                                    'stream': true (non-streaming aggregation is not implemented)",
+                        "type": "invalid_request_error",
+                        "code": "streaming_required",
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+
     // ── Cross-protocol request translation ──
     // Rewrite the body for the upstream protocol before anything downstream looks
     // at it, and remember the translator needed to convert the answer back.
@@ -877,6 +909,10 @@ async fn proxy_request(
                     .unwrap();
             }
         }
+    }
+
+    if chatgpt_backend {
+        upstream::normalize_codex_backend_body(&mut body_json);
     }
 
     // ── Build upstream URL ──

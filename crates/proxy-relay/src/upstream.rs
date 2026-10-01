@@ -271,6 +271,40 @@ pub fn plan_bridge(
         })
 }
 
+/// Fields the ChatGPT Codex backend insists on that a generic Responses client
+/// does not send.
+///
+/// Observed rejections, both 400 with the reason in `detail`:
+/// `{"detail":"Store must be set to false"}` and
+/// `{"detail":"Input must be a list"}`. The Codex CLI always sends this shape, so
+/// a native client never notices the difference.
+pub fn normalize_codex_backend_body(body: &mut serde_json::Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    object.insert("store".into(), serde_json::Value::Bool(false));
+    // The backend is streaming-only ("Stream must be set to true"), which is why the
+    // caller must know: a non-streaming request cannot be served by forcing this.
+    object.insert("stream".into(), serde_json::Value::Bool(true));
+
+    // A string `input` is valid for the Responses API in general but not here.
+    if let Some(text) = object.get("input").and_then(serde_json::Value::as_str) {
+        let text = text.to_string();
+        object.insert(
+            "input".into(),
+            serde_json::json!([{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": text }],
+            }]),
+        );
+    }
+
+    // The CLI asks for encrypted reasoning so a follow-up turn can continue it.
+    object
+        .entry("include")
+        .or_insert_with(|| serde_json::json!(["reasoning.encrypted_content"]));
+}
+
 /// Which family's `/v1/models` shape the caller expects.
 ///
 /// Both families use the same path, so headers are the only signal: Claude
