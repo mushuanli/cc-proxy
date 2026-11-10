@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod daemon;
 mod watcher;
 mod web;
 mod ws;
@@ -269,8 +270,68 @@ where
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+const USAGE: &str = "\
+Usage: cc-proxy [OPTIONS] [CONFIG]
+
+Arguments:
+  CONFIG             Path to config.toml (default: config.toml)
+
+Options:
+  -d, --daemon       Run in the background, logging to data/cc-proxy.log
+  -h, --help         Print this help
+";
+
+struct Cli {
+    config_path: String,
+    daemon: bool,
+}
+
+impl Cli {
+    fn parse_from<I: IntoIterator<Item = String>>(args: I) -> anyhow::Result<Self> {
+        let mut config_path = None;
+        let mut daemon = false;
+        for arg in args {
+            match arg.as_str() {
+                "-d" | "--daemon" => daemon = true,
+                "-h" | "--help" => print_help(),
+                other if other.starts_with('-') => {
+                    anyhow::bail!("unknown option '{other}'\n\n{USAGE}")
+                }
+                other => {
+                    if config_path.replace(other.to_string()).is_some() {
+                        anyhow::bail!("unexpected extra argument '{other}'\n\n{USAGE}");
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            config_path: config_path.unwrap_or_else(|| "config.toml".to_string()),
+            daemon,
+        })
+    }
+}
+
+fn print_help() -> ! {
+    use std::io::Write as _;
+    print!("{USAGE}");
+    let _ = std::io::stdout().flush();
+    std::process::exit(0)
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse_from(std::env::args().skip(1))?;
+    // Daemonize before building the runtime: `fork` must happen while the
+    // process is still single-threaded.
+    if cli.daemon {
+        daemon::daemonize()?;
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(cli.config_path))
+}
+
+async fn run(config_path: String) -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -280,10 +341,6 @@ async fn main() -> anyhow::Result<()> {
                 ),
         )
         .init();
-
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config.toml".to_string());
 
     let state = Arc::new(AppState::new(&config_path).await?);
     let config = state.config.get().await;
@@ -524,8 +581,32 @@ fn listen_hint(bound: SocketAddr) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::listen_hint;
+    use super::{listen_hint, Cli};
     use std::net::SocketAddr;
+
+    #[test]
+    fn daemon_flag_is_recognised_in_any_position() {
+        let cli = Cli::parse_from(["-d".to_string(), "conf.toml".to_string()]).unwrap();
+        assert!(cli.daemon);
+        assert_eq!(cli.config_path, "conf.toml");
+
+        let cli = Cli::parse_from(["conf.toml".to_string(), "--daemon".to_string()]).unwrap();
+        assert!(cli.daemon);
+        assert_eq!(cli.config_path, "conf.toml");
+    }
+
+    #[test]
+    fn config_path_defaults_to_config_toml() {
+        let cli = Cli::parse_from(["-d".to_string()]).unwrap();
+        assert!(cli.daemon);
+        assert_eq!(cli.config_path, "config.toml");
+    }
+
+    #[test]
+    fn unknown_options_and_extra_arguments_are_rejected() {
+        assert!(Cli::parse_from(["-x".to_string()]).is_err());
+        assert!(Cli::parse_from(["a.toml".to_string(), "b.toml".to_string()]).is_err());
+    }
 
     #[test]
     fn an_unspecified_bind_reports_a_usable_loopback_url() {

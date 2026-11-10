@@ -1,9 +1,16 @@
 [package]
 name = "proxy-server"
-default-run = "proxy-server"
+default-run = "cc-proxy"
+# The produced executable is `cc-proxy`, not the crate name. Turning auto-bins
+# off keeps Cargo from also emitting a `proxy-server` binary from src/main.rs.
+autobins = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "cc-proxy"
+path = "src/main.rs"
 
 [features]
 default = []
@@ -38,3 +45,8 @@ mime_guess = "2"
 tokio-stream = "0.1"
 anyhow = "1"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+# fork/setsid/dup2 for `--daemon`. Unix-only so the Windows release build
+# (see build-release.sh) still compiles.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

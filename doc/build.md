@@ -10,7 +10,19 @@ cargo build -p proxy-hook-agent --release # 编译 Hook CLI
 ## 运行
 
 ```bash
-./target/release/proxy-server config.toml  # 启动（默认端口 5000/8888/9999）
+./target/release/cc-proxy config.toml       # 前台启动（默认端口 5000/8888/9999）
+./target/release/cc-proxy -d config.toml    # 后台守护（日志 data/cc-proxy.log，PID data/cc-proxy.pid）
+```
+
+后台模式在解析参数后、创建 tokio runtime 之前双 fork，因此不改变工作目录——`config.toml`、`data/`、`captures/` 仍相对启动目录解析。
+
+### 静态编译（跨 glibc 版本部署）
+
+在较新的系统上编译、拿到旧系统运行时，会报 `GLIBC_2.xx not found`。改用 musl 目标产出全静态二进制即可：
+
+```bash
+cargo build -p proxy-server --release --target x86_64-unknown-linux-musl
+file target/x86_64-unknown-linux-musl/release/cc-proxy   # 应显示 statically linked
 ```
 
 ### 端口配置

@@ -187,11 +187,11 @@ build_arch() {
     local pkg_name="${PKG_NAMES[$arch]}"
     local ext="${PKG_EXTS[$arch]}"
     local pkg_dir="$OUTPUT_DIR/$pkg_name"
-    local binary_name="proxy-server"
+    local binary_name="cc-proxy"
 
     # Windows binary has .exe extension
     if [[ "$target" == *windows* ]]; then
-        binary_name="proxy-server.exe"
+        binary_name="cc-proxy.exe"
     fi
 
     echo "--- Building: $pkg_name (.$ext) ---"

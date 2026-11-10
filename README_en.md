@@ -38,15 +38,15 @@ Download the platform-appropriate archive from [GitHub Releases](https://github.
 
 | File | Purpose |
 |------|---------|
-| `proxy-server` / `proxy-server.exe` | Main proxy binary |
+| `cc-proxy` / `cc-proxy.exe` | Main proxy binary |
 | `config.toml` | Proxy config template — edit in your Provider API Keys, then manage visually from the dashboard |
 | `settings.json` | Claude Code config — see step 3 |
 
 ```bash
 # 1. Edit config.toml with your API Key
 # 2. Start
-./proxy-server config.toml          # macOS / Linux
-proxy-server.exe config.toml        # Windows
+./cc-proxy config.toml          # macOS / Linux
+cc-proxy.exe config.toml        # Windows
 ```
 
 > **Upgrade note**: Back up `config.toml` and `data.db` before upgrading to avoid losing configuration or history.
@@ -68,8 +68,8 @@ cargo run -p proxy-server --release -- config.toml
 **Option A: One-command setup (recommended)**
 
 ```bash
-./proxy-server --install               # Uses default proxy port 8888
-./proxy-server --install --port 8888   # Explicit port
+./cc-proxy --install               # Uses default proxy port 8888
+./cc-proxy --install --port 8888   # Explicit port
 ```
 
 This modifies `~/.claude/settings.json` automatically (backs up to `settings.json.bak` first; subsequent runs create `.bak.1`, `.bak.2`, ...), writing:
@@ -87,7 +87,7 @@ This modifies `~/.claude/settings.json` automatically (backs up to `settings.jso
 
 ```bash
 # To revert, uninstall removes the above fields (also backs up first)
-./proxy-server --uninstall
+./cc-proxy --uninstall
 ```
 
 **Option B: Manually override settings.json**

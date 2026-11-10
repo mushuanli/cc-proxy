@@ -38,15 +38,15 @@ WebSocket 推送每一笔 API 请求的完整生命周期 — 从发起请求、
 
 | 文件 | 用途 |
 |------|------|
-| `proxy-server` / `proxy-server.exe` | 代理主程序 |
+| `cc-proxy` / `cc-proxy.exe` | 代理主程序 |
 | `config.toml` | 代理配置模板，编辑填入 Provider API Key，启动后可在网页端可视化编辑 |
 | `settings.json` | Claude Code 配置，覆盖 `~/.claude/settings.json`（详见步骤 3） |
 
 ```bash
 # 1. 编辑 config.toml，填入你的 API Key
 # 2. 启动
-./proxy-server config.toml          # macOS / Linux
-proxy-server.exe config.toml        # Windows
+./cc-proxy config.toml          # macOS / Linux
+cc-proxy.exe config.toml        # Windows
 ```
 
 > **升级提醒**：升级前请先备份 `config.toml` 和 `data.db`，避免配置或历史数据丢失。
@@ -68,8 +68,8 @@ cargo run -p proxy-server --release -- config.toml
 **方式一：一条命令自动配置（推荐）**
 
 ```bash
-./proxy-server --install          # 默认代理端口 8888
-./proxy-server --install --port 8888   # 指定端口
+./cc-proxy --install          # 默认代理端口 8888
+./cc-proxy --install --port 8888   # 指定端口
 ```
 
 会自动修改 `~/.claude/settings.json`（修改前备份为 `settings.json.bak`，多次执行生成 `.bak.1`, `.bak.2` ...），写入：
@@ -87,7 +87,7 @@ cargo run -p proxy-server --release -- config.toml
 
 ```bash
 # 如需还原，卸载会将以上字段从 settings.json 中移除（同样会先备份）
-./proxy-server --uninstall
+./cc-proxy --uninstall
 ```
 
 **方式二：手动覆盖 settings.json**
