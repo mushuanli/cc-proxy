@@ -19,6 +19,8 @@ cd "$SCRIPT_DIR"
 # Ensure ~/.cargo/bin is in PATH (Homebrew Rust puts cargo-installed bins there)
 export PATH="$HOME/.cargo/bin:$PATH"
 
+HOST_TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+
 # --- Arch short name -> (target_triple, pkg_name, ext) ---
 declare -A TARGETS=()
 declare -A PKG_NAMES=()
@@ -212,10 +214,10 @@ build_arch() {
 
     # Build
     if [[ "$SKIP_BUILD" != "true" ]]; then
-        # Use zigbuild for cross-compilation, standard cargo for native
-        if [[ "$target" == "aarch64-apple-darwin" ]]; then
-            echo "  [BUILD] cargo build -p proxy-server --release"
-            cargo build -p proxy-server --release
+        # Native target uses plain cargo; anything else needs zigbuild
+        if [[ "$target" == "$HOST_TRIPLE" ]]; then
+            echo "  [BUILD] cargo build -p proxy-server --release --target $target"
+            cargo build -p proxy-server --release --target "$target"
         else
             if ! command -v cargo-zigbuild &>/dev/null; then
                 echo "  [ERROR] cargo-zigbuild required for cross-compilation"
@@ -241,7 +243,8 @@ build_arch() {
     mkdir -p "$pkg_dir"
 
     cp "$src_bin" "$pkg_dir/"
-    cp "$SCRIPT_DIR/config.toml" "$pkg_dir/"
+    # Ship the placeholder template, never the local config with real credentials
+    cp "$SCRIPT_DIR/config.toml.template" "$pkg_dir/config.toml"
     cp "$SCRIPT_DIR/settings.json" "$pkg_dir/"
     cp "$SCRIPT_DIR/statbar.sh" "$pkg_dir/"
 
@@ -252,8 +255,10 @@ build_arch() {
 
     if [[ "$ext" == "tar.gz" ]]; then
         tar czf "$archive" "$pkg_name"
-    else
+    elif command -v zip &>/dev/null; then
         zip -qr "$archive" "$pkg_name"
+    else
+        python3 -m zipfile -c "$archive" "$pkg_name"
     fi
 
     local size
