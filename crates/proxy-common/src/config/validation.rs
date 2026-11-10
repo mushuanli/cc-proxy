@@ -50,7 +50,7 @@ impl AppConfig {
         let plan = self.proxy.active_plan.trim();
         if !plan.is_empty() && !self.proxy.accounts.iter().any(|a| a.name == plan) {
             errors.push(format!(
-                "active_plan '{plan}' not found in accounts (it names a [[proxy.accounts]] entry, not an upstream)"
+                "active_plan '{plan}' not found in accounts (it names a accounts entry, not an upstream)"
             ));
         }
 

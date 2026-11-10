@@ -1,7 +1,7 @@
 //! Cross-protocol translation seam.
 //!
-//! cc-proxy already speaks two wire protocols: Anthropic Messages (`Anthropic`)
-//! and OpenAI Responses (`Codex`). Historically a request had to go to an
+//! cc-proxy speaks Anthropic Messages, OpenAI Responses, and Chat Completions.
+//! Historically a request had to go to an
 //! upstream speaking the *same* protocol it arrived in. This seam lifts that
 //! restriction without teaching `proxy-relay` anything about either format:
 //! the relay asks an injected adapter to rewrite the body on the way out and the
@@ -28,6 +28,8 @@ pub enum WireProtocol {
     Anthropic,
     /// OpenAI Responses API (`/responses`).
     Codex,
+    /// OpenAI Chat Completions API (`/v1/chat/completions`).
+    ChatCompletions,
 }
 
 impl WireProtocol {
@@ -35,6 +37,7 @@ impl WireProtocol {
         match self {
             WireProtocol::Anthropic => "anthropic",
             WireProtocol::Codex => "codex",
+            WireProtocol::ChatCompletions => "chat_completions",
         }
     }
 
@@ -42,17 +45,24 @@ impl WireProtocol {
         match raw.trim().to_ascii_lowercase().as_str() {
             "anthropic" | "claude" | "messages" => Some(WireProtocol::Anthropic),
             "codex" | "openai" | "responses" => Some(WireProtocol::Codex),
+            "chat_completions" | "chat-completions" | "completions" => {
+                Some(WireProtocol::ChatCompletions)
+            }
             _ => None,
         }
     }
 
     /// Canonical names, for validation messages and UI lists.
     pub fn accepted_names() -> String {
-        [WireProtocol::Anthropic, WireProtocol::Codex]
-            .iter()
-            .map(|protocol| protocol.as_str())
-            .collect::<Vec<_>>()
-            .join(" / ")
+        [
+            WireProtocol::Anthropic,
+            WireProtocol::Codex,
+            WireProtocol::ChatCompletions,
+        ]
+        .iter()
+        .map(|protocol| protocol.as_str())
+        .collect::<Vec<_>>()
+        .join(" / ")
     }
 }
 
@@ -72,6 +82,9 @@ pub struct TranslatedRequest {
 /// requires exactly one `message_start`, monotonic content-block indices, and a
 /// terminal `message_stop`), so translation cannot be a pure function.
 pub trait ResponseTranslator: Send {
+    /// Configure client response options before consuming upstream events.
+    fn configure_client(&mut self, _body: &[u8]) {}
+
     /// Feed one upstream SSE frame (the raw `data:` payload) and get back zero or
     /// more client-facing SSE frames, already serialised including the
     /// `event:`/`data:` prefixes.
@@ -189,7 +202,11 @@ mod tests {
 
     #[test]
     fn wire_protocol_round_trips() {
-        for protocol in [WireProtocol::Anthropic, WireProtocol::Codex] {
+        for protocol in [
+            WireProtocol::Anthropic,
+            WireProtocol::Codex,
+            WireProtocol::ChatCompletions,
+        ] {
             assert_eq!(WireProtocol::parse(protocol.as_str()), Some(protocol));
         }
         assert_eq!(

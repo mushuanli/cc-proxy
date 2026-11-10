@@ -198,6 +198,7 @@ pub fn apply_auth_to(mut headers: HeaderMap, auth: &UpstreamAuth) -> HeaderMap {
 pub enum ApiProtocol {
     Anthropic,
     Codex,
+    ChatCompletions,
 }
 
 impl ApiProtocol {
@@ -205,6 +206,7 @@ impl ApiProtocol {
         match self {
             Self::Anthropic => "anthropic",
             Self::Codex => "codex",
+            Self::ChatCompletions => "chat_completions",
         }
     }
 
@@ -213,14 +215,7 @@ impl ApiProtocol {
         match self {
             Self::Anthropic => proxy_common::protocol::WireProtocol::Anthropic,
             Self::Codex => proxy_common::protocol::WireProtocol::Codex,
-        }
-    }
-
-    /// The protocol a provider speaks when it is not the client's.
-    pub fn other(self) -> Self {
-        match self {
-            Self::Anthropic => Self::Codex,
-            Self::Codex => Self::Anthropic,
+            Self::ChatCompletions => proxy_common::protocol::WireProtocol::ChatCompletions,
         }
     }
 
@@ -230,6 +225,7 @@ impl ApiProtocol {
         match self {
             Self::Anthropic => "/v1/messages",
             Self::Codex => "/responses",
+            Self::ChatCompletions => "/v1/chat/completions",
         }
     }
 }
@@ -257,18 +253,22 @@ pub fn plan_bridge(
     if provider.serves(client.request_type()) {
         return None;
     }
-    let target = client.other();
-    if !provider.serves(target.request_type()) {
-        return None;
-    }
     let adapter = adapter?;
-    adapter
-        .supports(client.to_wire(), target.to_wire())
-        .then(|| BridgePlan {
-            target,
-            path: target.default_path(),
-            adapter: adapter.clone(),
-        })
+    // Prefer the provider's declared order when it cannot serve the client directly.
+    provider.protocols.iter().find_map(|name| {
+        let target = match proxy_common::protocol::WireProtocol::parse(name)? {
+            proxy_common::protocol::WireProtocol::Anthropic => ApiProtocol::Anthropic,
+            proxy_common::protocol::WireProtocol::Codex => ApiProtocol::Codex,
+            proxy_common::protocol::WireProtocol::ChatCompletions => ApiProtocol::ChatCompletions,
+        };
+        adapter
+            .supports(client.to_wire(), target.to_wire())
+            .then(|| BridgePlan {
+                target,
+                path: target.default_path(),
+                adapter: adapter.clone(),
+            })
+    })
 }
 
 /// Fields the ChatGPT Codex backend insists on that a generic Responses client
@@ -363,6 +363,14 @@ pub fn anthropic_models_body(ids: &[String]) -> serde_json::Value {
 }
 
 pub fn detect_protocol(path: &str, body: &serde_json::Value) -> ApiProtocol {
+    if path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .ends_with("/chat/completions")
+    {
+        return ApiProtocol::ChatCompletions;
+    }
     if path.contains("/responses")
         || (body.get("input").is_some() && body.get("messages").is_none())
     {
@@ -480,7 +488,7 @@ pub fn extract_request_session_id(
 
 pub fn message_count(protocol: ApiProtocol, body: &serde_json::Value) -> u32 {
     let field = match protocol {
-        ApiProtocol::Anthropic => "messages",
+        ApiProtocol::Anthropic | ApiProtocol::ChatCompletions => "messages",
         ApiProtocol::Codex => "input",
     };
     body.get(field).and_then(|v| v.as_array()).map_or_else(
@@ -616,6 +624,9 @@ fn make_parser(protocol: ApiProtocol) -> Box<dyn proxy_session::ClientParser> {
     match protocol {
         ApiProtocol::Anthropic => Box::new(proxy_session::AnthropicParser::default()),
         ApiProtocol::Codex => Box::new(proxy_session::CodexParser::default()),
+        ApiProtocol::ChatCompletions => {
+            Box::new(proxy_session::source::chat::ChatParser::default())
+        }
     }
 }
 
@@ -820,6 +831,14 @@ pub fn stream_upstream_response(
                 None => break,
             }
         }
+        if error.is_none() {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw_body) {
+                error = value
+                    .pointer("/error/message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
         // Finish the translated stream:
         //  * nothing translated → the upstream ignored `stream: true` and answered
         //    with a single body; render it as the client protocol's events rather
@@ -829,8 +848,8 @@ pub fn stream_upstream_response(
         //  * otherwise → normal end of stream.
         if let Some(translator) = response_translator.as_mut() {
             let frames = match (translated_any, error.as_deref()) {
-                (false, _) => translator.stream_from_complete(&raw_body),
-                (true, Some(reason)) => translator.abort(reason),
+                (_, Some(reason)) => translator.abort(reason),
+                (false, None) => translator.stream_from_complete(&raw_body),
                 (true, None) => translator.finish(),
             };
             for frame in frames {
@@ -912,6 +931,7 @@ pub async fn handle_non_streaming_response(
 
     // Translate before parsing so every downstream consumer (usage extraction,
     // normalization, capture, billing) sees the client protocol's shape.
+    let mut translation_failed = false;
     let body_bytes = match response_translator.as_mut() {
         Some(translator) => match translator.translate_complete(&body_bytes) {
             Some(translated) => {
@@ -922,7 +942,10 @@ pub async fn handle_non_streaming_response(
                 strip_body_framing_headers(&mut response_headers);
                 Bytes::from(translated)
             }
-            None => body_bytes,
+            None => {
+                translation_failed = status_code < 400;
+                body_bytes
+            }
         },
         None => body_bytes,
     };
@@ -949,6 +972,8 @@ pub async fn handle_non_streaming_response(
                 ttft_ms: None,
                 error: if is_http_error {
                     Some(format!("HTTP {}: {}", status_code, body_text.trim()))
+                } else if translation_failed {
+                    Some("upstream returned no translatable response body".into())
                 } else {
                     None
                 },
@@ -973,6 +998,7 @@ pub async fn handle_non_streaming_response(
 
     let stop_reason = body_json
         .get("stop_reason")
+        .or_else(|| body_json.pointer("/choices/0/finish_reason"))
         .and_then(|v| v.as_str())
         .map(String::from);
 
@@ -1016,6 +1042,9 @@ pub async fn handle_non_streaming_response(
             } else {
                 None
             }
+        })
+        .or_else(|| {
+            translation_failed.then(|| "upstream returned no translatable response body".into())
         });
 
     UpstreamResponse {
@@ -1046,14 +1075,17 @@ fn usage_from_json(body: &serde_json::Value) -> (u32, u32, u32) {
     let usage = body.get("usage").unwrap_or(&serde_json::Value::Null);
     let input = usage
         .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
     let output = usage
         .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
     let cached = usage
         .pointer("/input_tokens_details/cached_tokens")
+        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
     (input, output, cached)
@@ -1061,6 +1093,9 @@ fn usage_from_json(body: &serde_json::Value) -> (u32, u32, u32) {
 
 fn normalize_response_body(protocol: ApiProtocol, body: &serde_json::Value) -> NormalizedResponse {
     let mut normalized = NormalizedResponse::default();
+    if protocol == ApiProtocol::ChatCompletions {
+        return normalize_chat_response(body);
+    }
     if protocol == ApiProtocol::Anthropic {
         for block in body
             .get("content")
@@ -1607,7 +1642,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn the_chatgpt_backend_body_gets_what_it_demands() {
         // The exact shape an OpenAI-compatible Responses client sends: a bare
         // string `input`, which the official API accepts and this backend does not
@@ -1711,17 +1745,164 @@ mod tests {
         assert_eq!(empty["has_more"], false);
     }
 
+    #[test]
     fn api_protocol_wire_conversion_round_trips() {
-        for protocol in [ApiProtocol::Anthropic, ApiProtocol::Codex] {
+        for protocol in [
+            ApiProtocol::Anthropic,
+            ApiProtocol::Codex,
+            ApiProtocol::ChatCompletions,
+        ] {
             assert_eq!(protocol.to_wire().as_str(), protocol.request_type());
-            assert_eq!(
-                protocol.other().to_wire().as_str(),
-                protocol.other().request_type()
-            );
         }
-        assert_eq!(ApiProtocol::Anthropic.other(), ApiProtocol::Codex);
-        assert_eq!(ApiProtocol::Codex.other(), ApiProtocol::Anthropic);
         assert_eq!(ApiProtocol::Anthropic.default_path(), "/v1/messages");
         assert_eq!(ApiProtocol::Codex.default_path(), "/responses");
+        assert_eq!(
+            ApiProtocol::ChatCompletions.default_path(),
+            "/v1/chat/completions"
+        );
+    }
+}
+
+fn normalize_chat_response(body: &serde_json::Value) -> NormalizedResponse {
+    let mut normalized = NormalizedResponse::default();
+    let message = &body["choices"][0]["message"];
+    push_string(message.get("content"), &mut normalized.text);
+    push_string(message.get("reasoning_content"), &mut normalized.thinking);
+    for tool in message["tool_calls"].as_array().into_iter().flatten() {
+        normalized.tool_calls.push(ToolCallRecord {
+            id: string_field(tool, "id"),
+            name: string_field(&tool["function"], "name"),
+            input: tool["function"]["arguments"].clone(),
+        });
+    }
+    normalized
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+    use proxy_common::protocol::ProtocolAdapter;
+    use serde_json::json;
+
+    fn provider(protocols: &[&str]) -> proxy_common::Provider {
+        serde_json::from_value(
+            json!({"name":"chat","url":"https://example.com","protocols":protocols}),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn chat_path_takes_priority_over_responses_body_heuristic() {
+        assert_eq!(
+            detect_protocol("/v1/chat/completions", &json!({"input":"hi"})),
+            ApiProtocol::ChatCompletions
+        );
+        assert_eq!(
+            detect_protocol("/v1/responses", &json!({"input":"hi"})),
+            ApiProtocol::Codex
+        );
+        assert_eq!(
+            detect_protocol("/v1/messages", &json!({"messages":[]})),
+            ApiProtocol::Anthropic
+        );
+    }
+    #[test]
+    fn three_protocol_routes_use_provider_order_and_keep_native_requests() {
+        let adapter: std::sync::Arc<dyn ProtocolAdapter> =
+            std::sync::Arc::new(proxy_bridge::AnthropicCodexAdapter::new());
+        for client in [ApiProtocol::Anthropic, ApiProtocol::Codex] {
+            let bridge =
+                plan_bridge(client, &provider(&["chat_completions"]), Some(&adapter)).unwrap();
+            assert_eq!(bridge.target, ApiProtocol::ChatCompletions);
+            assert_eq!(bridge.path, "/v1/chat/completions");
+        }
+        let p = provider(&["chat_completions", "anthropic"]);
+        assert_eq!(
+            plan_bridge(ApiProtocol::Codex, &p, Some(&adapter))
+                .unwrap()
+                .target,
+            ApiProtocol::ChatCompletions
+        );
+        assert!(plan_bridge(ApiProtocol::Anthropic, &p, Some(&adapter)).is_none());
+        assert!(
+            plan_bridge(ApiProtocol::ChatCompletions, &provider(&[]), Some(&adapter)).is_none()
+        );
+        assert!(plan_bridge(ApiProtocol::Codex, &p, None).is_none());
+    }
+    fn chat_body() -> serde_json::Value {
+        json!({"id":"c1","model":"kimi","choices":[{"message":{"role":"assistant","content":"你好"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":7}}})
+    }
+    #[tokio::test]
+    async fn non_streaming_chat_and_translated_responses_keep_usage_and_text() {
+        for client in [
+            ApiProtocol::ChatCompletions,
+            ApiProtocol::Codex,
+            ApiProtocol::Anthropic,
+        ] {
+            let response = reqwest::Response::from(
+                http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .header("content-length", 9999)
+                    .body(chat_body().to_string())
+                    .unwrap(),
+            );
+            let adapter = proxy_bridge::AnthropicCodexAdapter::new();
+            let t = adapter
+                .response_translator(client.to_wire(), ApiProtocol::ChatCompletions.to_wire());
+            let r = handle_non_streaming_response(response, Instant::now(), client, t).await;
+            assert_eq!(r.content_text.as_deref(), Some("你好"));
+            assert_eq!(r.output_tokens, 5);
+            assert_eq!(r.cache_read_tokens, 7);
+            assert_eq!(
+                r.input_tokens,
+                if client == ApiProtocol::Anthropic {
+                    13
+                } else {
+                    20
+                }
+            );
+            if client != ApiProtocol::ChatCompletions {
+                assert!(r.response_headers.get("content-length").is_none());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn chat_stream_translates_to_responses_and_records_native_usage() {
+        let events = [
+            json!({"id":"c1","model":"kimi","choices":[{"delta":{"content":"你好"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+            json!({"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":7}}}),
+        ];
+        let mut body = events
+            .iter()
+            .map(|v| format!("data: {v}\n\n"))
+            .collect::<String>();
+        body.push_str("data: [DONE]\n\n");
+        let response =
+            reqwest::Response::from(http::Response::builder().status(200).body(body).unwrap());
+        let t = proxy_bridge::AnthropicCodexAdapter::new().response_translator(
+            proxy_common::protocol::WireProtocol::Codex,
+            proxy_common::protocol::WireProtocol::ChatCompletions,
+        );
+        let r = stream_upstream_response(
+            response,
+            Instant::now(),
+            ApiProtocol::ChatCompletions,
+            StreamCtx {
+                call_id: "call-1".into(),
+                session_id: "sess-1".into(),
+                ingest: None,
+            },
+            t,
+        );
+        let bytes = axum::body::to_bytes(r.body, 1024 * 1024).await.unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.contains("response.output_text.delta"));
+        assert!(text.contains("response.completed"));
+        let meta = r.metadata.await.unwrap();
+        assert_eq!(meta.input_tokens, 20);
+        assert_eq!(meta.output_tokens, 5);
+        assert_eq!(meta.cache_read_tokens, 7);
+        assert_eq!(meta.content_text.as_deref(), Some("你好"));
     }
 }

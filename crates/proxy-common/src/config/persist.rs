@@ -5,7 +5,7 @@ use crate::error::{ConfigError, ConfigResult};
 use crate::pricing::ModelPricing;
 use crate::upstream::TierRule;
 
-/// Persist the current AppConfig to config.toml using toml_edit for format preservation.
+/// Persist the current AppConfig using the canonical flat array layout.
 pub async fn persist_config(path: &Path, config: &AppConfig) -> ConfigResult<()> {
     let content = if path.exists() {
         tokio::fs::read_to_string(path).await?
@@ -13,31 +13,79 @@ pub async fn persist_config(path: &Path, config: &AppConfig) -> ConfigResult<()>
         String::new()
     };
 
-    let mut doc: toml_edit::DocumentMut = if content.is_empty() {
+    let previous: toml_edit::DocumentMut = if content.is_empty() {
         toml_edit::DocumentMut::new()
     } else {
         content.parse().map_err(ConfigError::TomlEdit)?
     };
-
-    // Write model_pricing array
-    write_model_pricing(&mut doc, &config.model_pricing);
-
-    // Write proxy section
-    write_proxy_section(&mut doc, config);
-
-    // Write server section
-    write_server_section(&mut doc, config);
-
-    // Write logging section
-    write_logging_section(&mut doc, config);
-
-    // Remove legacy keys
-    doc.remove("session_retention_days");
-    doc.remove("api_target");
-
-    let serialized = doc.to_string();
-
+    let serialized = format_config(&previous, config);
     atomic_write(path, &serialized).await
+}
+
+/// Canonical flat layout; keep unknown root fields and sections when saving.
+fn format_config(previous: &toml_edit::DocumentMut, config: &AppConfig) -> String {
+    let mut doc = toml_edit::DocumentMut::new();
+    write_routing_settings(&mut doc, config);
+    write_model_pricing(&mut doc, &config.model_pricing);
+    write_server_section(&mut doc, config);
+    write_logging_section(&mut doc, config);
+    for (key, item) in previous.iter() {
+        if !doc.contains_key(key)
+            && !matches!(
+                key,
+                "proxy"
+                    | "session_retention_days"
+                    | "api_target"
+                    | "accounts"
+                    | "model_pricing"
+                    | "http_proxy"
+            )
+        {
+            doc.insert(key, item.clone());
+        }
+    }
+    add_group_comments(&mut doc);
+    doc.to_string()
+}
+
+fn add_group_comments(doc: &mut toml_edit::DocumentMut) {
+    for (key, comment) in [
+        (
+            "active_upstream",
+            "# 默认路由与运行参数（http_proxy 才是出站网络代理）\n",
+        ),
+        ("retry_count", "\n# 请求策略\n"),
+        ("request_retention_hours", "\n# 数据保留\n"),
+        ("providers", "\n# 服务商：连接地址、认证与协议\n"),
+        ("accounts", "\n# 可选账号：provider 通过 account 引用\n"),
+        (
+            "upstreams",
+            "\n# 路由方案：default 为兜底，high / mid / low 为可选覆盖\n",
+        ),
+        (
+            "model_pricing",
+            "\n# 模型映射与价格：[输入、输出、缓存写入、缓存读取]，USD / 百万 token\n",
+        ),
+    ] {
+        if let Some(mut key) = doc.key_mut(key) {
+            key.leaf_decor_mut().set_prefix(comment);
+        }
+    }
+}
+
+/// One inline table per line inside a regular TOML array.
+fn table_array(tables: toml_edit::ArrayOfTables) -> toml_edit::Item {
+    let mut array = toml_edit::Array::new();
+    for table in tables {
+        let mut value = toml_edit::Value::InlineTable(table.into_inline_table());
+        value.decor_mut().set_prefix("\n    ");
+        array.push_formatted(value);
+    }
+    if !array.is_empty() {
+        array.set_trailing_comma(true);
+        array.set_trailing("\n");
+    }
+    toml_edit::value(array)
 }
 
 async fn atomic_write(path: &Path, content: &str) -> ConfigResult<()> {
@@ -59,9 +107,6 @@ async fn atomic_write(path: &Path, content: &str) -> ConfigResult<()> {
 
 fn write_model_pricing(doc: &mut toml_edit::DocumentMut, pricing: &[ModelPricing]) {
     doc.remove("model_pricing");
-    if pricing.is_empty() {
-        return;
-    }
     let mut arr = toml_edit::ArrayOfTables::new();
     for mp in pricing {
         let mut tbl = toml_edit::Table::new();
@@ -72,7 +117,9 @@ fn write_model_pricing(doc: &mut toml_edit::DocumentMut, pricing: &[ModelPricing
         );
         if !mp.providers.is_empty() {
             let mut providers_tbl = toml_edit::Table::new();
-            for (k, v) in &mp.providers {
+            let mut providers: Vec<_> = mp.providers.iter().collect();
+            providers.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (k, v) in providers {
                 let mut names_arr = toml_edit::Array::new();
                 for n in v {
                     names_arr.push(n.as_str());
@@ -86,10 +133,10 @@ fn write_model_pricing(doc: &mut toml_edit::DocumentMut, pricing: &[ModelPricing
         }
         arr.push(tbl);
     }
-    doc["model_pricing"] = toml_edit::Item::ArrayOfTables(arr);
+    doc["model_pricing"] = table_array(arr);
 }
 
-fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
+fn write_routing_settings(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
     let proxy = &config.proxy;
     let mut tbl = toml_edit::Table::new();
 
@@ -162,7 +209,7 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         }
         providers_arr.push(pt);
     }
-    tbl.insert("providers", toml_edit::Item::ArrayOfTables(providers_arr));
+    tbl.insert("providers", table_array(providers_arr));
 
     // Upstream accounts array (family × mode)
     let mut accounts_arr = toml_edit::ArrayOfTables::new();
@@ -200,9 +247,7 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         }
         accounts_arr.push(at);
     }
-    if !accounts_arr.is_empty() {
-        tbl.insert("accounts", toml_edit::Item::ArrayOfTables(accounts_arr));
-    }
+    tbl.insert("accounts", table_array(accounts_arr));
 
     // Upstreams array
     let mut upstreams_arr = toml_edit::ArrayOfTables::new();
@@ -235,14 +280,16 @@ fn write_proxy_section(doc: &mut toml_edit::DocumentMut, config: &AppConfig) {
         }
         upstreams_arr.push(ut);
     }
-    tbl.insert("upstreams", toml_edit::Item::ArrayOfTables(upstreams_arr));
+    tbl.insert("upstreams", table_array(upstreams_arr));
 
-    doc["proxy"] = toml_edit::Item::Table(tbl);
+    for (key, value) in tbl {
+        doc.insert(&key, value);
+    }
 }
 
 fn tier_rule_to_item(rule: &TierRule, def_provider: Option<&str>) -> toml_edit::Item {
     let mut tbl = toml_edit::Table::new();
-    if def_provider.map_or(true, |dp| rule.provider != dp) {
+    if !rule.provider.is_empty() && def_provider.map_or(true, |dp| rule.provider != dp) {
         tbl.insert("provider", toml_edit::value(rule.provider.as_str()));
     }
     tbl.insert("model", toml_edit::value(rule.model.as_str()));
@@ -466,5 +513,107 @@ mod tests {
         );
 
         let _ = tokio::fs::remove_file(&path).await;
+    }
+}
+
+#[cfg(test)]
+mod flat_tests {
+    use super::*;
+    use crate::config::ConfigStore;
+    use serde_json::json;
+
+    fn flat_config() -> AppConfig {
+        let mut base = serde_json::to_value(AppConfig::default()).unwrap();
+        let extra = json!({
+            "active_upstream":"woagent",
+            "providers":[{"name":"woagent","url":"https://ai.woagent.net","token":"sk-test\"\\\nsecret","protocols":["chat_completions"],"proxy":""}],
+            "accounts":[{"name":"demo","family":"gpt","mode":"api_key","api_key":"sk-demo"}],
+            "upstreams":[{"name":"woagent","high":{"provider":"","model":"other"},"default":{"provider":"woagent","model":"KM-kimi-k2.6"}}],
+            "model_pricing":[{"id":"KM-kimi-k2.6","price":[0.0,0.0],"providers":{"woagent":["KM-kimi-k2.6"],"provider.with.dot":["alias"]}}]
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+    #[test]
+    fn root_arrays_preserve_all_values_and_escape_nested_keys_and_secrets() {
+        let config = flat_config();
+        let output = format_config(&toml_edit::DocumentMut::new(), &config);
+        let doc: toml_edit::DocumentMut = output.parse().unwrap();
+        assert!(!doc.contains_key("proxy"));
+        for key in ["providers", "accounts", "upstreams", "model_pricing"] {
+            assert!(doc[key].is_array(), "{key} should use a regular array");
+            assert!(!output.contains(&format!("[[{key}]]")));
+        }
+        assert!(!output.contains("[upstreams.default]"));
+        let reloaded: AppConfig = toml::from_str(&output).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::to_value(&reloaded).unwrap()
+        );
+        let second = format_config(&doc, &reloaded);
+        assert_eq!(
+            output, second,
+            "load/save must not change layout or mapping order"
+        );
+    }
+    #[tokio::test]
+    async fn dashboard_save_and_reload_keep_flat_arrays_and_route_selection() {
+        let path = std::env::temp_dir().join(format!("cc-proxy-flat-{}.toml", ulid::Ulid::new()));
+        let config = flat_config();
+        persist_config(&path, &config).await.unwrap();
+        let store = ConfigStore::open(&path).await.unwrap();
+        store
+            .update(|c| {
+                c.proxy.request_timeout_secs = 77;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reloaded = store.reload().await.unwrap();
+        assert_eq!(reloaded.proxy.active_upstream, "woagent");
+        assert_eq!(reloaded.proxy.request_timeout_secs, 77);
+        assert_eq!(
+            reloaded.proxy.providers[0].token,
+            config.proxy.providers[0].token
+        );
+        let route = store.resolve_route("anything").await.unwrap();
+        assert_eq!(route.provider, "woagent");
+        assert_eq!(route.resolved_model, "KM-kimi-k2.6");
+        let output = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!output.contains("[proxy]"));
+        assert!(output.contains("providers = [\n"));
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+    #[test]
+    fn unknown_sections_survive_without_restoring_cleared_optional_fields() {
+        let previous: toml_edit::DocumentMut =
+            "http_proxy = 'http://old:8080'\n[custom]\nflag = true\n"
+                .parse()
+                .unwrap();
+        let output = format_config(&previous, &AppConfig::default());
+        let doc: toml_edit::DocumentMut = output.parse().unwrap();
+        assert!(!doc.contains_key("http_proxy"));
+        assert_eq!(doc["custom"]["flag"].as_bool(), Some(true));
+        assert_eq!(output, format_config(&doc, &AppConfig::default()));
+        assert!(doc["accounts"].as_array().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+    #[test]
+    fn shipped_template_uses_valid_flat_arrays_and_routes_to_woagent() {
+        let template = include_str!("../../../../config.toml.template");
+        let config: AppConfig = toml::from_str(template).unwrap();
+        assert!(config.validate().is_empty(), "{:?}", config.validate());
+        assert_eq!(config.proxy.active_upstream, "woagent");
+        let doc: toml_edit::DocumentMut = template.parse().unwrap();
+        assert!(!doc.contains_key("proxy"));
+        for key in ["providers", "accounts", "upstreams", "model_pricing"] {
+            assert!(doc[key].is_array());
+        }
     }
 }

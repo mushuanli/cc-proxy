@@ -10,6 +10,7 @@ pub const FORBID_PROXY_UPSTREAM: &str = "__forbid__";
 pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_pricing: Vec<ModelPricing>,
+    #[serde(flatten)]
     pub proxy: ProxyConfig,
     pub server: ServerConfig,
     pub logging: LoggingConfig,
@@ -147,7 +148,7 @@ impl ProxyConfig {
 pub struct ProxyConfig {
     #[serde(default)]
     pub active_upstream: String,
-    /// Active **plan connection**, named after a `[[proxy.accounts]]` entry.
+    /// Active **plan connection**, named after a `accounts` entry.
     ///
     /// A plan is a peer of an upstream — both answer "which upstream do we talk
     /// to" — but it is defined by a *subscription account* rather than by

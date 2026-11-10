@@ -1,4 +1,4 @@
-//! Anthropic Messages ⇄ OpenAI Responses translation.
+//! Anthropic Messages ⇄ OpenAI Responses ⇄ Chat Completions translation.
 //!
 //! Mechanism behind [`proxy_common::protocol::ProtocolAdapter`]. Lets a Claude
 //! Code client (which speaks Anthropic Messages) ride an upstream that only
@@ -27,13 +27,15 @@ use proxy_common::protocol::{
 };
 use serde_json::{json, Map, Value};
 
+mod chat;
+mod chat_stream;
 mod reverse;
 mod stream;
 
 pub use reverse::ResponsesStreamTranslator;
 pub use stream::AnthropicStreamTranslator;
 
-/// Translates Anthropic Messages to and from OpenAI Responses.
+/// Translates all supported wire protocols; the original name remains API-compatible.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AnthropicCodexAdapter;
 
@@ -45,11 +47,7 @@ impl AnthropicCodexAdapter {
 
 impl ProtocolAdapter for AnthropicCodexAdapter {
     fn supports(&self, from: WireProtocol, to: WireProtocol) -> bool {
-        matches!(
-            (from, to),
-            (WireProtocol::Anthropic, WireProtocol::Codex)
-                | (WireProtocol::Codex, WireProtocol::Anthropic)
-        )
+        from != to
     }
 
     fn translate_request(
@@ -61,6 +59,20 @@ impl ProtocolAdapter for AnthropicCodexAdapter {
         match (from, to) {
             (WireProtocol::Anthropic, WireProtocol::Codex) => messages_to_responses(body),
             (WireProtocol::Codex, WireProtocol::Anthropic) => responses_to_messages(body),
+            (WireProtocol::ChatCompletions, WireProtocol::Codex) => chat::chat_to_responses(body),
+            (WireProtocol::Codex, WireProtocol::ChatCompletions) => chat::responses_to_chat(body),
+            (WireProtocol::Anthropic, WireProtocol::ChatCompletions) => preserve_field(
+                chat::messages_to_chat(body)?,
+                body,
+                "stop_sequences",
+                "stop",
+            ),
+            (WireProtocol::ChatCompletions, WireProtocol::Anthropic) => preserve_field(
+                chat::chat_to_messages(body)?,
+                body,
+                "stop",
+                "stop_sequences",
+            ),
             (from, to) => Err(format!(
                 "no request translation from {} to {}",
                 from.as_str(),
@@ -83,9 +95,46 @@ impl ProtocolAdapter for AnthropicCodexAdapter {
             (WireProtocol::Codex, WireProtocol::Anthropic) => {
                 Some(Box::new(ResponsesStreamTranslator::new()))
             }
+            (WireProtocol::Anthropic, WireProtocol::ChatCompletions) => {
+                Some(Box::new(chat_stream::ChatToAnthropic::default()))
+            }
+            (WireProtocol::ChatCompletions, WireProtocol::Anthropic) => {
+                Some(Box::new(chat_stream::AnthropicToChat::new(true)))
+            }
+            (WireProtocol::Codex, WireProtocol::ChatCompletions) => {
+                Some(Box::new(chat_stream::Chain {
+                    first: Box::new(chat_stream::ChatToAnthropic::default()),
+                    second: Box::new(ResponsesStreamTranslator::new()),
+                }))
+            }
+            (WireProtocol::ChatCompletions, WireProtocol::Codex) => {
+                Some(Box::new(chat_stream::Chain {
+                    first: Box::new(AnthropicStreamTranslator::new()),
+                    second: Box::new(chat_stream::AnthropicToChat::new(true)),
+                }))
+            }
             _ => None,
         }
     }
+}
+
+fn preserve_field(
+    mut translated: TranslatedRequest,
+    body: &[u8],
+    from: &str,
+    to: &str,
+) -> Result<TranslatedRequest, String> {
+    let original: Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+    if let Some(value) = original.get(from) {
+        let mut out: Value = serde_json::from_slice(&translated.body).map_err(|e| e.to_string())?;
+        out[to] = if to == "stop_sequences" && value.is_string() {
+            json!([value])
+        } else {
+            value.clone()
+        };
+        translated.body = serde_json::to_vec(&out).map_err(|e| e.to_string())?;
+    }
+    Ok(translated)
 }
 
 // ── Request: Anthropic Messages → OpenAI Responses ──

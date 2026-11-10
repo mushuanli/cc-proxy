@@ -1,289 +1,57 @@
-# CC Proxy — Configuration Template
-# Copy to config.toml and fill in your API tokens.
-#
-# Three-layer architecture:
-#   model_pricing  — logical model families with canonical pricing (defined once)
-#   providers      — API endpoints: URL + token only
-#   proxy.upstreams — routing strategies: map Opus/Sonnet/Haiku tiers → provider + model
-#
-# Routing flow:
-#   Request(model="claude-sonnet-4-6")
-#     → tier match on model name (opus / sonnet / haiku)
-#     → provider lookup  →  token injection
-#     → model translation: logical ID → provider-specific model name
-#     → cost lookup via model_pricing
-
-# ── Global Model Pricing ──────────────────────────────────────────────────────
-# price = [input, output]                      cache_write=input×1.25, cache_read=input×0.1
-# price = [input, output, cache_write, cache_read]   (all explicit)
-# Unit: USD / million tokens
-#
-# providers.<name> = []          model name at that provider = logical id
-# providers.<name> = ["a","b"]   routing uses "a"; reverse-lookup matches "a" or "b"
-
-[[model_pricing]]
-id = "claude-fable"
-price = [10.0, 50.0, 12.50, 1.0]
-[model_pricing.providers]
-anthropic = ["claude-fable-5"]
-
-[[model_pricing]]
-id = "claude-opus"
-price = [5.0, 25.0, 6.25, 0.5]
-[model_pricing.providers]
-anthropic = ["claude-opus-4-8"]
-
-[[model_pricing]]
-id = "claude-sonnet5"
-price = [3.0, 15.0, 3.75, 0.3]
-[model_pricing.providers]
-anthropic = ["claude-sonnet-5"]
-
-[[model_pricing]]
-id = "claude-sonnet"
-price = [3.0, 15.0, 3.75, 0.3]
-[model_pricing.providers]
-anthropic = ["claude-sonnet-4-6"]
-
-[[model_pricing]]
-id = "claude-haiku"
-price = [0.8, 4.0, 1.0, 0.08]
-[model_pricing.providers]
-anthropic = ["claude-haiku-4-5"]
-
-[[model_pricing]]
-id = "deepseek-v4-pro"
-price = [0.4286, 0.8571, 0.4286, 0.0036]
-[model_pricing.providers]
-deepseek = []
-
-[[model_pricing]]
-id = "deepseek-v4-flash"
-price = [0.1429, 0.2857, 0.1429, 0.0029]
-[model_pricing.providers]
-deepseek = []
-
-# ── Logging ──────────────────────────────────────────────────────────────────
-[logging]
-level = "info"   # trace | debug | info | warn | error
-
-# ── Server ports ─────────────────────────────────────────────────────────────
-[server]
-# 必须是 IP 字面量（不做 DNS 解析）：
-#   127.0.0.1  仅本机（默认）
-#   0.0.0.0    所有 IPv4 网卡
-#   ::         所有 IPv6 网卡（Linux 上通常也接受 IPv4 映射）
-#   192.168.x.x 指定网卡
-# 非 loopback 时 /api 与 /ws 会强制校验 auth_token（未设置会在首次启动时自动生成并落盘）。
-# 只有两个监听端口；http_port 与 proxy_port 不能相同，也不能为 0。
-listen_address = "127.0.0.1"
-http_port      = 5000   # Dashboard UI
-proxy_port     = 8888   # Reverse: ANTHROPIC_BASE_URL=http://127.0.0.1:8888
-                         # Forward: HTTP_PROXY=http://127.0.0.1:8888 (absolute URI)
-#
-# 浏览器跨域（CORS）。代理口没有鉴权，浏览器页面直接调用它必须由服务端放行。
-# 留空 = 不发送任何 CORS 头（默认，最安全）。
-# cors_origins = ["http://192.168.31.10:3000"]   # 只放行这些来源
-# cors_origins = ["*"]                           # 放行任意来源（无鉴权，慎用）
-# 注意：改这项要重启进程（[server] 在启动时生效）。
-
-# ── Proxy & Upstream Routing ──────────────────────────────────────────────────
-[proxy]
-# Plan 连接：与 upstream 并列的第三种目标，值是 [[proxy.accounts]] 的名字。
-# 非空 = plan 模式：绕过 provider/tier、不做模型翻译，所有请求直连该账号的厂商端点；
-# GET /v1/models 也改为返回这个 plan 自己可用的模型。留空 = 关闭（旧行为不变）。
-# active_plan = "gpt-plan"
-active_upstream = "deepseek-only"
-# Transparent forward-proxy traffic can select a different upstream.
-# "__forbid__" = reject transparent proxy traffic (default).
-# "__auto__" = auto-detect provider by matching request URL host to provider URL.
+# 默认路由与运行参数（http_proxy 才是出站网络代理）
+active_upstream = "woagent"
+active_plan = ""
 active_proxy_upstream = "__forbid__"
-# Global effort level. Options: auto | low | medium | high | xhigh | max | ultracode
-# "auto" = pass through client value unchanged. Can be overridden per-upstream.
 active_effort = "auto"
 
-# Data retention
-request_retention_hours   = 8    # delete requests older than N hours (0 = never)
-session_max_count         = 200  # max sessions in DB (0 = unlimited)
-session_delete_after_days = 0    # delete session records after N days (0 = never)
+# 请求策略
+retry_count = 3
+request_timeout_secs = 120
 
-# Relay → upstream API proxy (outbound side).
-# Set http_proxy to route relay's upstream API calls through an HTTP proxy.
-# Per-provider proxy overrides this; empty "" forces direct connection.
-# http_proxy = "http://proxy:8080"
+# 数据保留
+request_retention_hours = 8
+session_max_count = 200
+session_delete_after_days = 0
 
-# Request timeout (seconds). 0 = no timeout. Errors are logged and 504 is returned.
-request_timeout_secs      = 120
-# Max retries for connection/timeout errors (exponential backoff: 200ms * 2^attempt).
-retry_count               = 3
+# 服务商：连接地址、认证与协议
+providers = [
+    { name = "woagent", url = "https://ai.woagent.net", protocols = ["chat_completions"], token = "sk-your-key" },
+    { name = "anthropic", url = "https://api.anthropic.com", token = "sk-ant-..." },
+    { name = "deepseek", url = "https://api.deepseek.com/anthropic", token = "sk-..." },
+]
 
-# ── Providers ─────────────────────────────────────────────────────────────────
-# Only URL + auth token. Model names are declared in model_pricing.providers above.
-# Token auth: starts with "sk-" → Authorization: Bearer; otherwise → x-api-key
+# 可选账号：provider 通过 account 引用
+accounts = []
 
-[[proxy.providers]]
-name  = "anthropic"
-url   = "https://api.anthropic.com"
-token = "sk-ant-..."
-# 模型目录（面板模型矩阵里 provider 列头的「清单」按钮抓的就是它）。
-# 留空 = 按接入类型推断（先看 models_kind，再看账号家族，再看 URL 是否 chatgpt.com）：
-#   openai    /v1/models      data[].id       OpenAI 兼容网关，最常见
-#   anthropic /v1/models      data[].id       需 anthropic-version（账号身份自带；纯 token 时自动补）
-#   codex     /models         models[].slug   ChatGPT 后端，按 client_version 门控
-#   gemini    /v1beta/models  models[].name   名称归一化；注意 cc-proxy 不能转发到 Gemini，仅用于看目录
-#   manual    不抓取：客户端 /v1/models 返回的就是你配置的模型
-# models_kind = "openai"
-# models_url  = "https://gateway.internal/v1/models"   # 自建网关直接覆盖地址
-# Per-provider proxy for relay → this provider (overrides global http_proxy).
-# Unset = inherit global http_proxy. "" = direct. URL = use this proxy.
-# proxy = "http://proxy:8080"
+# 路由方案：default 为兜底，high / mid / low 为可选覆盖
+upstreams = [
+    { name = "woagent", default = { provider = "woagent", model = "KM-kimi-k2.6" } },
+    { name = "deepseek-pro", low = { model = "deepseek-v4-flash" }, default = { provider = "deepseek", model = "deepseek-v4-pro" } },
+    { name = "deepseek", mid = { model = "deepseek-v4-flash" }, low = { model = "deepseek-v4-flash" }, default = { provider = "deepseek", model = "deepseek-v4-pro" } },
+    { name = "deepseek-flash", default = { provider = "deepseek", model = "deepseek-v4-flash" } },
+    { name = "anthropic-fable", high = { model = "claude-fable" }, low = { model = "claude-haiku" }, default = { provider = "anthropic", model = "claude-sonnet" }, effort = "high" },
+    { name = "anthropic-sonnet5", default = { provider = "anthropic", model = "claude-sonnet5" } },
+    { name = "anthropic", high = { model = "claude-opus" }, low = { model = "claude-haiku" }, default = { provider = "anthropic", model = "claude-sonnet" } },
+    { name = "mix", high = { provider = "anthropic", model = "claude-opus" }, low = { model = "deepseek-v4-flash" }, default = { provider = "deepseek", model = "deepseek-v4-pro" } },
+]
 
-[[proxy.providers]]
-name  = "deepseek"
-url   = "https://api.deepseek.com/anthropic"
-token = "sk-..."
-# proxy = ""   # force direct connection, bypass global http_proxy
+# 模型映射与价格：[输入、输出、缓存写入、缓存读取]，USD / 百万 token
+model_pricing = [
+    { id = "KM-kimi-k2.6", price = [0.0, 0.0], providers = { woagent = ["KM-kimi-k2.6"] } },
+    { id = "claude-fable", price = [10.0, 50.0, 12.5, 1.0], providers = { anthropic = ["claude-fable-5"] } },
+    { id = "claude-opus", price = [5.0, 25.0, 6.25, 0.5], providers = { anthropic = ["claude-opus-4-8"] } },
+    { id = "claude-sonnet5", price = [3.0, 15.0, 3.75, 0.3], providers = { anthropic = ["claude-sonnet-5"] } },
+    { id = "claude-sonnet", price = [3.0, 15.0, 3.75, 0.3], providers = { anthropic = ["claude-sonnet-4-6"] } },
+    { id = "claude-haiku", price = [0.8, 4.0, 1.0, 0.08], providers = { anthropic = ["claude-haiku-4-5"] } },
+    { id = "deepseek-v4-pro", price = [0.4286, 0.8571, 0.4286, 0.0036], providers = { deepseek = [] } },
+    { id = "deepseek-v4-flash", price = [0.1429, 0.2857, 0.1429, 0.0029], providers = { deepseek = [] } },
+]
 
-# ── Upstreams ─────────────────────────────────────────────────────────────────
-# Every upstream MUST have a default tier. The proxy will refuse to start
-# if default is missing.
-#
-# Three tiers match on incoming model name (case-insensitive substring):
-#   high (Opus) → mid (Sonnet) → low (Haiku) → default (fallback)
-#
-# provider: API endpoint (from [[proxy.providers]]). Can be omitted when same as
-#           default, in which case it inherits default's provider.
-# model:    logical ID resolved via model_pricing.providers, or raw provider name.
-#           Empty → transparent passthrough, original request model is forwarded
-#           unchanged. Use this when the provider supports dynamic model routing.
-#
-# effort (optional): inject effort level when this upstream is active.
-#   Options: auto | low | medium | high | xhigh | max | ultracode
-#
-# ── Examples ──
-#
-# Passthrough mode — forward all requests as-is to a single provider:
-#   [[proxy.upstreams]]
-#   name = "passthrough"
-#   default = { provider = "deepseek" }
-#
-# Fixed model mode — all requests resolve to the same model:
-#   [[proxy.upstreams]]
-#   name = "fixed"
-#   default = { provider = "deepseek", model = "deepseek-v4-pro" }
-#
-# Tiered routing — different models per tier, defaults inherited:
-#   [[proxy.upstreams]]
-#   name = "tiered"
-#   high    = { model = "claude-opus" }
-#   low     = { model = "claude-haiku" }
-#   default = { provider = "anthropic", model = "claude-sonnet" }
+[server]
+listen_address = "127.0.0.1"
+http_port = 5000
+proxy_port = 8888
+ws_include_bodies = false
 
-[[proxy.upstreams]]
-name    = "deepseek-pro"
-low     = { model = "deepseek-v4-flash" }
-default = { provider = "deepseek", model = "deepseek-v4-pro" }
-
-[[proxy.upstreams]]
-name    = "deepseek"
-mid     = { model = "deepseek-v4-flash" }
-low     = { model = "deepseek-v4-flash" }
-default = { provider = "deepseek", model = "deepseek-v4-pro" }
-
-[[proxy.upstreams]]
-name    = "deepseek-flash"
-default = { provider = "deepseek", model = "deepseek-v4-flash" }
-
-[[proxy.upstreams]]
-name    = "anthropic-fable"
-high    = { model = "claude-fable" }
-low     = { model = "claude-haiku" }
-default = { provider = "anthropic", model = "claude-sonnet" }
-effort  = "high"
-
-[[proxy.upstreams]]
-name    = "anthropic-sonnet5"
-default = { provider = "anthropic", model = "claude-sonnet5" }
-
-[[proxy.upstreams]]
-name    = "anthropic"
-high    = { model = "claude-opus" }
-low     = { model = "claude-haiku" }
-default = { provider = "anthropic", model = "claude-sonnet" }
-
-[[proxy.upstreams]]
-name    = "mix"
-high    = { provider = "anthropic", model = "claude-opus" }
-low     = { model = "deepseek-v4-flash" }
-default = { provider = "deepseek", model = "deepseek-v4-pro" }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# planx — 上游账号（两个家族 × 两种模式）
-#
-#   family = gpt     → ChatGPT / Codex
-#   family = claude  → Anthropic / Claude Code
-#   mode   = plan    → 订阅账号 OAuth（可刷新，自动补出站身份）
-#   mode   = api_key → 静态密钥
-#
-# 用法：给 provider 设 account = "<账号名>"（不要再设 token），
-#      需要时把上游指到该 provider：
-#        anthropic 走 active_upstream = "claude-plan"
-#        或直接把该账号设为 plan 连接：active_plan = "gpt-plan"（一次只有一个订阅生效）
-#
-# 注意：token 与 account 互斥；claude 不支持 auth_json / persist；
-#       账号支持热重载（面板改动或手改本文件都会被 ConfigWatcher 拾取）。
-# ─────────────────────────────────────────────────────────────────────────────
-# [[proxy.accounts]]
-# name      = "gpt-plan"          # GPT × plan
-# family    = "gpt"
-# mode      = "plan"
-# auth_json = "~/.codex/auth.json"
-# persist   = true                # 刷新后原子回写（0600，保留未知字段）
-# identity  = "codex_tui"         # codex_tui（默认）| codex_cli_rs | passthrough
-# cli_version = "0.159.2"         # 伪装的 CLI 版本；缺省 = 内置默认。
-#                                 上游模型清单按此版本门控：0.153.3 只给 7 个模型，
-#                                 0.159.2 给 10 个。缺省落后于本机 codex --version 时会在面板提示
-#
-# [[proxy.accounts]]
-# name    = "gpt-key"             # GPT × api_key
-# family  = "gpt"
-# mode    = "api_key"
-# api_key = "sk-..."
-#
-# [[proxy.accounts]]
-# name          = "claude-plan"   # Claude × plan
-# family        = "claude"
-# mode          = "plan"
-# refresh_token = "sk-ant-ort01-..."   # 或 access_token = "sk-ant-oat01-..."（setup-token）
-# identity      = "claude_code"   # claude_code（默认）| passthrough
-#
-# [[proxy.accounts]]
-# name    = "claude-key"          # Claude × api_key
-# family  = "claude"
-# mode    = "api_key"
-# api_key = "sk-ant-api03-..."
-#
-# 任意账号都可加 impersonate（需 --features impersonate）；
-# 验证画像是否真的生效：cargo run -p proxy-planx --features impersonate --example fingerprint
-# impersonate = "chrome"          # off | chrome | chrome142 | edge | firefox | safari
-#
-# [[proxy.providers]]
-# name      = "claude-plan"
-# url       = "https://api.anthropic.com"
-# protocols = ["anthropic"]
-# account   = "claude-plan"
-#
-# [[proxy.providers]]
-# name         = "gpt-plan"
-# url          = "https://chatgpt.com/backend-api/codex"
-# protocols    = ["codex"]
-# account      = "gpt-plan"
-# codex_url    = "https://chatgpt.com/backend-api/codex"
-#
-# [[proxy.upstreams]]
-# name    = "claude-plan"
-# default = { provider = "claude-plan", model = "claude-sonnet" }
-#
-# [[proxy.upstreams]]
-# name    = "gpt-plan"
-# default = { provider = "gpt-plan" }
+[logging]
+level = "info"

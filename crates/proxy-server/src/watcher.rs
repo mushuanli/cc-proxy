@@ -168,53 +168,42 @@ mod tests {
 
     fn header_config() -> &'static str {
         r#"
-[logging]
-level = "info"
-
-[server]
-listen_address = "127.0.0.1"
-http_port = 39901
-proxy_port = 39902
-
-[proxy]
 active_upstream = "local"
 active_proxy_upstream = "local"
-
-[[model_pricing]]
-id = "gpt-5"
-price = [3.0, 15.0]
-[model_pricing.providers]
-local = ["gpt-5"]
+model_pricing = [
+    { id = "gpt-5", price = [3.0, 15.0], providers = { local = ["gpt-5"] } },
+]
 "#
     }
 
     fn account_config(api_key: &str) -> String {
         format!(
             r#"
-[[proxy.accounts]]
-name    = "acct"
-family  = "gpt"
-mode    = "api_key"
-api_key = "{api_key}"
+accounts = [
+    {{ name = "acct", family = "gpt", mode = "api_key", api_key = "{api_key}" }},
+]
 "#
         ) + &provider_config(Some("acct"))
     }
 
     fn provider_config(account: Option<&str>) -> String {
-        let account = match account {
-            Some(name) => format!("account   = \"{name}\"\n"),
-            None => String::new(),
-        };
+        let account = account
+            .map(|name| format!(", account = \"{name}\""))
+            .unwrap_or_default();
         format!(
             r#"
-[[proxy.providers]]
-name      = "local"
-url       = "https://chatgpt.com/backend-api/codex"
-protocols = ["codex"]
-{account}
-[[proxy.upstreams]]
-name    = "local"
-default = {{ provider = "local", model = "gpt-5" }}
+providers = [
+    {{ name = "local", url = "https://chatgpt.com/backend-api/codex", protocols = ["codex"]{account} }},
+]
+upstreams = [
+    {{ name = "local", default = {{ provider = "local", model = "gpt-5" }} }},
+]
+[logging]
+level = "info"
+[server]
+listen_address = "127.0.0.1"
+http_port = 39901
+proxy_port = 39902
 "#
         )
     }
@@ -321,9 +310,10 @@ default = {{ provider = "local", model = "gpt-5" }}
             ConfigWatcher::new(store.clone(), empty_registry().await, temp.path.clone()).await;
 
         // Claude + plan + auth_json is rejected by validation.
-        let broken = format!(
-            "{}\n[[proxy.accounts]]\nname = \"bad\"\nfamily = \"claude\"\nmode = \"plan\"\nauth_json = \"x\"\n",
-            minimal_config("sk-keep")
+        let broken = minimal_config("sk-keep").replacen(
+            "accounts = [",
+            "accounts = [\n    { name = \"bad\", family = \"claude\", mode = \"plan\", auth_json = \"x\" },",
+            1,
         );
         temp.write(&broken).await;
 

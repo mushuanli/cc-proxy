@@ -179,39 +179,27 @@ Claude Code ──► :9999 MCP proxy
 ## Config Reference
 
 ```toml
-# config.toml
-[logging]
-level = "info"
+active_upstream = "woagent"
 
-[proxy]
-active_upstream = "deepseek"
-
-[[proxy.providers]]
-name = "deepseek"
-url = "https://api.deepseek.com/anthropic"
-token = "sk-xxx"
-
-[[proxy.providers.models]]
-id = "deepseek-v4-pro"
-price_per_million_input = 3.0
-price_per_million_cache_write = 3.75
-price_per_million_cache_read = 0.3
-price_per_million_output = 6.0
-
-[[proxy.upstreams]]
-name = "deepseek"
-default_provider = "deepseek"
-default_model = "deepseek-v4-pro"
-
-[proxy.upstreams.high]
-keywords = ["opus"]
-provider = "deepseek"
-model = "deepseek-v4-pro"
+providers = [
+    { name = "woagent", url = "https://ai.woagent.net", token = "sk-your-key", protocols = ["chat_completions"] },
+]
+accounts = []
+upstreams = [
+    { name = "woagent", default = { provider = "woagent", model = "KM-kimi-k2.6" } },
+]
+# Set the actual rates; 0.0 is a placeholder.
+model_pricing = [
+    { id = "KM-kimi-k2.6", price = [0.0, 0.0], providers = { woagent = ["KM-kimi-k2.6"] } },
+]
 
 [server]
+listen_address = "127.0.0.1"
 http_port = 5000
 proxy_port = 8888
-listen_address = "127.0.0.1"   # or 0.0.0.0 / :: to listen on every interface
+
+[logging]
+level = "info"
 ```
 
 See `config.toml.template` for detailed configuration.

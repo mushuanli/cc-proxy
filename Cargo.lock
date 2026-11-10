@@ -1405,6 +1405,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "proxy-bridge",
  "proxy-common",
  "proxy-session",
  "proxy-store",

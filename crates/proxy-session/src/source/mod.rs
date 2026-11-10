@@ -5,6 +5,7 @@
 //! request/SSE/response into normalized `Observation`s.
 
 pub mod anthropic;
+pub mod chat;
 pub mod codex;
 pub mod heuristic;
 pub mod hook;
@@ -61,7 +62,11 @@ pub trait ClientParser: Send + Sync {
     fn parse_sse(&self, ev: &proxy_common::SseEvent, context: &ParseContext) -> Vec<Observation>;
 
     /// Fallback for non-streaming responses: extract tool calls from the response body.
-    fn parse_response(&self, normalized: &NormalizedResponse, context: &ParseContext) -> Vec<Observation>;
+    fn parse_response(
+        &self,
+        normalized: &NormalizedResponse,
+        context: &ParseContext,
+    ) -> Vec<Observation>;
 
     /// Stateful stream parser: feed one parsed SSE JSON, return incremental
     /// metadata + observations. The default is stateless (no-op).
@@ -229,6 +234,19 @@ pub fn extract_tool_results(request_body: &str, session_id: &str) -> Vec<Observa
         "function_call_output",
         "call_id",
         "output",
+        session_id,
+    ));
+    // Chat tool results carry the call id on the message itself.
+    let chat_messages: Vec<Value> = value["messages"].as_array().into_iter().flatten()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| serde_json::json!({"role":"user","content":[{"type":"tool_result","tool_use_id":m["tool_call_id"],"content":m["content"]}]}))
+        .collect();
+    out.extend(extract_result_blocks(
+        &serde_json::json!({"messages":chat_messages}),
+        "messages",
+        "tool_result",
+        "tool_use_id",
+        "content",
         session_id,
     ));
     out

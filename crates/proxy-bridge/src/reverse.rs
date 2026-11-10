@@ -99,6 +99,7 @@ pub struct ResponsesStreamTranslator {
     sequence: u64,
     next_output_index: i64,
     open: Option<OpenItem>,
+    reasoning: Option<(i64, String, String)>,
     completed_items: Vec<Value>,
     input_tokens: u64,
     output_tokens: u64,
@@ -124,6 +125,7 @@ impl ResponsesStreamTranslator {
             sequence: 0,
             next_output_index: 0,
             open: None,
+            reasoning: None,
             completed_items: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
@@ -158,10 +160,16 @@ impl ResponsesStreamTranslator {
     }
 
     fn response_snapshot(&self, status: &str, output: Vec<Value>) -> Value {
+        let status = if status == "completed" {
+            completion_status(self.stop_reason.as_deref())
+        } else {
+            status
+        };
         json!({
             "id": self.response_id(),
             "object": "response",
             "status": status,
+            "incomplete_details": incomplete_details(self.stop_reason.as_deref()),
             "model": self.model,
             "output": output,
             "usage": self.usage(),
@@ -201,8 +209,69 @@ impl ResponsesStreamTranslator {
         );
     }
 
+    fn open_reasoning(&mut self, out: &mut Vec<Vec<u8>>) {
+        self.ensure_created(out);
+        self.close_item(out);
+        let index = self.next_output_index;
+        self.next_output_index += 1;
+        let id = format!("rs_{}", uuid::Uuid::now_v7().simple());
+        Self::emit(
+            out,
+            &mut self.sequence,
+            "response.output_item.added",
+            json!({"type":"response.output_item.added","output_index":index,"item":{"id":id,"type":"reasoning","summary":[]}}),
+        );
+        Self::emit(
+            out,
+            &mut self.sequence,
+            "response.reasoning_summary_part.added",
+            json!({"type":"response.reasoning_summary_part.added","output_index":index,"item_id":id,"summary_index":0,"part":{"type":"summary_text","text":""}}),
+        );
+        self.reasoning = Some((index, id, String::new()));
+    }
+    fn reasoning_delta(&mut self, out: &mut Vec<Vec<u8>>, delta: &str) {
+        if self.reasoning.is_none() {
+            self.open_reasoning(out);
+        }
+        let (index, id, text) = self.reasoning.as_mut().unwrap();
+        text.push_str(delta);
+        Self::emit(
+            out,
+            &mut self.sequence,
+            "response.reasoning_summary_text.delta",
+            json!({"type":"response.reasoning_summary_text.delta","output_index":index,"item_id":id,"summary_index":0,"delta":delta}),
+        );
+    }
+    fn close_reasoning(&mut self, out: &mut Vec<Vec<u8>>) {
+        let Some((index, id, text)) = self.reasoning.take() else {
+            return;
+        };
+        let part = json!({"type":"summary_text","text":text});
+        Self::emit(
+            out,
+            &mut self.sequence,
+            "response.reasoning_summary_text.done",
+            json!({"type":"response.reasoning_summary_text.done","output_index":index,"item_id":id,"summary_index":0,"text":text}),
+        );
+        Self::emit(
+            out,
+            &mut self.sequence,
+            "response.reasoning_summary_part.done",
+            json!({"type":"response.reasoning_summary_part.done","output_index":index,"item_id":id,"summary_index":0,"part":part}),
+        );
+        let item = json!({"id":id,"type":"reasoning","summary":[part]});
+        Self::emit(
+            out,
+            &mut self.sequence,
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","output_index":index,"item":item}),
+        );
+        self.completed_items.push(item);
+    }
+
     /// Close the open item, emitting its terminal events.
     fn close_item(&mut self, out: &mut Vec<Vec<u8>>) {
+        self.close_reasoning(out);
         let Some(item) = self.open.take() else {
             return;
         };
@@ -467,11 +536,16 @@ impl ResponsesStreamTranslator {
             snapshot["stop_reason"] = json!(self.responses_stop_reason());
             snapshot
         };
+        let event = if snapshot["status"] == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
         Self::emit(
             out,
             &mut self.sequence,
-            "response.completed",
-            json!({"type": "response.completed", "response": snapshot}),
+            event,
+            json!({"type": event, "response": snapshot}),
         );
     }
 
@@ -488,6 +562,12 @@ impl ResponsesStreamTranslator {
                     return;
                 };
                 match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "thinking" => {
+                        self.open_reasoning(out);
+                        if let Some(text) = block["thinking"].as_str().filter(|s| !s.is_empty()) {
+                            self.reasoning_delta(out, text);
+                        }
+                    }
                     "text" => self.open_message(out),
                     "tool_use" => {
                         // Anthropic normally sends the full `input` here; it is
@@ -514,6 +594,9 @@ impl ResponsesStreamTranslator {
                     return;
                 };
                 match delta.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "thinking_delta" => {
+                        self.reasoning_delta(out, delta["thinking"].as_str().unwrap_or(""));
+                    }
                     "text_delta" => {
                         let text = delta.get("text").and_then(Value::as_str).unwrap_or("");
                         self.text_delta(out, text);
@@ -595,6 +678,7 @@ impl ResponseTranslator for ResponsesStreamTranslator {
         for block in message.get("content")?.as_array()? {
             // One unrepresentable block must not discard the whole answer.
             match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                "thinking" => output.push(json!({"id":format!("rs_{}",uuid::Uuid::now_v7().simple()),"type":"reasoning","summary":[{"type":"summary_text","text":block["thinking"]}]})),
                 "text" => {
                     let text = block.get("text").and_then(Value::as_str).unwrap_or("");
                     if text.is_empty() {
@@ -652,10 +736,28 @@ impl ResponseTranslator for ResponsesStreamTranslator {
     }
 }
 
+fn completion_status(reason: Option<&str>) -> &'static str {
+    if matches!(reason, Some("max_tokens" | "refusal")) {
+        "incomplete"
+    } else {
+        "completed"
+    }
+}
+
+fn incomplete_details(reason: Option<&str>) -> Value {
+    match reason {
+        Some("max_tokens") => json!({"reason":"max_output_tokens"}),
+        Some("refusal") => json!({"reason":"content_filter"}),
+        _ => Value::Null,
+    }
+}
+
 /// Responses-shaped usage, built in one place so the live and fallback paths
 /// agree. `total_tokens` saturates: an upstream can report numbers that would
 /// otherwise overflow (a debug build would panic on plain addition).
 pub fn responses_usage(input_tokens: u64, output_tokens: u64, cache_read_tokens: u64) -> Value {
+    // Responses counts cached input inside the total; Anthropic reports it separately.
+    let input_tokens = input_tokens.saturating_add(cache_read_tokens);
     let mut usage = json!({
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -698,6 +800,23 @@ fn anthropic_error_message(message: &Value) -> Option<String> {
 /// Used when a client asked to stream but the upstream answered with a single
 /// JSON body.
 pub fn message_to_responses_events(message: &Value) -> Vec<Vec<u8>> {
+    if message["content"]
+        .as_array()
+        .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "thinking"))
+    {
+        let mut translator = ResponsesStreamTranslator::new();
+        let mut out = Vec::new();
+        for frame in crate::stream::message_to_sse(message) {
+            if let Some(data) = std::str::from_utf8(&frame)
+                .ok()
+                .and_then(|f| f.lines().find_map(|l| l.strip_prefix("data: ")))
+            {
+                out.extend(translator.push(data.as_bytes()));
+            }
+        }
+        return out;
+    }
+
     let response_id = message
         .get("id")
         .and_then(Value::as_str)
@@ -844,13 +963,21 @@ pub fn message_to_responses_events(message: &Value) -> Vec<Vec<u8>> {
         output_index += 1;
     }
 
-    let stop_reason = responses_stop_reason(message.get("stop_reason").and_then(Value::as_str));
+    let reason = message.get("stop_reason").and_then(Value::as_str);
+    let stop_reason = responses_stop_reason(reason);
+    let status = completion_status(reason);
+    let event = if status == "incomplete" {
+        "response.incomplete"
+    } else {
+        "response.completed"
+    };
     ResponsesStreamTranslator::emit(
         &mut out,
         &mut sequence,
-        "response.completed",
-        json!({"type": "response.completed", "response": {
-            "id": response_id, "object": "response", "status": "completed",
+        event,
+        json!({"type": event, "response": {
+            "id": response_id, "object": "response", "status": status,
+            "incomplete_details": incomplete_details(reason),
             "model": model, "output": output, "usage": usage, "stop_reason": stop_reason,
         }}),
     );
@@ -1129,7 +1256,7 @@ mod tests {
         assert_eq!(response["output"][1]["type"], "function_call");
         assert_eq!(response["output"][1]["call_id"], "toolu_2");
         assert_eq!(response["output"][1]["arguments"], "{\"pattern\":\"x\"}");
-        assert_eq!(response["usage"]["input_tokens"], 6);
+        assert_eq!(response["usage"]["input_tokens"], 7);
         assert_eq!(
             response["usage"]["input_tokens_details"]["cached_tokens"],
             1
@@ -1270,7 +1397,7 @@ mod tests {
         }));
         let completed = data_of(&frames).pop().unwrap();
         let usage = &completed["response"]["usage"];
-        assert_eq!(usage["total_tokens"], 4);
+        assert_eq!(usage["total_tokens"], 6);
         assert_eq!(usage["input_tokens_details"]["cached_tokens"], 2);
         assert!(usage.get("cache_read_input_tokens").is_none());
     }

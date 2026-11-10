@@ -2,14 +2,35 @@
 
 ## 配置结构
 
+配置文件采用顶层字段与数组，不再使用 `[proxy]`。`providers` 是服务商连接，`accounts` 是可选凭据，`upstreams` 是路由方案，`model_pricing` 是模型映射与费率；`http_proxy` 和 provider 的 `proxy` 才表示出站网络代理。
+
+```toml
+active_upstream = "woagent"
+
+providers = [
+    { name = "woagent", url = "https://ai.woagent.net", token = "sk-your-key", protocols = ["chat_completions"] },
+]
+accounts = []
+upstreams = [
+    { name = "woagent", default = { provider = "woagent", model = "KM-kimi-k2.6" } },
+]
+# 价格待填写；0.0 仅作为占位。
+model_pricing = [
+    { id = "KM-kimi-k2.6", price = [0.0, 0.0], providers = { woagent = ["KM-kimi-k2.6"] } },
+]
+
+[server]
+listen_address = "127.0.0.1"
+http_port = 5000
+proxy_port = 8888
+
+[logging]
+level = "info"
 ```
-AppConfig {
-    model_pricing: Vec<ModelPricing>,   // 全局模型定价（独立于 Provider）
-    proxy: ProxyConfig,
-    server: ServerConfig,
-    logging: LoggingConfig,
-}
-```
+
+每个列表使用普通数组，每个条目使用一行内联表；嵌套的 `default`、`high`、`mid`、`low` 和模型映射也使用内联表。顶层字段必须放在 `[server]` / `[logging]` 等表头之前，避免被 TOML 归入这些表。网页修改、自动落盘和手工编辑都使用同一格式。保存时会统一排版并生成分组注释，未知顶层字段与独立表仍保留；模型映射按服务商名称排序，使反复保存的结果稳定。
+
+读取不再兼容旧的 `[proxy]` 包装；遇到旧结构会明确报错。路由、凭据、模型与费率的含义不变。
 
 ### ModelPricing — 逻辑模型定价
 
@@ -34,9 +55,9 @@ Provider {
     url: String,                    // API base URL（如 https://api.anthropic.com）
     token: Option<String>,          // 以 "sk-" 开头用 Bearer，否则用 x-api-key
     proxy: Option<String>,          // 独立 HTTP/SOCKS5 代理；缺省继承全局 http_proxy
-    protocols: Vec<String>,         // 该 Provider 服务的协议（"anthropic" / "codex"）；空 = 全部
+    protocols: Vec<String>,         // 该 Provider 服务的协议（"anthropic" / "codex" / "chat_completions"）；空 = 全部
     codex_url: Option<String>,      // codex 协议专用端点；空 = 复用 url
-    account: Option<String>,        // 引用 [[proxy.accounts]] 的 name；与 token 互斥
+    account: Option<String>,        // 引用 accounts 的 name；与 token 互斥
     models_url: Option<String>,     // 覆盖模型目录地址（自建网关常用）
     models_kind: Option<String>,    // openai | anthropic | codex | gemini | manual；空 = 推断
 }
@@ -44,14 +65,14 @@ Provider {
 
 Provider 不再内嵌 models 字段。模型支持由 `ModelPricing.providers` 声明。
 
-> **持久化注意**：`proxy` 段落由 `config/persist.rs` **手写**字段序列化（不是 serde round-trip）。
-> 新增 Provider 字段时必须同步补 `write_proxy_section` 与读路径
+> **持久化注意**：顶层路由、provider 与账号字段由 `config/persist.rs` **手写**字段序列化（不是 serde round-trip）。
+> 新增 Provider 字段时必须同步补 `write_routing_settings` 与读路径
 > （`list_providers` / `ProviderInfo`），否则面板保存一次配置就会把该字段从
 > `config.toml` 里抹掉。`protocols` / `codex_url` /
 > `account` 曾长期存在这个问题，已修复并有回归测试。
 >
 > 与之配套的规则：**读路径缺字段 = 该字段在面板上不可见、不可编辑**，
-> 所以新增字段必须同时进 `write_proxy_section`、`list_providers` 和
+> 所以新增字段必须同时进 `write_routing_settings`、`list_providers` 和
 > `ProviderInfo`（`upstream_changed` 的 WS payload）。
 
 ### Account — 上游账号（planx）
@@ -88,48 +109,22 @@ AccountConfig {
 配置示例（四种组合）：
 
 ```toml
-# ── GPT × plan ──
-[[proxy.accounts]]
-name      = "gpt-sub"
-family    = "gpt"
-mode      = "plan"
-auth_json = "~/.codex/auth.json"
-persist   = true
-
-# ── GPT × api_key ──
-[[proxy.accounts]]
-name    = "gpt-key"
-family  = "gpt"
-mode    = "api_key"
-api_key = "sk-..."
-
-# ── Claude × plan ──
-[[proxy.accounts]]
-name          = "claude-sub"
-family        = "claude"
-mode          = "plan"
-refresh_token = "sk-ant-ort01-..."   # 或 access_token = "sk-ant-oat01-..."（setup-token，无 RT）
-
-# ── Claude × api_key ──
-[[proxy.accounts]]
-name    = "claude-key"
-family  = "claude"
-mode    = "api_key"
-api_key = "sk-ant-api03-..."
-
-# Provider 通过名字引用账号
-[[proxy.providers]]
-name      = "claude-plan"
-url       = "https://api.anthropic.com"
-protocols = ["anthropic"]
-account   = "claude-sub"
+accounts = [
+    { name = "gpt-sub", family = "gpt", mode = "plan", auth_json = "~/.codex/auth.json", persist = true },
+    { name = "gpt-key", family = "gpt", mode = "api_key", api_key = "sk-..." },
+    { name = "claude-sub", family = "claude", mode = "plan", refresh_token = "sk-ant-ort01-..." },
+    { name = "claude-key", family = "claude", mode = "api_key", api_key = "sk-ant-api03-..." },
+]
+providers = [
+    { name = "claude-plan", url = "https://api.anthropic.com", protocols = ["anthropic"], account = "claude-sub" },
+]
 ```
 
 校验规则（`AppConfig::validate`，任一条不满足即拒绝保存）：
 
 - 账号名唯一、非空、无首尾空白；`account` 引用必须存在；
 - `token` 与 `account` 互斥；
-- `protocols` 里的名字必须是已知协议（`anthropic` / `codex`，大小写与别名容错）；
+- `protocols` 里的名字必须是已知协议（`anthropic` / `codex` / `chat_completions`，大小写与别名容错）；
   Provider 声明的协议必须与所引用账号的 family 一致
   （`gpt` 账号只能给 `codex` Provider 用，反之亦然）；
 - `identity` / `impersonate` 必须是已知画像名，且 `identity` 不得跨家族
@@ -163,11 +158,10 @@ relay 的目标（「连到哪个上游」）有三种，`upstream` 与 `plan` �
 | 目标 | 由什么定义 | 路由 |
 |---|---|---|
 | `active_proxy_upstream` | upstream 名 / `__auto__` / `__forbid__` | 透明代理 |
-| **`active_plan`** | **`[[proxy.accounts]]` 的 name（订阅账号）** | **绕过 provider 与 tier，全部请求直连该账号的厂商端点** |
+| **`active_plan`** | **`accounts` 的 name（订阅账号）** | **绕过 provider 与 tier，全部请求直连该账号的厂商端点** |
 | `active_upstream` | upstream 名 | provider + tier 路由 + 模型翻译 |
 
 ```toml
-[proxy]
 active_plan = "gpt-plan"      # 非空 = plan 模式；留空 = 关闭（行为与以前完全一致）
 ```
 

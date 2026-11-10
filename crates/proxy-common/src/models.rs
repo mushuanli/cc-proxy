@@ -335,7 +335,7 @@ pub struct ProviderInfo {
     /// Codex-specific endpoint; absent = use `url` for codex too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_url: Option<String>,
-    /// Name of the `[[proxy.accounts]]` entry this provider authenticates with.
+    /// Name of the `accounts` entry this provider authenticates with.
     /// The write path (add/update) needs it too, so the read path must return it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,

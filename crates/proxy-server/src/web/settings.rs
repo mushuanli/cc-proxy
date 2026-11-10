@@ -1618,7 +1618,7 @@ pub async fn provider_models(
 
 /// Activate (or clear) the relay's **plan connection**.
 ///
-/// A plan is a peer of an upstream: named after a `[[proxy.accounts]]` entry, it
+/// A plan is a peer of an upstream: named after a `accounts` entry, it
 /// bypasses providers and tiers, sends every request to that account's vendor
 /// endpoint, and makes `GET /v1/models` report the plan's own models. An empty
 /// name clears it and returns the relay to upstream/tier routing.
@@ -1644,7 +1644,7 @@ pub async fn activate_plan(
             .any(|account| account.name == name);
         if !known {
             return err_response(&format!(
-                "'{name}' is not a configured account; a plan names a [[proxy.accounts]] entry"
+                "'{name}' is not a configured account; a plan names a accounts entry"
             ));
         }
     }

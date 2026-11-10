@@ -183,13 +183,6 @@ async fn proxy_handler(
         return local_models_response(&relay, request.headers()).await;
     }
 
-    // An OpenAI chat-completions client would otherwise be parsed as Anthropic,
-    // bridged to the plan and fail with "upstream returned no translatable body" —
-    // a message that says nothing about the actual problem. Say it instead.
-    if !is_transparent && uri.path().ends_with("/chat/completions") {
-        return unsupported_wire(uri.path());
-    }
-
     let headers = request.headers().clone();
     let body = match axum::body::to_bytes(request.into_body(), 32 * 1024 * 1024).await {
         Ok(body) => body,
@@ -206,35 +199,6 @@ async fn proxy_handler(
     } else {
         handle_reverse_proxy(relay, method, uri, headers, body).await
     }
-}
-
-/// Explain an unsupported client wire protocol in the shape the caller expects.
-///
-/// OpenAI clients read `error.message`, so a chat-completions client gets that
-/// shape and a usable hint rather than a bridged, untranslatable upstream error.
-fn unsupported_wire(path: &str) -> Response<Body> {
-    let doubled = path.starts_with("/v1/v1/");
-    let hint = if doubled {
-        " Also note the request path is /v1/v1/…: the client's base URL already includes /v1, so drop it."
-    } else {
-        ""
-    };
-    tracing::warn!("[relay] rejecting unsupported client protocol at {path}");
-    let body = serde_json::json!({
-        "error": {
-            "message": format!(
-                "cc-proxy serves the Anthropic Messages API (/v1/messages) and the OpenAI \
-                 Responses API (/v1/responses); /v1/chat/completions is not implemented.{hint}"
-            ),
-            "type": "invalid_request_error",
-            "code": "unsupported_wire_protocol",
-        }
-    });
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 /// Answer `GET /v1/models` from the local configuration.
@@ -286,7 +250,9 @@ async fn local_models_response(relay: &RelayHandler, headers: &HeaderMap) -> Res
 
     let body = match shape {
         upstream::ApiProtocol::Anthropic => upstream::anthropic_models_body(&models),
-        upstream::ApiProtocol::Codex => upstream::openai_models_body(&models),
+        upstream::ApiProtocol::Codex | upstream::ApiProtocol::ChatCompletions => {
+            upstream::openai_models_body(&models)
+        }
     };
     tracing::info!("[models] answered {} model(s) from {source}", models.len());
     Response::builder()
@@ -404,7 +370,7 @@ struct UpstreamPlan {
     base_url: String,
     /// Static provider token, absent in auto-detect mode.
     token: Option<String>,
-    /// `[[proxy.accounts]]` name, when the provider names one.
+    /// `accounts` name, when the provider names one.
     account: Option<String>,
     /// Protocol the upstream will actually receive.
     protocol: upstream::ApiProtocol,
@@ -523,7 +489,7 @@ async fn plan_connection(
     let Some(endpoint) = relay.account_auth.plan_endpoint(account) else {
         return Err(Box::new(bad_gateway(format!(
             "Plan connection '{account}' is not a configured account (it names a \
-             [[proxy.accounts]] entry, not an upstream)"
+             accounts entry, not an upstream)"
         ))));
     };
     if relay.account_auth.resolve_account(account).is_none() {
@@ -537,6 +503,9 @@ async fn plan_connection(
     let target = match endpoint.protocol {
         proxy_common::protocol::WireProtocol::Anthropic => upstream::ApiProtocol::Anthropic,
         proxy_common::protocol::WireProtocol::Codex => upstream::ApiProtocol::Codex,
+        proxy_common::protocol::WireProtocol::ChatCompletions => {
+            upstream::ApiProtocol::ChatCompletions
+        }
     };
     let bridge = if target == request.protocol {
         None
@@ -809,12 +778,6 @@ async fn proxy_request(
         config_snapshot.proxy.http_proxy.as_ref(),
     );
 
-    // ── Effort injection ──
-    let effort = route.effort.clone().unwrap_or_default();
-    if !is_transparent && !effort.is_empty() && effort != "auto" {
-        upstream::inject_effort(&mut body_json, &effort);
-    }
-
     // ── Model name translation ──
     // Replace the original model name with the provider-specific resolved name
     // so the upstream receives the correct model identifier.
@@ -885,6 +848,11 @@ async fn proxy_request(
                     response_translator = plan
                         .adapter
                         .response_translator(source, plan.target.to_wire());
+                    if let Some(translator) = response_translator.as_mut() {
+                        translator.configure_client(
+                            client_body.as_deref().unwrap_or_default().as_bytes(),
+                        );
+                    }
                     tracing::info!(
                         "[{}] bridging {} -> {} for provider '{}'",
                         sid_short,
@@ -911,6 +879,20 @@ async fn proxy_request(
         }
     }
 
+    // Apply route effort in the actual upstream format, after request translation.
+    let effort = route.effort.clone().unwrap_or_default();
+    if !is_transparent && !effort.is_empty() && effort != "auto" {
+        match upstream_protocol {
+            upstream::ApiProtocol::Anthropic => upstream::inject_effort(&mut body_json, &effort),
+            upstream::ApiProtocol::Codex => {
+                body_json["reasoning"]["effort"] = serde_json::json!(effort)
+            }
+            upstream::ApiProtocol::ChatCompletions => {
+                body_json["reasoning_effort"] = serde_json::json!(effort)
+            }
+        }
+    }
+
     if chatgpt_backend {
         upstream::normalize_codex_backend_body(&mut body_json);
     }
@@ -928,6 +910,11 @@ async fn proxy_request(
             .map(|plan| plan.path)
             .unwrap_or(path_or_url)
             .trim_start_matches('/');
+        let path = if base.ends_with("/v1") {
+            path.strip_prefix("v1/").unwrap_or(path)
+        } else {
+            path
+        };
         format!("{}/{}", base, path)
     };
 
@@ -959,7 +946,7 @@ async fn proxy_request(
     let mut upstream_headers =
         upstream::build_upstream_headers_with_auth(&headers, upstream_auth.as_ref());
     // Effort beta header
-    if !is_transparent {
+    if !is_transparent && upstream_protocol == upstream::ApiProtocol::Anthropic {
         if let Some(effort_val) = route.effort.as_ref() {
             if !effort_val.is_empty() && effort_val != "auto" {
                 upstream_headers.insert(
@@ -1235,11 +1222,12 @@ async fn proxy_request(
     // ── Parse response ──
     let upstream_response: upstream::UpstreamResponse;
 
-    if !is_streaming {
+    // HTTP errors carry JSON even when the client requested SSE. Preserve their details.
+    if !is_streaming || !response.status().is_success() {
         upstream_response = upstream::handle_non_streaming_response(
             response,
             start,
-            upstream_protocol,
+            protocol,
             response_translator.take(),
         )
         .await;
@@ -1258,6 +1246,8 @@ async fn proxy_request(
         );
         let client_resp = Response::builder()
             .status(stream.status_code)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
             .body(stream.body)
             .unwrap();
         let stream_meta = stream.metadata;
@@ -2030,7 +2020,7 @@ fn strip_body_to_last_user_message(body: &str) -> Option<String> {
 fn client_type(protocol: upstream::ApiProtocol) -> ClientType {
     match protocol {
         upstream::ApiProtocol::Anthropic => ClientType::ClaudeCode,
-        upstream::ApiProtocol::Codex => ClientType::Codex,
+        upstream::ApiProtocol::Codex | upstream::ApiProtocol::ChatCompletions => ClientType::Codex,
     }
 }
 

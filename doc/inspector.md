@@ -650,47 +650,19 @@ dispatch_upstream(client, url, headers, body, timeout, retries)
 ### 10.5 路由配置示例
 
 ```toml
-[proxy]
 active_upstream = "production"
 active_effort = "auto"
-
-[[proxy.providers]]
-name = "anthropic"
-url = "https://api.anthropic.com"
-token = "sk-ant-xxx"
-
-[[proxy.providers]]
-name = "openrouter"
-url = "https://openrouter.ai/api"
-token = "sk-or-xxx"
-
-[[proxy.upstreams]]
-name = "production"
-
-[proxy.upstreams.high]
-keywords = ["claude-opus", "claude-sonnet"]
-provider = "anthropic"
-model = "claude-sonnet"  # logical ModelPricing id → 翻译为 claude-sonnet-4-6
-
-[proxy.upstreams.mid]
-keywords = ["claude-haiku"]
-provider = "anthropic"
-model = "claude-haiku"
-
-[proxy.upstreams.default]
-keywords = []
-provider = "openrouter"
-model = ""  # 透传原始模型名
-
-[[model_pricing]]
-id = "claude-sonnet"
-price = [3.0, 15.0, 3.75, 0.3]
-providers.anthropic = ["claude-sonnet-4-6"]
-
-[[model_pricing]]
-id = "claude-haiku"
-price = [0.8, 4.0, 1.0, 0.08]
-providers.anthropic = ["claude-haiku-4-5"]
+providers = [
+    { name = "anthropic", url = "https://api.anthropic.com", token = "sk-ant-xxx", protocols = ["anthropic"] },
+    { name = "openrouter", url = "https://openrouter.ai/api", token = "sk-or-xxx", protocols = ["chat_completions"] },
+]
+upstreams = [
+    { name = "production", high = { provider = "anthropic", model = "claude-sonnet" }, low = { provider = "anthropic", model = "claude-haiku" }, default = { provider = "openrouter", model = "" } },
+]
+model_pricing = [
+    { id = "claude-sonnet", price = [3.0, 15.0, 3.75, 0.3], providers = { anthropic = ["claude-sonnet-4-6"] } },
+    { id = "claude-haiku", price = [0.8, 4.0, 1.0, 0.08], providers = { anthropic = ["claude-haiku-4-5"] } },
+]
 ```
 
 ### 10.6 前端 Upstream UI 模块

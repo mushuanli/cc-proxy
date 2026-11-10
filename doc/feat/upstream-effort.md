@@ -89,7 +89,7 @@ if let Some(existing) = headers.get("anthropic-beta")... {
 
 ### 配置持久化
 
-`active_effort` 写入 `config.toml` 的 `[proxy]` 段。旧配置无此字段时 serde default 为 `"auto"`。
+`active_effort` 写入 `config.toml` 顶层。旧配置无此字段时 serde default 为 `"auto"`。
 
 ### API 端点
 

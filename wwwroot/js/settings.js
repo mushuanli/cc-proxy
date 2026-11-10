@@ -69,6 +69,7 @@ function accountProtocolProblem(pop) {
     const protocols = [];
     if (pop.querySelector('.mx-pop-proto-a')?.checked) protocols.push('anthropic');
     if (pop.querySelector('.mx-pop-proto-c')?.checked) protocols.push('codex');
+    if (pop.querySelector('.mx-pop-proto-chat')?.checked) protocols.push('chat_completions');
     // Empty protocols = serves everything, so anything is compatible.
     if (protocols.length === 0) return null;
     const wanted = account.family === 'claude' ? 'anthropic' : 'codex';
@@ -441,6 +442,7 @@ function providerPopoverHtml(title, p) {
             <div class="pe-protocols mx-pop-protocols">
                 <label><input type="checkbox" class="mx-pop-proto-a" ${(p?.protocols || []).includes('anthropic') ? 'checked' : ''}> ${t('settings.proto_anthropic')}</label>
                 <label><input type="checkbox" class="mx-pop-proto-c" ${(p?.protocols || []).includes('codex') ? 'checked' : ''}> ${t('settings.proto_codex')}</label>
+                <label><input type="checkbox" class="mx-pop-proto-chat" ${(p?.protocols || []).includes('chat_completions') ? 'checked' : ''}> Chat Completions</label>
             </div>
             <div class="pe-hint">${esc(tOr('settings.protocols_hint', 'Leave empty to serve every protocol. Selecting an account ticks the matching one for you.'))}</div>
             <label class="mx-pop-field-label">Codex URL</label>
@@ -572,6 +574,7 @@ function openProviderHeaderPopover(th) {
         const protocols = [];
         if (pop.querySelector('.mx-pop-proto-a')?.checked) protocols.push('anthropic');
         if (pop.querySelector('.mx-pop-proto-c')?.checked) protocols.push('codex');
+        if (pop.querySelector('.mx-pop-proto-chat')?.checked) protocols.push('chat_completions');
         body.protocols = protocols;
         const resp = await fetch(`/api/providers/${encodeURIComponent(provName)}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -604,6 +607,7 @@ export function openAddProviderPopover() {
             <div class="pe-protocols mx-pop-protocols">
                 <label><input type="checkbox" class="mx-pop-proto-a"> ${t('settings.proto_anthropic')}</label>
                 <label><input type="checkbox" class="mx-pop-proto-c"> ${t('settings.proto_codex')}</label>
+                <label><input type="checkbox" class="mx-pop-proto-chat"> Chat Completions</label>
             </div>
             <div class="pe-hint">${esc(tOr('settings.protocols_hint', 'Leave empty to serve every protocol. Selecting an account ticks the matching one for you.'))}</div>
             <label class="mx-pop-field-label">Codex URL (optional)</label>
@@ -647,6 +651,7 @@ export function openAddProviderPopover() {
         const protocols = [];
         if (pop.querySelector('.mx-pop-proto-a')?.checked) protocols.push('anthropic');
         if (pop.querySelector('.mx-pop-proto-c')?.checked) protocols.push('codex');
+        if (pop.querySelector('.mx-pop-proto-chat')?.checked) protocols.push('chat_completions');
         if (protocols.length > 0) body.protocols = protocols;
         const resp = await fetch('/api/providers', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -771,6 +776,7 @@ export function openProviderEdit(name) {
                 <div class="pe-protocols">
                     <label><input type="checkbox" id="pe-proto-anthropic" ${(p.protocols || []).includes('anthropic') ? 'checked' : ''}> ${t('settings.proto_anthropic')}</label>
                     <label><input type="checkbox" id="pe-proto-codex" ${(p.protocols || []).includes('codex') ? 'checked' : ''}> ${t('settings.proto_codex')}</label>
+                    <label><input type="checkbox" id="pe-proto-chat_completions" ${(p.protocols || []).includes('chat_completions') ? 'checked' : ''}> Chat Completions</label>
                     <div class="pe-protocols-hint">${t('settings.proto_hint')}</div>
                 </div>
             </div>
@@ -788,12 +794,13 @@ export function openProviderEdit(name) {
         const syncCodexUrlVisibility = () => {
             if (codexUrlGroup && cbCodex) {
                 // Show codex URL when codex is checked OR neither is checked (all protocols)
-                const allOther = cbAnthropic && !cbAnthropic.checked;
+                const allOther = cbAnthropic && !cbAnthropic.checked && !accordion.querySelector('#pe-proto-chat_completions')?.checked;
                 codexUrlGroup.style.display = (cbCodex.checked || allOther) ? '' : 'none';
             }
         };
         if (cbCodex) cbCodex.addEventListener('change', syncCodexUrlVisibility);
         if (cbAnthropic) cbAnthropic.addEventListener('change', syncCodexUrlVisibility);
+        accordion.querySelector('#pe-proto-chat_completions')?.addEventListener('change', syncCodexUrlVisibility);
         accordion.querySelector('#pe-url').focus();
     } else {
         closeProviderEditAccordion();
@@ -831,11 +838,11 @@ export async function saveProvider() {
     if (codexUrl) body.codex_url = codexUrl;
 
     // Collect selected protocols (omit when none selected = serve all).
-    const protoEls = ['pe-proto-anthropic', 'pe-proto-codex'];
+    const protoEls = ['pe-proto-anthropic', 'pe-proto-codex', 'pe-proto-chat_completions'];
     const protocols = protoEls
         .filter(id => document.getElementById(id)?.checked)
-        .map(id => id === 'pe-proto-anthropic' ? 'anthropic' : 'codex');
-    if (protocols.length > 0) body.protocols = protocols;
+        .map(id => id.slice('pe-proto-'.length));
+    body.protocols = protocols;
 
     let resp;
     if (state.providerEditMode === 'add') {

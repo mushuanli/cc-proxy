@@ -370,7 +370,12 @@ impl AnthropicStreamTranslator {
             return;
         };
         if let Some(value) = usage.get("input_tokens").and_then(Value::as_u64) {
-            self.input_tokens = value;
+            self.input_tokens = value.saturating_sub(
+                usage
+                    .pointer("/input_tokens_details/cached_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            );
         }
         if let Some(value) = usage.get("output_tokens").and_then(Value::as_u64) {
             self.output_tokens = value;
@@ -719,6 +724,11 @@ pub fn message_to_sse(message: &Value) -> Vec<Vec<u8>> {
                                      "text": block.get("text").and_then(Value::as_str).unwrap_or("")}}),
                 ));
             }
+            "thinking" => {
+                out.push(AnthropicStreamTranslator::frame("content_block_start",json!({"type":"content_block_start","index":index,"content_block":{"type":"thinking","thinking":""}})));
+                out.push(AnthropicStreamTranslator::frame("content_block_delta",json!({"type":"content_block_delta","index":index,"delta":{"type":"thinking_delta","thinking":block["thinking"]}})));
+                out.push(AnthropicStreamTranslator::frame("content_block_delta",json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":block.get("signature").cloned().unwrap_or_else(||json!(""))}})));
+            }
             "tool_use" => {
                 out.push(AnthropicStreamTranslator::frame(
                     "content_block_start",
@@ -856,7 +866,7 @@ mod tests {
         assert_eq!(payloads[3]["delta"]["text"], "lo");
         assert_eq!(payloads[5]["delta"]["stop_reason"], "end_turn");
         // The terminal event carries the authoritative totals.
-        assert_eq!(payloads[5]["usage"]["input_tokens"], 11);
+        assert_eq!(payloads[5]["usage"]["input_tokens"], 6);
         assert_eq!(payloads[5]["usage"]["output_tokens"], 3);
         assert_eq!(payloads[5]["usage"]["cache_read_input_tokens"], 5);
     }
@@ -1093,7 +1103,7 @@ mod tests {
         assert_eq!(message["content"][1]["id"], "c9");
         assert_eq!(message["content"][1]["input"]["pattern"], "x");
         assert_eq!(message["stop_reason"], "tool_use");
-        assert_eq!(message["usage"]["input_tokens"], 7);
+        assert_eq!(message["usage"]["input_tokens"], 5);
         assert_eq!(message["usage"]["cache_read_input_tokens"], 2);
     }
 

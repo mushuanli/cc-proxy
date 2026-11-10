@@ -17,7 +17,7 @@ pub struct Provider {
     /// `Some(url)` = use this proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
-    /// Protocols this provider serves (`anthropic` / `codex`).
+    /// Protocols this provider serves (`anthropic` / `codex` / `chat_completions`).
     /// Empty/missing = serves all protocols (backward compatible).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub protocols: Vec<String>,
@@ -26,7 +26,7 @@ pub struct Provider {
     /// Empty = use `url` for codex too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_url: Option<String>,
-    /// Name of a `[[proxy.accounts]]` entry to authenticate with.
+    /// Name of a `accounts` entry to authenticate with.
     ///
     /// When set, `token` is ignored for this provider and the credential is
     /// produced by the injected account mechanism (`proxy-planx`), in either
