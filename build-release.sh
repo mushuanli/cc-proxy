@@ -219,7 +219,10 @@ build_arch() {
         # Native target uses plain cargo; anything else needs zigbuild
         if [[ "$target" == "$HOST_TRIPLE" ]]; then
             echo "  [BUILD] cargo build -p proxy-server --release --target $target"
-            cargo build -p proxy-server --release --target "$target"
+            if ! cargo build -p proxy-server --release --target "$target"; then
+                echo "  [ERROR] build failed for $target"
+                return 1
+            fi
         else
             if ! command -v cargo-zigbuild &>/dev/null; then
                 echo "  [ERROR] cargo-zigbuild required for cross-compilation"
@@ -228,7 +231,12 @@ build_arch() {
                 return 1
             fi
             echo "  [BUILD] cargo zigbuild -p proxy-server --release --target $target"
-            cargo zigbuild -p proxy-server --release --target "$target"
+            # Failure must abort: a stale binary from a previous run would
+            # otherwise be packaged and published as if it were current.
+            if ! cargo zigbuild -p proxy-server --release --target "$target"; then
+                echo "  [ERROR] build failed for $target"
+                return 1
+            fi
         fi
     else
         echo "  [SKIP] build"
