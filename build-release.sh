@@ -34,7 +34,9 @@ _register() {
 }
 
 _register "darwin-arm64"   "aarch64-apple-darwin"     "zip"
-_register "linux-x86_64"   "x86_64-unknown-linux-gnu" "tar.gz"
+# Static musl: the linux artifact runs on any glibc version, including older
+# servers where a gnu build fails with `GLIBC_2.xx not found`.
+_register "linux-x86_64"   "x86_64-unknown-linux-musl" "tar.gz"
 _register "windows-x86_64" "x86_64-pc-windows-gnu"    "zip"
 
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
